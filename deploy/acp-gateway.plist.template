@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  GENERATED FILE — do not install this template directly. It is the input to
+  `make install-mac`, which substitutes the @TOKENS@ below and writes the
+  result to ~/Library/LaunchAgents/<label>.plist. Edit the template (or pass
+  Makefile vars like MAC_LABEL / MAC_LEDGER_DIR), then re-run `make install-mac`.
+
+  Note: no auth token lives here. start.sh sources the repo .env (chmod 600)
+  for ACPG_AUTH_USER / ACPG_AUTH_TOKEN, so secrets stay out of this world-
+  readable plist.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>@LABEL@</string>
+
+  <!-- Run start.sh, which sources the repo .env and exec's node dist/gateway.js. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@REPO@/start.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@REPO@</string>
+
+  <!-- launchd starts with a near-empty PATH and no nvm/homebrew: @PATH@ is
+       generated to include the active node bin dir (so the agents run) plus
+       /opt/homebrew/bin (so the openssl CLI for self-signed TLS resolves).
+       ACPG_LEDGER_DIR overrides the Linux /data default with a macOS path;
+       .env still wins if it sets these (start.sh sources .env after this env). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@PATH@</string>
+    <key>ACPG_LEDGER_DIR</key>
+    <string>@LEDGER@</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart if it dies; throttle to avoid hammering on a misconfig crash-loop. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>@LOG@</string>
+  <key>StandardErrorPath</key>
+  <string>@ERRLOG@</string>
+</dict>
+</plist>

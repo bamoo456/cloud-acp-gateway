@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Console split — React SPA + multi-client bridge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#fafafa;--panel:#fff;--ink:#0f172a;--ink-soft:#475569;--ink-faint:#94a3b8;
+    --rule:#e2e8f0;--rule-soft:#f1f5f9;
+    --accent:#1e40af;--accent-bg:#eff6ff;--unsafe:#be123c;--unsafe-bg:#ffe4e6;
+    --safe:#15803d;--safe-bg:#dcfce7;--engine:#c2410c;--engine-bg:#ffedd5;
+    --sample:#7c3aed;--sample-bg:#ede9fe;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    font-size:18px;line-height:1.6;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px;}
+  code,.mono{font-family:'JetBrains Mono',ui-monospace,monospace;}
+  .slide{padding:64px 0;border-bottom:1px solid var(--rule);}
+  .kicker{font-family:'JetBrains Mono',monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-faint);display:flex;align-items:center;gap:8px;margin-bottom:14px;}
+  .kicker .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);}
+  h1{font-size:clamp(40px,6vw,60px);line-height:1.05;letter-spacing:-.02em;margin:0 0 16px;font-weight:800;}
+  h2{font-size:clamp(30px,4vw,44px);line-height:1.1;letter-spacing:-.02em;margin:0 0 24px;font-weight:700;}
+  h2 em{font-style:normal;color:var(--accent);}
+  p{margin:0 0 14px;} .soft{color:var(--ink-soft);}
+  .bullets{list-style:none;padding:0;margin:18px 0;}
+  .bullets li{padding:8px 0 8px 28px;position:relative;border-bottom:1px solid var(--rule-soft);}
+  .bullets li:before{content:"▸";position:absolute;left:4px;color:var(--accent);}
+  .bullets strong{font-weight:700;}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;font-family:'JetBrains Mono',monospace;font-size:12.5px;}
+  .meta span{background:var(--panel);border:1px solid var(--rule);border-radius:999px;padding:5px 12px;color:var(--ink-soft);}
+  .callout{background:var(--accent-bg);border:1px solid #bfdbfe;border-radius:14px;padding:16px 18px;margin:22px 0;}
+  .callout .head{font-family:'JetBrains Mono',monospace;font-size:12.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:6px;}
+  .callout.warn{background:var(--engine-bg);border-color:#fed7aa;} .callout.warn .head{color:var(--engine);}
+  .callout.safe{background:var(--safe-bg);border-color:#bbf7d0;} .callout.safe .head{color:var(--safe);}
+  .callout p{margin:0;font-size:16px;}
+  .card{background:var(--panel);border:1px solid var(--rule);border-radius:16px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.04);}
+  .tldr{border-left:4px solid var(--accent);}
+  table.compare{width:100%;border-collapse:collapse;margin:8px 0 4px;background:var(--panel);border:1px solid var(--rule);border-radius:12px;overflow:hidden;}
+  table.compare th,table.compare td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--rule-soft);vertical-align:top;font-size:15.5px;}
+  table.compare th{font-family:'JetBrains Mono',monospace;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-faint);background:var(--rule-soft);}
+  table.compare .col-cap{font-weight:700;width:30%;}
+  .cap-explain{display:block;font-weight:400;font-size:13px;line-height:1.45;color:var(--ink-soft);margin-top:4px;}
+  .yes{color:var(--safe);font-weight:600;} .no{color:var(--unsafe);font-weight:600;}
+  .phase-row{display:flex;gap:14px;align-items:flex-start;padding:14px 0;border-bottom:1px solid var(--rule-soft);}
+  .phase-n{font-family:'JetBrains Mono',monospace;font-weight:700;color:#fff;background:var(--accent);border-radius:10px;min-width:34px;height:34px;display:grid;place-items:center;flex:0 0 auto;}
+  .phase-n.p2{background:var(--sample);} .phase-n.p3{background:var(--engine);}
+  .phase-row .t{font-weight:700;} .phase-row .d{color:var(--ink-soft);font-size:15px;}
+  .pill{font-family:'JetBrains Mono',monospace;font-size:11px;border:1px solid var(--rule);border-radius:999px;padding:2px 9px;color:var(--ink-soft);}
+  .layers{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0;}
+  .layer{background:var(--panel);border:1px solid var(--rule);border-radius:12px;padding:14px 16px;}
+  .layer h4{margin:0 0 6px;font-size:15px;} .layer code{font-size:12.5px;color:var(--accent);}
+  .layer p{font-size:14px;color:var(--ink-soft);margin:0;}
+  pre.tree{background:#0f172a;color:#e2e8f0;border-radius:14px;padding:18px 20px;overflow:auto;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.7;}
+  pre.tree .c{color:#7dd3fc;} pre.tree .m{color:#fcd34d;}
+  /* simulator */
+  .sim{background:var(--panel);border:1px solid var(--rule);border-radius:16px;padding:20px;margin:20px 0;}
+  .sim .picks{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px;}
+  .sim .picks button{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;padding:9px 13px;border-radius:10px;border:1px solid var(--rule);background:var(--bg);color:var(--ink-soft);cursor:pointer;}
+  .sim .picks button.on{background:var(--ink);color:#fff;border-color:var(--ink);}
+  .sim .status{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--ink-soft);min-height:20px;margin:12px 2px 4px;}
+  .sim .status .step{color:var(--accent);font-weight:700;}
+  svg .node{fill:var(--panel);stroke:var(--rule);stroke-width:1.5;}
+  svg .nlabel{font-family:'JetBrains Mono',monospace;font-size:12px;fill:var(--ink);font-weight:600;}
+  svg .nsub{font-family:'JetBrains Mono',monospace;font-size:9.5px;fill:var(--ink-faint);}
+  svg .edge{stroke:var(--rule);stroke-width:2;fill:none;}
+  svg .edge.bc{stroke:var(--safe);} svg .edge.pt{stroke:var(--sample);} svg .edge.pm{stroke:var(--engine);}
+  svg .edge.on{stroke-dasharray:6 4;animation:dash 1s linear infinite;}
+  @keyframes dash{to{stroke-dashoffset:-20;}}
+  .pulse{fill:var(--accent);}
+  .legend{display:flex;flex-wrap:wrap;gap:16px;font-size:13px;color:var(--ink-soft);margin-top:10px;font-family:'JetBrains Mono',monospace;}
+  .legend i{width:18px;height:3px;display:inline-block;border-radius:2px;vertical-align:middle;margin-right:5px;}
+  .footer{padding:40px 0 80px;color:var(--ink-faint);font-size:14px;}
+</style>
+</head>
+<body>
+
+<section class="slide" style="border-bottom:none;padding-bottom:30px;">
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>cloud-acp-gateway · design</div>
+    <h1>把 console 拆成<br><em>React SPA + 多-client bridge</em></h1>
+    <p class="soft" style="font-size:20px;max-width:680px;">把 1500 行的 <code>console.html</code> 演進成正規前後端,目標是<strong>多裝置同時連線</strong>、管理多個 agent、未來能 review agent 變更。</p>
+    <div class="meta">
+      <span>frontend · Vite + React + TS</span><span>backend · long-lived Node bridge</span>
+      <span>no Next · no SSR</span><span>1 PR · review later</span>
+    </div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>§ 01 — 為什麼</div>
+    <h2>三個需求,真正的 driver 是<em>多裝置</em>。</h2>
+    <div class="card tldr" style="margin-bottom:18px;">
+      <strong>關鍵洞察:</strong> 「多裝置」是<strong>後端</strong>問題——現在 bridge 硬性「同時只一個 client」,手機一連電腦就被踢(<code>4000 superseded</code>)。React/Next 解不了它。
+    </div>
+    <ul class="bullets">
+      <li><strong>① 管理多個 Claude agents</strong> — 已部分支援(agents.json + folder picker)。</li>
+      <li><strong>② 多裝置同時連線(電腦 + 手機)</strong> — ⚠️ 後端要重做連線模型。這才是核心。</li>
+      <li><strong>③ 未來 review agent changes</strong> — 建在既有的 tool-diff / 權限流程上。</li>
+    </ul>
+    <div class="callout"><div class="head">▸ 結論</div><p>「React + Next」是手段;真正要的是 <strong>(a) 多-client 後端 + (b) 可維護的 UI</strong>。</p></div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>§ 02 — 技術決定</div>
+    <h2>Vite React SPA <em>+</em> 長駐 Node bridge。不用 Next。</h2>
+    <table class="compare">
+      <tr><th>層</th><th>選擇</th><th>為什麼</th></tr>
+      <tr>
+        <td class="col-cap">前端<span class="cap-explain">使用者介面</span></td>
+        <td><span class="yes">Vite + React + TS（SPA）</span></td>
+        <td>私有、需登入、WS 即時工具 → 沒有 SEO/首屏/server-fetch 好處,<strong>SSR 買不到東西</strong>。Vite 產靜態檔,bridge 服務(跟現在服務 console.html 同招)。</td>
+      </tr>
+      <tr>
+        <td class="col-cap">後端<span class="cap-explain">ACP relay</span></td>
+        <td><span class="yes">演進現有 Node bridge</span></td>
+        <td>核心是<strong>活的記憶體物件</strong>:WS 連線、spawn 的 <code>claude</code> 子進程(握 stdio)、ledger buffer——DB 存不了、要一支長駐 process。Next 的賣點這裡用不到,WS 還得 custom server。</td>
+      </tr>
+      <tr>
+        <td class="col-cap">SQLite<span class="cap-explain">持久化狀態</span></td>
+        <td><span class="no">延到 Phase 3</span></td>
+        <td>多-client 路由是<strong>記憶體邏輯,DB 取代不了</strong>;ledger 用 per-session 檔即可。SQLite 等 review state 才值得引入(注意:<code>node:sqlite</code> 需 Node ≥22,pod 是 20)。</td>
+      </tr>
+    </table>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>§ 03 — 多裝置模型 C</div>
+    <h2>各自獨立,<em>看同一 session 就同步</em>。</h2>
+    <div class="layers">
+      <div class="layer"><h4>各自獨立</h4><p>Laptop 看 session A、Phone 看 session B → 互不干擾,bridge 多工處理。</p></div>
+      <div class="layer"><h4>同 session 同步</h4><p>兩台都看 session A → 都收到串流回覆、都能送 → 像共筆。</p></div>
+    </div>
+    <p class="soft" style="font-size:15px;"><strong>session</strong> = 一串 ACP 對話(<code>session/new</code> 建立,有自己的歷史 + 一個 claude 子進程),就是 Conversations 列表裡的一筆。</p>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>§ 04 — 一個 PR</div>
+    <h2>一個 PR,內部分兩階段。<em>review 之後另開</em>。</h2>
+    <div class="card">
+      <div class="phase-row"><span class="phase-n">1</span><div><div class="t">Stage 1 · 後端 multi-client 多工器</div><div class="d">透明 relay + 單一 client → session-aware 多工器。多裝置的根本。</div></div></div>
+      <div class="phase-row" style="border-bottom:none;"><span class="phase-n p2">2</span><div><div class="t">Stage 2 · 前端 React SPA</div><div class="d">Vite+React+TS 重寫,bridge 服務 <code>web/dist</code>,同一個 PR 取代 console.html。</div></div></div>
+    </div>
+    <div class="callout" style="margin-top:14px;"><div class="head">▸ 兩 stage 同一 PR</div><p>console.html 在同一個 PR 被 React app 取代,不留「舊 console 配新後端」的中間態。</p></div>
+    <div class="phase-row" style="border:none;padding-top:14px;"><span class="phase-n p3">›</span><div><div class="t">Review agent changes — 之後另開 PR</div><div class="d">建在多-client 基礎上;<strong>此時才引入 SQLite</strong> 存 review 狀態,另寫 spec。</div></div></div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>§ 05 — Phase 1 多工器</div>
+    <h2>bridge 從<em>透明 relay</em> 變成 <em>session-aware 多工器</em>。</h2>
+
+    <div class="sim">
+      <div class="picks">
+        <button data-sc="notif" class="on">通知 session/update</button>
+        <button data-sc="req">送 prompt（請求）</button>
+        <button data-sc="perm">權限提示</button>
+      </div>
+      <div class="status" id="status">點上面看 bridge 怎麼路由。兩台裝置都看 <b>session A</b>。</div>
+      <svg viewBox="0 0 760 300" id="svg">
+        <!-- edges first -->
+        <line class="edge" id="e-agent-bridge" x1="560" y1="150" x2="430" y2="150"/>
+        <line class="edge" id="e-bridge-laptop" x1="330" y1="135" x2="190" y2="80"/>
+        <line class="edge" id="e-bridge-phone" x1="330" y1="165" x2="190" y2="220"/>
+        <!-- nodes -->
+        <g><rect class="node" x="40" y="50" width="150" height="60" rx="12"/><text class="nlabel" x="115" y="78" text-anchor="middle">Laptop</text><text class="nsub" x="115" y="95" text-anchor="middle">viewing A</text></g>
+        <g><rect class="node" x="40" y="190" width="150" height="60" rx="12"/><text class="nlabel" x="115" y="218" text-anchor="middle">Phone</text><text class="nsub" x="115" y="235" text-anchor="middle">viewing A</text></g>
+        <g><rect class="node" x="330" y="115" width="110" height="70" rx="12" style="stroke-dasharray:5 4;"/><text class="nlabel" x="385" y="145" text-anchor="middle">bridge</text><text class="nsub" x="385" y="162" text-anchor="middle" id="bridge-sub">multiplex</text></g>
+        <g><rect class="node" x="560" y="120" width="160" height="60" rx="12"/><text class="nlabel" x="640" y="148" text-anchor="middle">claude agent</text><text class="nsub" x="640" y="165" text-anchor="middle">1 process · N sessions</text></g>
+        <circle class="pulse" id="pulse" cx="0" cy="0" r="0"/>
+      </svg>
+      <div class="legend">
+        <span><i style="background:var(--safe)"></i>broadcast（同 session 同步）</span>
+        <span><i style="background:var(--sample)"></i>point-to-point（id 多工）</span>
+        <span><i style="background:var(--engine)"></i>權限路由（first reply wins）</span>
+      </div>
+    </div>
+
+    <ul class="bullets">
+      <li><strong>N 條連線並存</strong> — 拿掉 <code>currentConn</code> / supersede。</li>
+      <li><strong>通知 broadcast</strong> — <code>session/update(X)</code> 送給所有訂閱 X 的裝置 → 同步自動成立。</li>
+      <li><strong>id 多工</strong> — 各裝置 id 都從 1 起,bridge 改寫成全域唯一,response 只回原裝置。</li>
+      <li><strong>權限路由</strong> — 提示送給看該 session 的裝置,第一個回應轉給 agent,其餘丟棄。</li>
+      <li><strong>per-session ledger</strong> — 重連帶 cursor 補幀。</li>
+    </ul>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>§ 06 — Phase 2 前端</div>
+    <h2>三層邊界:<em>transport / store / components</em>。</h2>
+    <pre class="tree">/                  <span class="c">後端 bridge（不變的長駐 Node service）</span>
+  src/bridge.ts    + 服務 web/dist
+  web/             <span class="c">前端 SPA</span>
+    src/
+      lib/acp.ts     <span class="m">← 唯一講 WebSocket 的地方</span>
+      lib/api.ts     <span class="m">← HTTP: /history /fs /healthz</span>
+      store/         <span class="m">← Zustand: sessions / cwd / agent</span>
+      components/    <span class="m">← App · Sidebar · Thread · Composer …</span></pre>
+    <div class="layers">
+      <div class="layer"><h4>transport <code>lib/acp.ts</code></h4><p>持有 WS,封裝 JSON-RPC(request/notify/onNotification/權限/reconnect)。</p></div>
+      <div class="layer"><h4>store <code>Zustand</code></h4><p>依 <strong>sessionId</strong> 套用 session/update → 多裝置同步自然成立。</p></div>
+    </div>
+    <div class="callout safe"><div class="head">▸ 契約不變</div><p>WS <code>/acp</code> + HTTP <code>/history /history/messages /fs</code> 都已存在;開對話送 <code>session/load</code> = 向後端訂閱該 session。</p></div>
+  </div>
+</section>
+
+<section class="slide" style="border-bottom:none;">
+  <div class="wrap">
+    <div class="kicker"><span class="dot"></span>§ 07 — 已拍板</div>
+    <h2>決定都定了。</h2>
+    <ul class="bullets">
+      <li><strong>一個 PR</strong> — 後端 multi-client + React SPA 一起出;review 之後另開。</li>
+      <li><strong>顯示連線裝置 ✓</strong> — 記憶體 device registry + <code>_bridge/devices</code>,top bar 顯示誰在線、各看哪個 session。</li>
+      <li><strong>權限無 viewer ✓</strong> — 排隊 + 通知所有裝置;先開該 session 的人回應;Auto 模式自動核准;全離線就排到有人重連。</li>
+      <li><strong>folder-picker PR #7 ✓ merged</strong> — 以 main 為基準開工。</li>
+    </ul>
+    <div class="callout"><div class="head">▸ 剩一個未來再說</div><p>部署目標的 Node 版本——只在「之後做 review、引入 SQLite」時才需決定(<code>node:sqlite</code> 需 ≥22,pod 是 20)。</p></div>
+  </div>
+</section>
+
+<div class="wrap footer">spec: <code>docs/superpowers/specs/2026-06-03-frontend-backend-split-design.md</code></div>
+
+<script>
+(function(){
+  var svg=document.getElementById("svg"), pulse=document.getElementById("pulse"), status=document.getElementById("status"), sub=document.getElementById("bridge-sub");
+  var edges={ ab:"e-agent-bridge", bl:"e-bridge-laptop", bp:"e-bridge-phone" };
+  function E(id){ return document.getElementById(id); }
+  function clear(){ Object.values(edges).forEach(function(id){ var e=E(id); e.className.baseVal="edge"; }); pulse.setAttribute("r",0); }
+  function ptOf(line, t){ var x1=+line.getAttribute("x1"),y1=+line.getAttribute("y1"),x2=+line.getAttribute("x2"),y2=+line.getAttribute("y2"); return { x:x1+(x2-x1)*t, y:y1+(y2-y1)*t }; }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+  async function run(line, cls){ line.className.baseVal="edge on "+cls; pulse.setAttribute("class","pulse"); pulse.setAttribute("r",7);
+    var frames=26; for(var f=0;f<=frames;f++){ var p=ptOf(line,f/frames); pulse.setAttribute("cx",p.x); pulse.setAttribute("cy",p.y); await sleep(380/frames); } pulse.setAttribute("r",0); }
+  function setStatus(html){ status.innerHTML=html; }
+  var running=false;
+  var scenarios={
+    notif:async function(){ sub.textContent="broadcast"; setStatus('<span class="step">1.</span> agent 對 session A 發 session/update'); await run(E(edges.ab),"bc");
+      setStatus('<span class="step">2.</span> bridge broadcast → 所有看 A 的裝置'); E(edges.bl).className.baseVal="edge on bc"; E(edges.bp).className.baseVal="edge on bc";
+      pulse.setAttribute("r",7); for(var f=0;f<=26;f++){ var p=ptOf(E(edges.bl),f/26); pulse.setAttribute("cx",p.x); pulse.setAttribute("cy",p.y); await sleep(15);} pulse.setAttribute("r",0);
+      setStatus('<span class="step">✓</span> Laptop + Phone <b>同步</b>顯示(同 session）'); },
+    req:async function(){ sub.textContent="id rewrite"; setStatus('<span class="step">1.</span> Laptop 送 session/prompt(id laptop:1)'); await run(E(edges.bl),"pt");
+      setStatus('<span class="step">2.</span> bridge 改寫 id → bridge:7,轉給 agent'); await run({getAttribute:function(k){return ({x1:330,y1:135,x2:430,y2:150,"":0})[k];},className:{}}, "pt");
+      E(edges.ab).className.baseVal="edge on pt"; var lab=E(edges.ab); pulse.setAttribute("r",7); for(var f=26;f>=0;f--){ var p=ptOf(lab,f/26); pulse.setAttribute("cx",p.x); pulse.setAttribute("cy",p.y); await sleep(14);} pulse.setAttribute("r",0);
+      setStatus('<span class="step">✓</span> response 改回 id:1,<b>只送回 Laptop</b>(point-to-point)'); },
+    perm:async function(){ sub.textContent="route + 1st-win"; setStatus('<span class="step">1.</span> agent 對 session A 發 request_permission'); await run(E(edges.ab),"pm");
+      setStatus('<span class="step">2.</span> bridge 路由給看 A 的裝置(Laptop + Phone)'); E(edges.bl).className.baseVal="edge on pm"; E(edges.bp).className.baseVal="edge on pm";
+      pulse.setAttribute("r",7); for(var f=0;f<=26;f++){ var p=ptOf(E(edges.bp),f/26); pulse.setAttribute("cx",p.x); pulse.setAttribute("cy",p.y); await sleep(15);} pulse.setAttribute("r",0);
+      setStatus('<span class="step">✓</span> 任一台先回應 → 轉給 agent,另一台提示消失(<b>first reply wins</b>)'); }
+  };
+  document.querySelectorAll(".picks button").forEach(function(b){ b.onclick=async function(){
+    if(running) return; running=true;
+    document.querySelectorAll(".picks button").forEach(function(x){ x.classList.remove("on"); }); b.classList.add("on");
+    clear(); await scenarios[b.getAttribute("data-sc")](); running=false;
+  };});
+})();
+</script>
+</body>
+</html>

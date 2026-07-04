@@ -1,0 +1,56 @@
+# acp-gateway — example docker-compose deployment.
+#
+# Run from the repo root:
+#   ACPG_AUTH_USER=acp ACPG_AUTH_TOKEN="$(head -c 24 /dev/urandom | base64)" \
+#     docker compose -f deploy/docker-compose.yml up -d --build
+#
+# Premise: the agent runs INSIDE this container as a stdio child of the gateway.
+# That means the container must (a) contain the agent adapter — baked into the
+# image — and (b) see the agent's LOGIN STATE — mounted from the host below. Log
+# in on the host first (`claude /login`, `codex login`); logging in from inside
+# a container is awkward and is not the recommended flow.
+
+services:
+  acp-gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    # Or pin a prebuilt image instead of building:
+    # image: acp-gateway:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # REQUIRED — the shared gateway account (HTTP Basic auth + remote /acp).
+      # Fails fast if unset in your shell / a sibling .env file.
+      ACPG_AUTH_USER: ${ACPG_AUTH_USER:?set ACPG_AUTH_USER}
+      ACPG_AUTH_TOKEN: ${ACPG_AUTH_TOKEN:?set ACPG_AUTH_TOKEN}
+      ACPG_LEDGER_DIR: /data
+      CODEX_HOME: /root/.codex
+      # Codex API-key auth (alternative to a mounted `codex login`):
+      # OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # If a reverse proxy already terminates TLS, serve plain HTTP and adjust
+      # the healthcheck below to http:// without -k:
+      # ACPG_TLS: "off"
+    volumes:
+      # --- agent login/session state (mount the host's authenticated dirs) ---
+      # Read-WRITE: the Claude Agent SDK persists session state and the history
+      # the /history* endpoints read under ~/.claude/projects. The container runs
+      # as root, so HOME is /root.
+      - ${HOME}/.claude:/root/.claude
+      - ${HOME}/.codex:/root/.codex          # CODEX_HOME — omit if Codex unused
+      # --- the project(s) the agent operates on (agents.json `cwd`) ---
+      - ./workspace:/workspace
+      # --- agent definitions (or bake agents.json into the image instead) ---
+      - ./agents.json:/opt/acp-gateway/agents.json:ro
+      # --- ledger + self-signed cert + sqlite state — persist across restarts ---
+      - acpb-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsk", "https://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  acpb-data:

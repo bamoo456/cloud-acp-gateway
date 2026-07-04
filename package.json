@@ -1,0 +1,29 @@
+{
+  "name": "acp-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SSE+POST gateway fronting one or more ACP agents for remote mobile control over a VPN",
+  "scripts": {
+    "build": "npm --prefix web ci && npm --prefix web run build && esbuild src/gateway.ts --bundle --platform=node --format=cjs --target=node18 --external:better-sqlite3 --external:node-pty --outfile=dist/gateway.js && esbuild src/md.ts --bundle --format=iife --target=es2018 --outfile=public/vendor/md.js --minify",
+    "dev": "tsx watch src/gateway.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepare": "npm run build",
+    "test": "ACPG_NO_LISTEN=1 ACPG_AUTH_USER=test-user ACPG_AUTH_TOKEN=test-token node --import tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.48.0",
+    "@agentclientprotocol/codex-acp": "^1.0.0",
+    "better-sqlite3": "^11.8.0",
+    "node-pty": "npm:@homebridge/node-pty-prebuilt-multiarch@0.13.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.2",
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.2.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.7.2"
+  }
+}

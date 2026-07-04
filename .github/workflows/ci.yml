@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build
+      - name: web unit tests
+        run: npm --prefix web run test
+      - name: smoke test (gateway boots and validates config)
+        run: |
+          set -e
+          # missing auth token must fail fast
+          if ACPG_AGENTS_FILE=/dev/null node dist/gateway.js 2>/dev/null; then
+            echo "expected failure without ACPG_AUTH_TOKEN"; exit 1
+          fi
+          echo "ok: refuses to start without ACPG_AUTH_TOKEN"

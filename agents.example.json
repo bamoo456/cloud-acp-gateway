@@ -1,0 +1,22 @@
+{
+  "claude": {
+    "cmd": "node_modules/.bin/claude-agent-acp",
+    "args": [],
+    "cwd": "/workspace"
+  },
+  "claude-infra": {
+    "cmd": "node_modules/.bin/claude-agent-acp",
+    "args": [],
+    "cwd": "/workspace/infra"
+  },
+  "codex": {
+    "cmd": "node_modules/.bin/codex-acp",
+    "args": [],
+    "cwd": "/workspace"
+  },
+  "opencode": {
+    "cmd": "/usr/local/bin/opencode",
+    "args": ["acp"],
+    "cwd": "/workspace"
+  }
+}

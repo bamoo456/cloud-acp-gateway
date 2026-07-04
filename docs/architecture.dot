@@ -1,0 +1,143 @@
+digraph "acp-gateway architecture" {
+  graph [
+    rankdir=LR,
+    bgcolor="#ffffff",
+    pad="0.45",
+    nodesep="0.65",
+    ranksep="0.9",
+    splines=ortho,
+    fontname="Helvetica",
+    fontsize=18,
+    labelloc="t",
+    label="acp-gateway architecture"
+  ];
+
+  node [
+    shape=rect,
+    style="rounded,filled",
+    penwidth=1.4,
+    color="#334155",
+    fillcolor="#f8fafc",
+    fontname="Helvetica",
+    fontsize=13,
+    margin="0.14,0.08"
+  ];
+
+  edge [
+    color="#475569",
+    penwidth=1.4,
+    arrowsize=0.7,
+    fontname="Helvetica",
+    fontsize=11
+  ];
+
+  subgraph cluster_clients {
+    label="Clients";
+    color="#bae6fd";
+    fillcolor="#f0f9ff";
+    style="rounded,filled";
+
+    browser [label=<
+      <B>Browser UI</B><BR/>
+      GET / over HTTPS
+    >, fillcolor="#e0f2fe"];
+
+    remote [label=<
+      <B>Remote ACP client</B><BR/>
+      SSE downstream + POST upstream
+    >, fillcolor="#e0f2fe"];
+  }
+
+  subgraph cluster_gateway {
+    label="acp-gateway";
+    color="#bbf7d0";
+    fillcolor="#f0fdf4";
+    style="rounded,filled";
+
+    http [label=<
+      <B>HTTPS server</B><BR/>
+      TLS + Basic auth
+    >, fillcolor="#dcfce7"];
+
+    routes [label=<
+      <B>HTTP surfaces</B><BR/>
+      / · /raw · /acp/sse · /acp/rpc
+    >, fillcolor="#dcfce7"];
+
+    router [label=<
+      <B>Agent router</B><BR/>
+      select by agent name<BR/>
+      stdio child lifecycle
+    >, fillcolor="#dcfce7"];
+
+    ledger [label=<
+      <B>Replay ledger</B><BR/>
+      seq ids + resume window
+    >, fillcolor="#dcfce7"];
+  }
+
+  subgraph cluster_agents {
+    label="Local stdio child processes";
+    color="#fed7aa";
+    fillcolor="#fff7ed";
+    style="rounded,filled";
+
+    claude [label=<
+      <B>claude-agent-acp</B><BR/>
+      wraps Claude Code
+    >, fillcolor="#ffedd5"];
+
+    codex [label=<
+      <B>codex-acp</B><BR/>
+      wraps Codex
+    >, fillcolor="#ffedd5"];
+
+    opencode [label=<
+      <B>opencode acp</B><BR/>
+      native ACP stdio
+    >, fillcolor="#ffedd5"];
+  }
+
+  subgraph cluster_resources {
+    label="Host / container resources";
+    color="#ddd6fe";
+    fillcolor="#faf5ff";
+    style="rounded,filled";
+
+    workspace [label=<
+      <B>Project workspace</B><BR/>
+      agent cwd<BR/>
+      reads + writes
+    >, fillcolor="#f3e8ff"];
+
+    login [label=<
+      <B>Agent login state</B><BR/>
+      auth + native history<BR/>
+      ~/.claude · ~/.codex · opencode
+    >, fillcolor="#f3e8ff"];
+
+    state [label=<
+      <B>Persistent gateway state</B><BR/>
+      ledger · sqlite · TLS certs
+    >, fillcolor="#f3e8ff"];
+  }
+
+  browser -> http;
+  remote -> http;
+  http -> routes;
+  routes -> router;
+  router -> ledger;
+  ledger -> state;
+
+  router -> claude;
+  router -> codex;
+  router -> opencode;
+
+  claude -> workspace;
+  codex -> workspace;
+  opencode -> workspace;
+
+  claude -> login;
+  codex -> login;
+  opencode -> login;
+}

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f4f3f1" />
+  <title>acp-gateway</title>
+  <!-- Config injected by the gateway at serve time into the script#acpg-cfg below.
+       In Vite dev mode the placeholder stays; lib/config.ts falls back to defaults. -->
+  <script type="application/json" id="acpg-cfg">__ACPG_CFG__</script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+# acp-gateway — example systemd unit for native (non-container) Linux deployment.
+#
+# Native deployment uses the host's EXISTING `claude` login (~/.claude) directly,
+# with no credential mounting — the agent still runs as a stdio child of the
+# gateway, just as the same OS user instead of inside a container.
+#
+# Install:
+#   sudo cp deploy/acp-gateway.service /etc/systemd/system/
+#   # edit User=, WorkingDirectory=, and the EnvironmentFile path below
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now acp-gateway
+#   journalctl -u acp-gateway -f
+
+[Unit]
+Description=acp-gateway — WebSocket gateway fronting one or more ACP agents
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as the user that owns the `claude` login (~/.claude) — NOT root. That user
+# must have run `claude /login` (and `codex login` if using Codex) beforehand.
+User=acp
+Group=acp
+WorkingDirectory=/opt/acp-gateway
+
+# Secrets + config live here, not in git. Same format as .env (KEY=value lines);
+# must define at least ACPG_AUTH_USER and ACPG_AUTH_TOKEN. chmod 600 it.
+# A leading "-" means "don't fail if the file is missing".
+EnvironmentFile=-/opt/acp-gateway/.env
+
+# Persistent ledger / self-signed cert / sqlite state. StateDirectory= creates
+# and chowns /var/lib/acp-gateway to User= on start.
+StateDirectory=acp-gateway
+Environment=ACPG_LEDGER_DIR=/var/lib/acp-gateway
+
+# Run the built bundle directly. (Equivalently: ExecStart=/opt/acp-gateway/start.sh,
+# which also loads .env and fills in defaults.) Build it once with `npm install`.
+ExecStart=/usr/bin/node /opt/acp-gateway/dist/gateway.js
+
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

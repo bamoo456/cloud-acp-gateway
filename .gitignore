@@ -1,0 +1,29 @@
+# dependencies & build output (generated)
+node_modules/
+dist/
+package-lock.json
+
+# secrets & local config — never commit these
+.env
+.env.local
+
+# runtime data
+*.log
+ledger*.jsonl
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+/data/
+/data-staging/
+
+# misc
+.DS_Store
+/docs/superpowers/
+
+# generated browser bundle
+public/vendor/
+
+# playwright (e2e) output
+test-results/
+playwright-report/
+.playwright/

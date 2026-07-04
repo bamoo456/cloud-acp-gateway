@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  acp-gateway — example launchd agent for native deployment on macOS.
+
+  Why launchd and not Docker on a Mac: Docker Desktop runs containers inside a
+  Linux VM, which CANNOT see your Mac's `claude` install or its login state under
+  ~/.claude. A launchd agent runs as your macOS user, so it reuses that existing
+  login directly — the natural fit for a Mac host. The agent still runs as a
+  stdio child of the gateway, as your user.
+
+  Recommended: let the Makefile generate the plist (fills in the node PATH, repo
+  path, and label for you — no hand-editing):
+    make install-mac      # writes ~/Library/LaunchAgents/com.acp-gateway.plist
+    make start-mac        # loads it; make logs-mac to follow
+  Put ACPG_AUTH_USER / ACPG_AUTH_TOKEN in the repo .env (chmod 600); start.sh
+  sources it. Keeping the token out of the plist is why it isn't listed below.
+
+  Manual fallback (this file is just a readable reference of what's produced):
+    cp deploy/local.acp-gateway.plist ~/Library/LaunchAgents/
+    # edit USERNAME + the paths; PATH MUST include your node bin dir
+    #   (run `dirname "$(command -v node)"` — nvm/homebrew node is NOT on
+    #    launchd's default PATH), plus /opt/homebrew/bin for openssl + claude
+    launchctl load ~/Library/LaunchAgents/local.acp-gateway.plist
+    launchctl start local.acp-gateway
+  Logs:
+    tail -f /usr/local/var/log/acp-gateway.out.log /usr/local/var/log/acp-gateway.err.log
+  Stop / uninstall:
+    launchctl unload ~/Library/LaunchAgents/local.acp-gateway.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.acp-gateway</string>
+
+  <!-- start.sh loads .env, fills in defaults, then exec's node dist/gateway.js. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/acp-gateway/start.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/opt/acp-gateway</string>
+
+  <!-- start.sh reads .env (chmod 600) for ACPG_AUTH_USER / ACPG_AUTH_TOKEN, so
+       no auth token is set here (it would otherwise sit in a world-readable
+       plist). PATH must include node + openssl + claude — prepend your node bin
+       dir (`dirname "$(command -v node)"`; nvm/homebrew node is NOT on launchd's
+       default PATH) and add /opt/homebrew/bin (Apple Silicon) or /usr/local/bin
+       (Intel). `make install-mac` fills the node dir in for you. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ACPG_LEDGER_DIR</key>
+    <string>/Users/USERNAME/Library/Application Support/acp-gateway</string>
+    <key>PATH</key>
+    <string>/Users/USERNAME/.nvm/versions/node/vX.Y.Z/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/usr/local/var/log/acp-gateway.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/var/log/acp-gateway.err.log</string>
+</dict>
+</plist>
