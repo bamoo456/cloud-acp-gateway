@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory } from "./gateway.ts";
 
 // Write a Claude Code transcript (one JSON object per line) to a temp file.
@@ -38,7 +38,7 @@ function writeOpenCodeStorage(spec: {
   const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-opencode-"));
   const dir = path.join(xdg, "opencode");
   fs.mkdirSync(dir, { recursive: true });
-  const db = new Database(path.join(dir, "opencode.db"));
+  const db = new DatabaseSync(path.join(dir, "opencode.db"));
   db.exec(`
     CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER);
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
