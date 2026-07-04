@@ -9,7 +9,7 @@
 # codex-acp, pulled by `npm install`), and you supply the agent's *login state*
 # at runtime by mounting it as a volume (see deploy/docker-compose.yml).
 
-FROM node:22-bookworm-slim
+FROM node:24-bookworm-slim
 
 # Extra packages the slim base lacks:
 # - openssl CLI: slim images ship libssl but NOT the `openssl` binary the gateway

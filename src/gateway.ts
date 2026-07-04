@@ -39,7 +39,7 @@ import { basicAuthOk, wsAuthOk } from "./auth.ts";
 import { resolveTls } from "./tls.ts";
 import { accessUrls } from "./access.ts";
 import { Db, type InboxItem, type InboxStatus } from "./db.ts";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 
 const ROOT = path.join(__dirname, "..");
@@ -261,10 +261,12 @@ const opencodeDbFile = () => {
 // Open the opencode DB read-only for one query, then close. Best effort: a
 // missing / locked / corrupt DB returns `fallback` so history degrades to empty
 // rather than throwing. read-only + WAL lets it run alongside a live opencode.
-function withOpenCodeDb<T>(fn: (db: Database.Database) => T, fallback: T): T {
-  let db: Database.Database | null = null;
+// node:sqlite has no `fileMustExist`, but read-only refuses to create the file,
+// so a missing DB throws here and is caught the same way.
+function withOpenCodeDb<T>(fn: (db: DatabaseSync) => T, fallback: T): T {
+  let db: DatabaseSync | null = null;
   try {
-    db = new Database(opencodeDbFile(), { readonly: true, fileMustExist: true });
+    db = new DatabaseSync(opencodeDbFile(), { readOnly: true });
     return fn(db);
   } catch {
     return fallback;

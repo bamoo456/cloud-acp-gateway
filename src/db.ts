@@ -8,12 +8,12 @@
  * scoped per origin (and thus per host/IP), so a reconnect from a different IP
  * starts with an empty list.
  *
- * Uses better-sqlite3 rather than Node's built-in node:sqlite: that builtin
- * only exists on Node 22.5+, while production hosts may run Node 20 (or the
- * node18 build target this bundle is compiled for). better-sqlite3 is a native
- * addon, so it is marked external in the esbuild bundle and installed from
- * node_modules at runtime (`npm install --omit=dev`). Its API is synchronous,
- * matching the rest of the gateway's file I/O (the ledger).
+ * Uses Node's built-in node:sqlite (DatabaseSync) — available unflagged on
+ * Node 24+, which this branch targets. That drops the better-sqlite3 native
+ * addon entirely: nothing to compile, nothing to mark external in the esbuild
+ * bundle, and no node_modules binary to ship at runtime. Its API is synchronous,
+ * matching the rest of the gateway's file I/O (the ledger). The `node22` branch
+ * keeps better-sqlite3 for hosts still pinned to Node 22.
  *
  * Everything the web UI used to keep in browser localStorage now lives here, for
  * the same reason: a single account driving the gateway from several devices is
@@ -25,7 +25,7 @@
  */
 import path from "node:path";
 import fs from "node:fs";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 
 // Recent sessions / folders mirror the web client's old localStorage shapes, so
 // the UI types line up. They now live here (server-side) so the same account sees
@@ -66,13 +66,13 @@ const MAX_RECENT_FOLDERS = 20;
 const MAX_INBOX_RESOLVED = 500;
 
 export class Db {
-  private db: Database.Database;
+  private db: DatabaseSync;
 
   constructor(file: string) {
     if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
-    this.db = new Database(file);
+    this.db = new DatabaseSync(file);
     // WAL keeps reads from blocking the occasional write; meaningless for :memory:.
-    if (file !== ":memory:") this.db.pragma("journal_mode = WAL");
+    if (file !== ":memory:") this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec(`CREATE TABLE IF NOT EXISTS pinned_folders (
       path TEXT PRIMARY KEY,
       pinned_at TEXT NOT NULL
@@ -147,7 +147,7 @@ export class Db {
         VALUES (@agentName, @cwd, @sessionId, @title, @lastActiveAt)
         ON CONFLICT(agent_name, cwd, session_id)
         DO UPDATE SET title = excluded.title, last_active_at = excluded.last_active_at`)
-      .run(s);
+      .run({ ...s }); // spread to a plain literal: node:sqlite wants Record<string, …>, which the RecentSession interface isn't
     this.db.prepare(`DELETE FROM recent_sessions WHERE rowid NOT IN (
       SELECT rowid FROM recent_sessions ORDER BY last_active_at DESC LIMIT ${MAX_RECENT_SESSIONS}
     )`).run();
