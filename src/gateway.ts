@@ -313,7 +313,9 @@ async function listDirs(dir: string) {
   const ents = await fs.promises.readdir(dir, { withFileTypes: true });
   const out: Array<{ name: string; git: boolean }> = [];
   for (const e of ents) {
-    if (!e.isDirectory() || e.name.startsWith(".")) continue;
+    // Include hidden (dot) directories so the folder switcher can browse into
+    // them, e.g. .config or .github. (.git is shown too — it's a real folder.)
+    if (!e.isDirectory()) continue;
     out.push({ name: e.name, git: fs.existsSync(path.join(dir, e.name, ".git")) });
   }
   out.sort((a, b) => a.name.localeCompare(b.name));
