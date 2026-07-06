@@ -243,6 +243,66 @@ export function agentSkinFor(cmd: string): "codex" | "opencode" | undefined {
 const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 const encodeProjectPath = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
 const projectDirFor = (cwd: string) => path.join(CLAUDE_DIR, "projects", encodeProjectPath(cwd));
+const claudeProjectsRoot = () => path.join(CLAUDE_DIR, "projects");
+
+// encodeProjectPath alone can point at a directory the CLI never wrote: the CLI
+// truncates encoded names it considers too long (~200 chars) and appends a short
+// hash, and clients can send a cwd whose encoding doesn't match the transcript's
+// real location (stale sidebar folder, the empty-cwd → agent-default fallback,
+// symlinked paths). Resolving strictly via the computed name then 404s sessions
+// that DO exist on disk ("Couldn't load conversation"). These fallbacks recover
+// the real location; both take the primary computed path first so the common
+// case stays a single existsSync.
+async function realpathOr(p: string): Promise<string> {
+  try { return await fs.promises.realpath(p); } catch { return path.resolve(p); }
+}
+
+// Locate a session transcript: the computed <encoded cwd>/<sid>.jsonl when it
+// exists, else the unique <sid>.jsonl anywhere under the projects root (session
+// ids are UUIDs, so a filename match is unambiguous). The id is pattern-guarded
+// so a crafted "session id" can't traverse out of the store.
+export async function findClaudeSessionFile(cwd: string, sessionId: string, projectsRoot = claudeProjectsRoot()): Promise<string | null> {
+  if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) return null;
+  const primary = path.join(projectsRoot, encodeProjectPath(cwd), sessionId + ".jsonl");
+  if (fs.existsSync(primary)) return primary;
+  let dirs: fs.Dirent[];
+  try { dirs = await fs.promises.readdir(projectsRoot, { withFileTypes: true }); } catch { return null; }
+  for (const d of dirs) {
+    if (!d.isDirectory()) continue;
+    const p = path.join(projectsRoot, d.name, sessionId + ".jsonl");
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+// Locate the project dir for a cwd: the computed name when it exists, else the
+// dir whose newest transcript records this cwd (realpath-compared, since all
+// transcripts in one project dir share the same cwd). Covers listing sessions
+// for a cwd whose encoded name the CLI truncated.
+export async function findClaudeProjectDir(cwd: string, projectsRoot = claudeProjectsRoot()): Promise<string | null> {
+  const primary = path.join(projectsRoot, encodeProjectPath(cwd));
+  if (fs.existsSync(primary)) return primary;
+  const want = await realpathOr(cwd);
+  let dirs: fs.Dirent[];
+  try { dirs = await fs.promises.readdir(projectsRoot, { withFileTypes: true }); } catch { return null; }
+  for (const d of dirs) {
+    if (!d.isDirectory()) continue;
+    const dir = path.join(projectsRoot, d.name);
+    let files: string[];
+    try { files = (await fs.promises.readdir(dir)).filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-")); } catch { continue; }
+    let best: { file: string; mtime: number } | null = null;
+    for (const f of files) {
+      try {
+        const st = await fs.promises.stat(path.join(dir, f));
+        if (!best || st.mtimeMs > best.mtime) best = { file: f, mtime: st.mtimeMs };
+      } catch { /* ignore */ }
+    }
+    if (!best) continue;
+    const summary = await claudeTranscriptSummary(path.join(dir, best.file));
+    if (summary.cwd && (await realpathOr(summary.cwd)) === want) return dir;
+  }
+  return null;
+}
 const codexHome = () => process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const codexIndexFile = () => path.join(codexHome(), "session_index.jsonl");
 const codexSessionsDir = () => path.join(codexHome(), "sessions");
@@ -556,8 +616,8 @@ export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRo
   return out;
 }
 
-async function listClaudeHistory(cwd: string, limit: number): Promise<HistorySessionItem[]> {
-  const dir = projectDirFor(cwd);
+async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: string): Promise<HistorySessionItem[]> {
+  const dir = (await findClaudeProjectDir(cwd, projectsRoot)) ?? path.join(projectsRoot ?? claudeProjectsRoot(), encodeProjectPath(cwd));
   let files: string[];
   try { files = await fs.promises.readdir(dir); } catch { return []; }
   const sess = files.filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"));
@@ -1080,20 +1140,23 @@ async function readOpenCodeHistoryMessages(sessionId: string, limit: number): Pr
   return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
 }
 
-export async function listAgentHistory(cmd: string, cwd: string, limit: number): Promise<HistorySessionItem[]> {
+export async function listAgentHistory(cmd: string, cwd: string, limit: number, opts?: { projectsRoot?: string }): Promise<HistorySessionItem[]> {
   const provider = historyProviderFor(cmd);
-  if (provider === "claude") return listClaudeHistory(cwd, limit);
+  if (provider === "claude") return listClaudeHistory(cwd, limit, opts?.projectsRoot);
   if (provider === "codex") return listCodexHistory(cwd, limit);
   if (provider === "opencode") return listOpenCodeHistory(cwd, limit);
   return [];
 }
 
-export async function readAgentHistoryMessages(cmd: string, cwd: string, sessionId: string, limit: number): Promise<HistoryMessagesResult | null> {
+export async function readAgentHistoryMessages(cmd: string, cwd: string, sessionId: string, limit: number, opts?: { projectsRoot?: string }): Promise<HistoryMessagesResult | null> {
   const provider = historyProviderFor(cmd);
   if (provider === "claude") {
-    const base = path.join(CLAUDE_DIR, "projects");
-    const file = path.join(projectDirFor(cwd), sessionId + ".jsonl");
-    if (!file.startsWith(base + path.sep) || !fs.existsSync(file)) return null;
+    // Resolve via the computed path first, then by session id anywhere under
+    // the projects root — see findClaudeSessionFile for why the computed name
+    // alone 404s transcripts that exist (CLI long-path truncation, stale cwd).
+    const base = opts?.projectsRoot ?? claudeProjectsRoot();
+    const file = await findClaudeSessionFile(cwd, sessionId, base);
+    if (!file || !file.startsWith(base + path.sep)) return null;
     return readClaudeHistoryMessages(file, sessionId, limit);
   }
   if (provider === "codex") {
