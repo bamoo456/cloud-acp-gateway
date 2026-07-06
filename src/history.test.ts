@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, findClaudeSessionFile } from "./gateway.ts";
 
 // Write a Claude Code transcript (one JSON object per line) to a temp file.
 function writeTranscript(lines: unknown[]): string {
@@ -279,4 +279,46 @@ test("opencode history won't read a session belonging to a different cwd", async
     const res = await readAgentHistoryMessages(OPENCODE_CMD, cwd, "ses_aaa", 20);
     assert.equal(res, null, "a cwd mismatch is rejected even though the id is valid");
   });
+});
+
+// The CLI truncates encoded project dir names it considers too long and appends
+// a short hash, so the gateway's computed <encoded cwd> name can point at a dir
+// that was never created even though the transcript exists. The fallbacks must
+// recover both the per-cwd listing (by the transcript's recorded cwd) and the
+// message view (by session id), including when the client sent a stale cwd.
+const CLAUDE_CMD = "/opt/acp-gateway/node_modules/.bin/claude-agent-acp";
+test("claude history survives a project dir name the gateway can't derive (CLI long-path truncation)", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-deep-"));
+  // NOT encodeProjectPath(cwd): simulate the CLI's truncated-and-hashed name.
+  writeClaudeProjectTranscript(projectsRoot, "-truncated-name-abc123", "11111111-aaaa-bbbb-cccc-000000000001", [
+    { type: "user", cwd, sessionId: "11111111-aaaa-bbbb-cccc-000000000001", message: { role: "user", content: "deep prompt" } },
+    { type: "assistant", cwd, sessionId: "11111111-aaaa-bbbb-cccc-000000000001", message: { role: "assistant", content: [{ type: "text", text: "reply" }] } },
+  ], 3000);
+
+  const sessions = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot });
+  assert.deepEqual(sessions.map((s) => s.sessionId), ["11111111-aaaa-bbbb-cccc-000000000001"], "listing resolves the dir via the transcript's recorded cwd");
+
+  const r = await readAgentHistoryMessages(CLAUDE_CMD, cwd, "11111111-aaaa-bbbb-cccc-000000000001", 20, { projectsRoot });
+  assert.equal(r?.messages.length, 2, "messages resolve even though encodeProjectPath(cwd) has no dir");
+});
+
+test("claude messages resolve by session id when the client sent the wrong cwd", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  writeClaudeProjectTranscript(projectsRoot, "-real-repo", "22222222-aaaa-bbbb-cccc-000000000002", [
+    { type: "user", cwd: "/real/repo", sessionId: "22222222-aaaa-bbbb-cccc-000000000002", message: { role: "user", content: "hi" } },
+  ], 3000);
+
+  // Stale/empty client cwd falls back to the agent default server-side; the
+  // session must still open (looked up by its unambiguous UUID filename).
+  const r = await readAgentHistoryMessages(CLAUDE_CMD, "/some/other/folder", "22222222-aaaa-bbbb-cccc-000000000002", 20, { projectsRoot });
+  assert.equal(r?.messages.length, 1, "wrong-cwd view still finds the transcript");
+
+  // But a wrong cwd must NOT leak other projects' sessions into the LIST.
+  const sessions = await listAgentHistory(CLAUDE_CMD, "/some/other/folder", 10, { projectsRoot });
+  assert.deepEqual(sessions, [], "listing stays scoped to the requested cwd");
+
+  // Unknown ids and traversal-shaped ids stay 404.
+  assert.equal(await readAgentHistoryMessages(CLAUDE_CMD, "/real/repo", "33333333-aaaa-bbbb-cccc-000000000003", 20, { projectsRoot }), null);
+  assert.equal(await findClaudeSessionFile("/real/repo", "../../../etc/passwd", projectsRoot), null, "path-shaped session ids are rejected");
 });
