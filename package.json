@@ -4,10 +4,10 @@
   "private": true,
   "description": "SSE+POST gateway fronting one or more ACP agents for remote mobile control over a VPN",
   "engines": {
-    "node": ">=24"
+    "node": ">=20"
   },
   "scripts": {
-    "build": "npm --prefix web ci && npm --prefix web run build && esbuild src/gateway.ts --bundle --platform=node --format=cjs --target=node22 --external:node-pty --outfile=dist/gateway.js && esbuild src/md.ts --bundle --format=iife --target=es2018 --outfile=public/vendor/md.js --minify",
+    "build": "npm --prefix web ci && npm --prefix web run build && esbuild src/gateway.ts --bundle --platform=node --format=cjs --target=node20 --external:better-sqlite3 --external:node-pty --outfile=dist/gateway.js && esbuild src/md.ts --bundle --format=iife --target=es2018 --outfile=public/vendor/md.js --minify",
     "dev": "tsx watch src/gateway.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepare": "npm run build",
@@ -16,11 +16,13 @@
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.48.0",
     "@agentclientprotocol/codex-acp": "^1.0.0",
+    "better-sqlite3": "^11.8.0",
     "node-pty": "npm:@homebridge/node-pty-prebuilt-multiarch@0.13.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/markdown-it": "^14.1.2",
-    "@types/node": "^24.0.0",
+    "@types/node": "^20.0.0",
     "esbuild": "^0.24.2",
     "highlight.js": "^11.11.1",
     "markdown-it": "^14.2.0",

@@ -21,9 +21,10 @@ available on the same host or inside the same container as the gateway.
 
 ## Requirements
 
-- Node.js 24+ and npm. Server-side state uses Node's built-in `node:sqlite`
-  (unflagged on Node 24). Node 24+ runs on `main`. To run on Node 22 instead,
-  use the `legacy/node22` branch, which keeps the `better-sqlite3` native addon.
+- Node.js 20+ and npm. Server-side state uses `better-sqlite3` on this branch.
+  This is the `legacy/node20` branch; `main` requires Node 24+ and uses Node's
+  built-in `node:sqlite` instead, and `legacy/node22` targets Node 22 (also
+  with `better-sqlite3`).
 - `openssl` if using the default generated self-signed TLS certificate.
 - At least one ACP agent available on the gateway host:
   - Claude: `claude` installed and logged in.
