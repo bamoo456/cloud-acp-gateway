@@ -166,7 +166,7 @@ describe("Sidebar recent conversations", () => {
     expect(recent!.textContent).toContain("Cross folder work");
   });
 
-  test("shows discovered Claude CLI sessions in Recent and opens them with their recovered cwd", async () => {
+  test("merges discovered Claude CLI sessions into Recent and opens them with their recovered cwd", async () => {
     getDiscoveredHistory.mockResolvedValue([
       { agentName: "claude", cwd: "/already", sessionId: "already-recent", title: "Already recent CLI", updatedAt: "2026-06-10T03:59:00.000Z", source: "claude-cli" },
       { agentName: "claude", cwd: "/cli-repo", sessionId: "cli-only", title: "CLI only work", updatedAt: "2026-06-10T03:30:00.000Z", source: "claude-cli" },
@@ -176,15 +176,24 @@ describe("Sidebar recent conversations", () => {
     ]);
     await renderSidebar();
 
-    const cliSection = container.querySelector(".cli-section");
-    expect(cliSection).not.toBeNull();
-    expect(cliSection!.textContent).toContain("From Claude CLI");
-    expect(cliSection!.textContent).toContain("CLI only work");
-    expect(cliSection!.textContent).toContain("cli-repo");
-    expect(cliSection!.textContent).not.toContain("Already recent CLI");
+    // No separate "From Claude CLI" section — the discovered session lands
+    // in the same plain Recent list as gateway-tracked recents.
+    expect(container.querySelector(".cli-section")).toBeNull();
+    expect(container.textContent).not.toContain("From Claude CLI");
 
-    const row = cliSection!.querySelector<HTMLButtonElement>(".sess-item");
-    expect(row).not.toBeNull();
+    const recent = container.querySelector(".recent-section");
+    expect(recent).not.toBeNull();
+    expect(recent!.textContent).toContain("CLI only work");
+    expect(recent!.textContent).toContain("cli-repo");
+    // The discovered duplicate of the already-tracked recent session is
+    // dropped, so its title shows up once (from the recent entry), not twice.
+    const dupeRows = Array.from(recent!.querySelectorAll<HTMLButtonElement>(".sess-item"))
+      .filter((r) => r.textContent?.includes("Already recent CLI"));
+    expect(dupeRows).toHaveLength(1);
+
+    const rows = recent!.querySelectorAll<HTMLButtonElement>(".sess-item");
+    const row = Array.from(rows).find((r) => r.textContent?.includes("CLI only work"));
+    expect(row).not.toBeUndefined();
     await act(async () => {
       row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });

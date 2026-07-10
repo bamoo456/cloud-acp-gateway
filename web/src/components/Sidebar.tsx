@@ -8,12 +8,17 @@ import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
 
 const RECENT_LIMIT = 5;
-const DISCOVERED_LIMIT = 5;
 const CONVERSATION_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
 // A history row tagged with the agent it was fetched from, so the unified list can
 // show the owning agent's mark and reopen it under that agent.
 type TaggedHistory = HistorySession & { agentName: string };
 type TaggedDiscoveredHistory = DiscoveredHistorySession & { agentName: string };
+// Recent and CLI-discovered sessions render as one merged, recency-sorted
+// list — no separate "From Claude CLI" section — so tag each with which
+// render path (and timestamp) it needs.
+type CombinedRecentEntry =
+  | { kind: "recent"; it: RecentSession; ts: number }
+  | { kind: "discovered"; it: TaggedDiscoveredHistory; ts: number };
 function withinRecentWindow(iso: string) {
   const t = new Date(iso).getTime();
   return Number.isFinite(t) && Date.now() - t <= CONVERSATION_WINDOW_MS;
@@ -37,7 +42,6 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const [q, setQ] = useState("");
   const [showMore, setShowMore] = useState(false);
   const [showMoreRecent, setShowMoreRecent] = useState(false);
-  const [showMoreCli, setShowMoreCli] = useState(false);
   const [discovered, setDiscovered] = useState<TaggedDiscoveredHistory[] | null>(null);
   const [tab, setTab] = useState<"recent" | "conversations">("recent");
   // The gateway marks agents with no native history reader as history:false.
@@ -79,7 +83,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     });
   }
   function loadDiscovered(reset: boolean) {
-    if (reset) { setDiscovered(null); setShowMoreCli(false); }
+    if (reset) setDiscovered(null);
     if (!discoverAgentNames.length) { setDiscovered([]); return; }
     Promise.all(
       discoverAgentNames.map((name) =>
@@ -96,7 +100,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   useEffect(() => { loadHistory(true); loadDiscovered(true); }, [open, s.cwd, histAgentsKey, discoverAgentsKey]);
   // The panel always opens on Recent so cross-folder switching is one tap away,
   // collapsed back to the first few recents.
-  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setShowMoreCli(false); } }, [open]);
+  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); } }, [open]);
   // refresh the list in place (no loading flash) when something renames a session
   useEffect(() => {
     if (s.historyNonce === 0) return;
@@ -132,17 +136,23 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const historyTitleById = new Map(allItems.map((it) => [it.agentName + "\n" + it.sessionId, it.title] as const));
   // Local Recent entries need session/load to be reopenable, so list only recents
   // whose owning agent still reports it — across ALL agents, not just the active one.
-  // Default to the first RECENT_LIMIT; "See more" reveals the rest of the cache.
-  const allRecentItems = s.recentSessions
-    .filter((it) => recentReopenable(agentByName.get(it.agentName)));
-  const recentItems = showMoreRecent ? allRecentItems : allRecentItems.slice(0, RECENT_LIMIT);
-  const hasMoreRecent = allRecentItems.length > RECENT_LIMIT;
   const recentKeys = new Set(s.recentSessions.map((it) => it.agentName + "\n" + it.cwd + "\n" + it.sessionId));
-  const allDiscoveredItems = (discovered || [])
-    .filter((it) => recentReopenable(agentByName.get(it.agentName)))
-    .filter((it) => !recentKeys.has(it.agentName + "\n" + it.cwd + "\n" + it.sessionId));
-  const discoveredItems = showMoreCli ? allDiscoveredItems : allDiscoveredItems.slice(0, DISCOVERED_LIMIT);
-  const hasMoreDiscovered = allDiscoveredItems.length > DISCOVERED_LIMIT;
+  // CLI-discovered sessions (found on disk, never opened through this gateway)
+  // merge into the same list as gateway-tracked recents — sessions aren't
+  // specially called out just because they came from the Claude CLI's own
+  // transcript storage. Drop any already covered by a recent entry.
+  const combinedRecent: CombinedRecentEntry[] = [
+    ...s.recentSessions
+      .filter((it) => recentReopenable(agentByName.get(it.agentName)))
+      .map((it): CombinedRecentEntry => ({ kind: "recent", it, ts: new Date(it.lastActiveAt).getTime() })),
+    ...(discovered || [])
+      .filter((it) => recentReopenable(agentByName.get(it.agentName)))
+      .filter((it) => !recentKeys.has(it.agentName + "\n" + it.cwd + "\n" + it.sessionId))
+      .map((it): CombinedRecentEntry => ({ kind: "discovered", it, ts: new Date(it.updatedAt).getTime() })),
+  ].sort((a, b) => b.ts - a.ts);
+  // Default to the first RECENT_LIMIT; "See more" reveals the rest.
+  const recentItems = showMoreRecent ? combinedRecent : combinedRecent.slice(0, RECENT_LIMIT);
+  const hasMoreRecent = combinedRecent.length > RECENT_LIMIT;
   const currentItems = !localRecentSupported && histSupported
     ? Object.values(s.sessions)
       .filter((it) => !it.viewOnly && it.hasContent)
@@ -200,6 +210,8 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       </button>
     );
   };
+  const renderCombinedItem = (entry: CombinedRecentEntry) =>
+    entry.kind === "recent" ? renderRecentItem(entry.it) : renderDiscoveredItem(entry.it);
   const renderCurrentItem = (it: typeof currentItems[number]) => {
     const active = s.activeId === it.id;
     return (
@@ -243,7 +255,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                 {recentItems.length > 0 && (
                   <div className="recent-section">
                     <div className="recent-list">
-                      {recentItems.map((it) => renderRecentItem(it))}
+                      {recentItems.map((entry) => renderCombinedItem(entry))}
                     </div>
                     {hasMoreRecent && (
                       <button className="see-more" onClick={() => setShowMoreRecent((v) => !v)}>
@@ -260,20 +272,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                     </div>
                   </div>
                 )}
-                {discoveredItems.length > 0 && (
-                  <div className="cli-section recent-section">
-                    <div className="listhead"><span>From Claude CLI</span></div>
-                    <div className="recent-list">
-                      {discoveredItems.map((it) => renderDiscoveredItem(it))}
-                    </div>
-                    {hasMoreDiscovered && (
-                      <button className="see-more" onClick={() => setShowMoreCli((v) => !v)}>
-                        {showMoreCli ? "Show less" : "See more"}
-                      </button>
-                    )}
-                  </div>
-                )}
-                {recentItems.length === 0 && currentItems.length === 0 && discoveredItems.length === 0 && (
+                {recentItems.length === 0 && currentItems.length === 0 && (
                   <div className="panel-empty">No recent conversations yet.</div>
                 )}
               </div>
