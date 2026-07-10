@@ -450,7 +450,6 @@ type ViewBlock = {
   mimeType?: string; data?: string; uri?: string;
 };
 type HistorySessionItem = { sessionId: string; title: string | null; updatedAt: string };
-type DiscoveredHistorySessionItem = HistorySessionItem & { cwd: string; source: "claude-cli" };
 type HistoryMessagesResult = { messages: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }>; total: number; truncated: boolean };
 
 // Flatten a tool_result's content (string | block array) to text, capped so a
@@ -566,54 +565,6 @@ async function claudeTranscriptSummary(file: string): Promise<{ cwd: string | nu
     /* ignore */
   }
   return { cwd, title };
-}
-
-export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRoot?: string; limit?: number }): Promise<DiscoveredHistorySessionItem[]> {
-  const projectsRoot = opts?.projectsRoot ?? path.join(CLAUDE_DIR, "projects");
-  const fsRoot = opts?.fsRoot ?? FS_ROOT;
-  const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
-  let projects: fs.Dirent[];
-  try { projects = await fs.promises.readdir(projectsRoot, { withFileTypes: true }); } catch { return []; }
-
-  const files: Array<{ sessionId: string; file: string; mtime: number }> = [];
-  for (const project of projects) {
-    if (!project.isDirectory()) continue;
-    let entries: fs.Dirent[];
-    const dir = path.join(projectsRoot, project.name);
-    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.startsWith("agent-")) continue;
-      const file = path.join(dir, entry.name);
-      try {
-        const st = await fs.promises.stat(file);
-        files.push({ sessionId: entry.name.replace(/\.jsonl$/, ""), file, mtime: st.mtimeMs });
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  files.sort((a, b) => b.mtime - a.mtime);
-  const out: DiscoveredHistorySessionItem[] = [];
-  const seen = new Set<string>();
-  for (const f of files) {
-    if (out.length >= limit) break;
-    const summary = await claudeTranscriptSummary(f.file);
-    if (!summary.cwd) continue;
-    const cwd = resolveWithinRootBase(summary.cwd, fsRoot);
-    if (!cwd) continue;
-    const key = cwd + "\n" + f.sessionId;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({
-      sessionId: f.sessionId,
-      title: summary.title,
-      updatedAt: new Date(f.mtime).toISOString(),
-      cwd,
-      source: "claude-cli",
-    });
-  }
-  return out;
 }
 
 async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: string): Promise<HistorySessionItem[]> {
@@ -2698,27 +2649,6 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "30", 10) || 30, 1), 200);
     if (!cwd) { res.writeHead(400); res.end(); return; }
     listAgentHistory(prof?.cmd ?? "", cwd, limit)
-      .then((sessions) => {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ sessions }));
-      })
-      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
-    return;
-  }
-  // Discover Claude Code sessions that exist under ~/.claude/projects even when
-  // the gateway has never opened their cwd. The encoded project dir name is
-  // lossy, so this recovers the real cwd from each transcript and then applies
-  // the same FS_ROOT guard as normal history browsing.
-  if (consoleEnabled && pathname === "/history/discovered") {
-    const q = new URL(req.url ?? "/", "http://x").searchParams;
-    const prof = cfg.agents[q.get("agent") ?? cfg.defaultAgent];
-    const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "30", 10) || 30, 1), 200);
-    if (historyProviderFor(prof?.cmd ?? "") !== "claude") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ sessions: [] }));
-      return;
-    }
-    discoverClaudeHistory({ limit })
       .then((sessions) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ sessions }));

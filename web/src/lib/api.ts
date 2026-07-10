@@ -1,7 +1,6 @@
 import type { PermissionOption } from "../types.ts";
 
 export interface HistorySession { sessionId: string; title: string | null; updatedAt: string; }
-export interface DiscoveredHistorySession extends HistorySession { cwd: string; source: "claude-cli"; }
 export interface ViewBlock { type: "text" | "thought" | "tool" | "image"; text?: string; name?: string; toolCallId?: string; status?: string; output?: string; mimeType?: string; data?: string; uri?: string; }
 export interface ViewMessage { role: "user" | "assistant"; blocks: ViewBlock[]; }
 export interface MessagesResult { messages: ViewMessage[]; total: number; truncated: boolean; }
@@ -27,12 +26,6 @@ export async function getHistory(agent: string, cwd: string, limit = 30): Promis
   const url = base() + "/history?agent=" + encodeURIComponent(agent) +
     "&cwd=" + encodeURIComponent(cwd) + "&limit=" + limit;
   const r = await readJson(await fetch(url), "Conversation history isn't available for this agent.");
-  return (r && r.sessions) || [];
-}
-
-export async function getDiscoveredHistory(agent: string, limit = 30): Promise<DiscoveredHistorySession[]> {
-  const url = base() + "/history/discovered?agent=" + encodeURIComponent(agent) + "&limit=" + limit;
-  const r = await readJson(await fetch(url), "Discovered conversations aren't available for this agent.");
   return (r && r.sessions) || [];
 }
 

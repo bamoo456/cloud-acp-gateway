@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
-import { getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, putLockConfig } from "./api.ts";
+import { getHistory, getMessages, listDir, getRunning, putLockConfig } from "./api.ts";
 
 function mockFetch(json: unknown) {
   globalThis.fetch = vi.fn().mockResolvedValue({ json: () => Promise.resolve(json) } as Response);
@@ -23,15 +23,6 @@ describe("api", () => {
   test("getHistory returns [] when the field is missing", async () => {
     mockFetch({});
     expect(await getHistory("claude", "/x")).toEqual([]);
-  });
-
-  test("getDiscoveredHistory returns cwd-bearing sessions and builds the right URL", async () => {
-    mockFetch({ sessions: [{ sessionId: "cli1", title: "CLI work", updatedAt: "2026-01-01T00:00:00Z", cwd: "/repo", source: "claude-cli" }] });
-    const out = await getDiscoveredHistory("claude", 12);
-    expect(out).toEqual([{ sessionId: "cli1", title: "CLI work", updatedAt: "2026-01-01T00:00:00Z", cwd: "/repo", source: "claude-cli" }]);
-    const url = (globalThis.fetch as any).mock.calls[0][0] as string;
-    expect(url).toContain("/history/discovered?agent=claude");
-    expect(url).toContain("limit=12");
   });
 
   test("getMessages returns the full payload", async () => {

@@ -31,7 +31,6 @@ describe("Sidebar recent conversations", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
   let getHistory: ReturnType<typeof vi.fn>;
-  let getDiscoveredHistory: ReturnType<typeof vi.fn>;
   let openHistorySession: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -50,11 +49,9 @@ describe("Sidebar recent conversations", () => {
     document.body.appendChild(container);
     localStorage.clear();
     getHistory = vi.fn().mockResolvedValue(historyItems);
-    getDiscoveredHistory = vi.fn().mockResolvedValue([]);
     openHistorySession = vi.fn();
     vi.doMock("../lib/api.ts", () => ({
       getHistory,
-      getDiscoveredHistory,
       getMessages: vi.fn(),
       renameSession: vi.fn(),
       listDir: vi.fn(),
@@ -164,37 +161,6 @@ describe("Sidebar recent conversations", () => {
     expect(recent!.textContent).not.toContain("<local-command-caveat>");
     // …but a recent entry from another folder keeps its own cached title.
     expect(recent!.textContent).toContain("Cross folder work");
-  });
-
-  test("shows discovered Claude CLI sessions in Recent and opens them with their recovered cwd", async () => {
-    getDiscoveredHistory.mockResolvedValue([
-      { agentName: "claude", cwd: "/already", sessionId: "already-recent", title: "Already recent CLI", updatedAt: "2026-06-10T03:59:00.000Z", source: "claude-cli" },
-      { agentName: "claude", cwd: "/cli-repo", sessionId: "cli-only", title: "CLI only work", updatedAt: "2026-06-10T03:30:00.000Z", source: "claude-cli" },
-    ]);
-    await seedRecentSessions([
-      { agentName: "claude", cwd: "/already", sessionId: "already-recent", title: "Already recent CLI", lastActiveAt: "2026-06-10T03:59:00.000Z" },
-    ]);
-    await renderSidebar();
-
-    const cliSection = container.querySelector(".cli-section");
-    expect(cliSection).not.toBeNull();
-    expect(cliSection!.textContent).toContain("From Claude CLI");
-    expect(cliSection!.textContent).toContain("CLI only work");
-    expect(cliSection!.textContent).toContain("cli-repo");
-    expect(cliSection!.textContent).not.toContain("Already recent CLI");
-
-    const row = cliSection!.querySelector<HTMLButtonElement>(".sess-item");
-    expect(row).not.toBeNull();
-    await act(async () => {
-      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    expect(openHistorySession).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: "cli-only",
-      title: "CLI only work",
-      agentName: "claude",
-      cwd: "/cli-repo",
-    }));
   });
 
   test("limits Conversations to the last two days until See more is clicked", async () => {
