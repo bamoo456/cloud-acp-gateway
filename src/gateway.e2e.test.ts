@@ -791,6 +791,74 @@ test("an answered permission is not re-delivered on reload", async () => {
   await close();
 });
 
+test("an outstanding elicitation (agent question) is re-delivered on reload and answerable", async () => {
+  const { port, agent, inbox, close } = await makeTestServer();
+
+  // A prompts S, then the agent asks a question via elicitation/create (this is
+  // how claude-agent-acp surfaces AskUserQuestion).
+  const a = sse(port);
+  const ca = await a.conn;
+  await post(port, ca, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S", prompt: [{ type: "text", text: "go" }] } });
+  const gotA = nextFrame(a, (o) => o.id === 42 && o.method === "elicitation/create");
+  agent().emit(Buffer.from(JSON.stringify({
+    jsonrpc: "2.0", id: 42, method: "elicitation/create",
+    params: { sessionId: "S", mode: "form", message: "Which approach?", requestedSchema: { type: "object", properties: {} } },
+  })));
+  await gotA;
+
+  // Mirrored into the durable inbox as a question (no one-tap options).
+  const pending = inbox({ status: "pending" });
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].type, "elicitation");
+  assert.equal(pending[0].title, "Which approach?");
+
+  // A drops before answering; B reconnects and reloads S — the question must
+  // re-deliver exactly like a permission prompt.
+  a.close();
+  await new Promise((r) => setTimeout(r, 20));
+  const b = sse(port);
+  const cb = await b.conn;
+  const gotB = nextFrame(b, (o) => o.id === 42 && o.method === "elicitation/create");
+  await post(port, cb, { jsonrpc: "2.0", id: 5, method: "session/load", params: { sessionId: "S" } });
+  const loadReq = agent().sent.map((s) => JSON.parse(s) as Msg).find((o) => o.method === "session/load");
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: loadReq!.id, result: { sessionId: "S" } })));
+  await gotB;
+
+  // And B's form answer reaches the agent through the same first-reply-wins gate.
+  agent().sent.length = 0;
+  await post(port, cb, { jsonrpc: "2.0", id: 42, result: { action: "accept", content: { question_0: "Option A" } } });
+  assert.equal(fwdedReplies(agent().sent, 42), 1, "the elicitation answer reaches the agent");
+  assert.equal(inbox({ status: "pending" }).length, 0, "the inbox entry resolves with the answer");
+
+  b.close();
+  await close();
+});
+
+test("the server-side option-answer route refuses an elicitation (it needs the form, not an optionId)", async () => {
+  const { port, agent, answerInbox, close } = await makeTestServer();
+  const a = sse(port);
+  const ca = await a.conn;
+  await post(port, ca, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S" } });
+  const got = nextFrame(a, (o) => o.id === 7 && o.method === "elicitation/create");
+  agent().emit(Buffer.from(JSON.stringify({
+    jsonrpc: "2.0", id: 7, method: "elicitation/create",
+    params: { sessionId: "S", mode: "form", message: "Pick one", requestedSchema: { type: "object", properties: {} } },
+  })));
+  await got;
+
+  agent().sent.length = 0;
+  // An optionId-shaped reply would deserialize as action "cancel" and abort the
+  // agent's tool call — the route must refuse instead of answering wrong.
+  assert.equal(answerInbox("claude", "7", "allow"), false);
+  assert.equal(fwdedReplies(agent().sent, 7), 0, "no bogus reply is sent to the agent");
+  // The question is still answerable by a client rendering the form.
+  await post(port, ca, { jsonrpc: "2.0", id: 7, result: { action: "decline" } });
+  assert.equal(fwdedReplies(agent().sent, 7), 1);
+
+  a.close();
+  await close();
+});
+
 test("a reconnecting client resumes from its cursor, replaying only newer frames", async () => {
   const { port, agent, close } = await makeTestServer();
   // No live client needed: the channel is pre-created, so the agent can emit 3

@@ -11,8 +11,9 @@ import {
 } from "./reducers.ts";
 import type {
   Session, Model, Mode, ConfigOption, SlashCommand, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
-  AgentSkin, MessageImage, MessageFile, PromptCapabilities,
+  AgentSkin, MessageImage, MessageFile, PromptCapabilities, ElicitationResponse,
 } from "../types.ts";
+import { parseElicitationFields } from "../lib/elicitation.ts";
 
 type ConnState = "connecting" | "connected" | "offline";
 export type TextSize = "small" | "default" | "large" | "xl";
@@ -96,6 +97,7 @@ interface State {
   setTip: (t: string) => void;
   renameSession: (title: string) => void;
   answerPermission: (reqId: number | string, optionId: string) => void;
+  answerElicitation: (reqId: number | string, response: ElicitationResponse, summary: string) => void;
   answerInboxItem: (agentName: string, reqId: string, optionId: string) => void;
   jumpToTask: (task: RunningTask) => void;
   ensureConnected: () => void;
@@ -170,10 +172,16 @@ export const useStore = create<State>((set, get) => {
 
   const sameReq = (a: number | string, b: number | string) => String(a) === String(b);
 
-  function markPermissionResolved(s: Session, reqId: number | string, chosen: string): Session {
+  // Both blocking prompt kinds — permission cards and elicitation (agent
+  // question) forms — resolve the same way: flagged answered with a short
+  // human-readable recap of what was chosen.
+  const isPromptItem = (it: ThreadItem): it is Extract<ThreadItem, { kind: "permission" | "elicitation" }> =>
+    it.kind === "permission" || it.kind === "elicitation";
+
+  function markPromptResolved(s: Session, reqId: number | string, chosen: string): Session {
     let changed = false;
     const items = s.items.map((it) => {
-      if (it.kind !== "permission" || !sameReq(it.reqId, reqId)) return it;
+      if (!isPromptItem(it) || !sameReq(it.reqId, reqId)) return it;
       changed = true;
       return { ...it, resolved: true, chosen };
     });
@@ -191,12 +199,17 @@ export const useStore = create<State>((set, get) => {
     let cur = s;
     for (const p of pending) {
       if (p.sessionId !== cur.id) continue;
-      if (cur.items.some((it) => it.kind === "permission" && !it.resolved && sameReq(it.reqId, p.reqId))) continue;
+      if (cur.items.some((it) => isPromptItem(it) && !it.resolved && sameReq(it.reqId, p.reqId))) continue;
       const seq = cur.seq + 1;
-      const item: ThreadItem = {
-        id: cur.id + ":" + seq, kind: "permission", reqId: p.reqId,
-        title: p.title, options: p.options, resolved: false,
-      };
+      const item: ThreadItem = p.elicitation
+        ? {
+            id: cur.id + ":" + seq, kind: "elicitation", reqId: p.reqId,
+            message: p.elicitation.message, fields: p.elicitation.fields, resolved: false,
+          }
+        : {
+            id: cur.id + ":" + seq, kind: "permission", reqId: p.reqId,
+            title: p.title, options: p.options, resolved: false,
+          };
       cur = { ...cur, seq, hasContent: true, items: [...cur.items, item] };
     }
     return cur;
@@ -209,10 +222,10 @@ export const useStore = create<State>((set, get) => {
   // broadcasting), reconciling anything answered elsewhere. Deduped by
   // (agentName, reqId) so a re-delivery or a poll never doubles it. id 0 is a
   // placeholder until the poll supplies the real surrogate id.
-  function upsertInboxItem(items: InboxItem[], agentName: string, sessionId: string, reqId: number | string, title: string, options: PermissionOption[]): InboxItem[] {
+  function upsertInboxItem(items: InboxItem[], agentName: string, sessionId: string, reqId: number | string, title: string, options: PermissionOption[], type: string = "permission"): InboxItem[] {
     const rid = String(reqId);
     return [
-      { id: 0, agentName, sessionId, reqId: rid, title, options, status: "pending", createdAt: new Date().toISOString() },
+      { id: 0, type, agentName, sessionId, reqId: rid, title, options, status: "pending", createdAt: new Date().toISOString() },
       ...items.filter((it) => !(it.agentName === agentName && it.reqId === rid)),
     ];
   }
@@ -389,11 +402,43 @@ export const useStore = create<State>((set, get) => {
     if (changed) touchSessionActivity(sid);
   }
 
+  // A reqId is the agent's own request id, so it is unique only WITHIN an agent's
+  // connection — two agents can issue the same number. acp is the active agent's
+  // channel, so scope the match to the active agent: clearing a colliding reqId on
+  // a retained foreign-agent session would wrongly resolve its still-pending prompt.
+  function findActivePrompt(reqId: number | string): PendingPermission | undefined {
+    const agent = get().agentName;
+    return get().pendingPermissions.find((it) => it.agentName === agent && sameReq(it.reqId, reqId));
+  }
+
+  // Shared resolution path for both blocking prompt kinds (permission cards and
+  // elicitation forms): send `result` as the JSON-RPC reply on the active agent's
+  // channel, then mark every local copy answered — the in-thread item, the durable
+  // pendingPermissions entry, and the optimistic inbox mirror.
+  function resolvePrompt(reqId: number | string, result: unknown, chosen: string, pending: PendingPermission | undefined) {
+    const agent = get().agentName;
+    acp.respond(reqId, result);
+    set((st) => {
+      const sessions: Record<string, Session> = {};
+      for (const [sid, sess] of Object.entries(st.sessions)) {
+        sessions[sid] = sess.agentName && sess.agentName !== agent ? sess : markPromptResolved(sess, reqId, chosen);
+      }
+      return {
+        pendingPermissions: st.pendingPermissions.filter((it) => !(it.agentName === agent && sameReq(it.reqId, reqId))),
+        inboxItems: st.inboxItems.filter((it) => !(it.agentName === agent && it.reqId === String(reqId))),
+        sessions,
+      };
+    });
+    if (pending?.sessionId) touchSessionActivity(pending.sessionId);
+  }
+
   function handleRequest(m: RpcMessage) {
-    if (m.method !== "session/request_permission") {
-      acp.respondErr(m.id!, -32601, "not supported by this client");
-      return;
-    }
+    if (m.method === "session/request_permission") return handlePermissionRequest(m);
+    if (m.method === "elicitation/create") return handleElicitationRequest(m);
+    acp.respondErr(m.id!, -32601, "not supported by this client");
+  }
+
+  function handlePermissionRequest(m: RpcMessage) {
     const p = m.params as { sessionId?: string; toolCall?: { title?: string }; options?: PermissionOption[] };
     const st = get();
     const sid = p.sessionId ? (st.sessions[p.sessionId] ? p.sessionId : "") : (st.activeId || "");
@@ -448,6 +493,62 @@ export const useStore = create<State>((set, get) => {
         { reqId: m.id!, sessionId: sid, agentName: st.agentName, title, options: opts, createdAt: Date.now() },
       ],
       inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, sid, m.id!, title, opts),
+    }));
+  }
+
+  // The Claude agent's AskUserQuestion tool (and MCP form elicitations) arrive as
+  // `elicitation/create` requests: the agent's question(s), each with options
+  // and/or a free-text field, blocking the turn until answered. Same routing and
+  // durability rules as permissions — record for unloaded sessions instead of
+  // error-replying (the gateway gate is first-reply-wins, an error would eat the
+  // prompt for every viewer), keep a pendingPermissions entry (with the form
+  // payload) so reloads/resyncs re-surface an unanswered question.
+  function handleElicitationRequest(m: RpcMessage) {
+    const p = m.params as { sessionId?: string; mode?: string; message?: string; requestedSchema?: unknown };
+    // Only form mode is advertised (initialize's clientCapabilities.elicitation).
+    // Anything else is unanswerable everywhere — no viewer can render it — so an
+    // error reply is honest, not prompt-eating.
+    if (p.mode && p.mode !== "form") {
+      acp.respondErr(m.id!, -32601, "unsupported elicitation mode");
+      return;
+    }
+    const st = get();
+    const sid = p.sessionId ? (st.sessions[p.sessionId] ? p.sessionId : "") : (st.activeId || "");
+    const message = p.message || "The agent has a question";
+    const elicitation = { message, fields: parseElicitationFields(p.requestedSchema) };
+    const pendingEntry = (sessionId: string): PendingPermission => ({
+      reqId: m.id!, sessionId, agentName: st.agentName, title: message, options: [], createdAt: Date.now(), elicitation,
+    });
+    if (!st.sessions[sid]) {
+      if (p.sessionId && m.id != null) {
+        set((cur) => ({
+          pendingPermissions: [
+            ...cur.pendingPermissions.filter((it) => !(it.agentName === st.agentName && sameReq(it.reqId, m.id!))),
+            pendingEntry(p.sessionId!),
+          ],
+          inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, p.sessionId!, m.id!, message, [], "elicitation"),
+        }));
+      }
+      return;
+    }
+    // Questions are never auto-approved: unlike a tool permission, there is no
+    // "safe default" — the agent is asking because only the user can decide.
+    patch(sid, (s) => {
+      if (s.items.some((it) => isPromptItem(it) && !it.resolved && sameReq(it.reqId, m.id!))) return s;
+      const seq = s.seq + 1;
+      const item: ThreadItem = {
+        id: s.id + ":" + seq, kind: "elicitation", reqId: m.id!,
+        message, fields: elicitation.fields, resolved: false,
+      };
+      return { ...s, seq, hasContent: true, working: false, curAssistantId: null, curThoughtId: null, items: [...s.items, item] };
+    });
+    touchSessionActivity(sid);
+    set((cur) => ({
+      pendingPermissions: [
+        ...cur.pendingPermissions.filter((it) => !(it.agentName === st.agentName && sameReq(it.reqId, m.id!))),
+        pendingEntry(sid),
+      ],
+      inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, sid, m.id!, message, [], "elicitation"),
     }));
   }
 
@@ -584,7 +685,10 @@ export const useStore = create<State>((set, get) => {
         try {
           const init = (await acp.request("initialize", {
             protocolVersion: 1,
-            clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+            // elicitation.form re-enables the Claude adapter's AskUserQuestion tool
+            // (questions with options), which it presents via `elicitation/create`;
+            // without this capability the adapter disables the tool entirely.
+            clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, elicitation: { form: {} } },
           })) as { agentCapabilities?: { promptCapabilities?: PromptCapabilities; loadSession?: boolean } } | undefined;
           // The agent's capabilities flow through the gateway unchanged. Gate image
           // input on promptCapabilities; and trust the agent's own loadSession over
@@ -768,28 +872,13 @@ export const useStore = create<State>((set, get) => {
         .catch(() => {});
     },
     answerPermission(reqId, optionId) {
-      // A reqId is the agent's own request id, so it is unique only WITHIN an agent's
-      // connection — two agents can issue the same number. acp is the active agent's
-      // channel, so scope the match to the active agent: clearing a colliding reqId on
-      // a retained foreign-agent session would wrongly resolve its still-pending prompt.
-      const agent = get().agentName;
-      const matches = (it: { reqId: number | string; agentName: string }) => it.agentName === agent && sameReq(it.reqId, reqId);
-      const pending = get().pendingPermissions.find(matches);
+      const pending = findActivePrompt(reqId);
       const opt = pending?.options.find((it) => it.optionId === optionId);
       const chosen = opt?.name || opt?.optionId || optionId;
-      acp.respond(reqId, { outcome: { outcome: "selected", optionId } });
-      set((st) => {
-        const sessions: Record<string, Session> = {};
-        for (const [sid, sess] of Object.entries(st.sessions)) {
-          sessions[sid] = sess.agentName && sess.agentName !== agent ? sess : markPermissionResolved(sess, reqId, chosen);
-        }
-        return {
-          pendingPermissions: st.pendingPermissions.filter((it) => !matches(it)),
-          inboxItems: st.inboxItems.filter((it) => !(it.agentName === agent && it.reqId === String(reqId))),
-          sessions,
-        };
-      });
-      if (pending?.sessionId) touchSessionActivity(pending.sessionId);
+      resolvePrompt(reqId, { outcome: { outcome: "selected", optionId } }, chosen, pending);
+    },
+    answerElicitation(reqId, response, summary) {
+      resolvePrompt(reqId, response, summary, findActivePrompt(reqId));
     },
     answerInboxItem(agentName, reqId, optionId) {
       // Answer a prompt for ANY agent via the gateway's server-side route — no need
@@ -808,7 +897,7 @@ export const useStore = create<State>((set, get) => {
       set((st) => {
         const sessions: Record<string, Session> = {};
         for (const [sid, sess] of Object.entries(st.sessions)) {
-          sessions[sid] = sess.agentName && sess.agentName !== agentName ? sess : markPermissionResolved(sess, reqId, chosen);
+          sessions[sid] = sess.agentName && sess.agentName !== agentName ? sess : markPromptResolved(sess, reqId, chosen);
         }
         return {
           inboxItems: st.inboxItems.filter((it) => !(it.agentName === agentName && it.reqId === reqId)),
@@ -1177,4 +1266,9 @@ useStore.subscribe((state, prev) => {
 // expose the permission resolver for the PermissionPrompt component
 export function answerPermission(reqId: number | string, optionId: string) {
   useStore.getState().answerPermission(reqId, optionId);
+}
+
+// expose the elicitation resolver for the ElicitationPrompt component
+export function answerElicitation(reqId: number | string, response: ElicitationResponse, summary: string) {
+  useStore.getState().answerElicitation(reqId, response, summary);
 }

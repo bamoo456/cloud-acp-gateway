@@ -512,6 +512,92 @@ describe("store notification routing", () => {
     expect(perm).toMatchObject({ reqId: 91, title: "Write a file", resolved: false });
   });
 
+  test("initialize advertises form-elicitation support (re-enables Claude's AskUserQuestion)", async () => {
+    const { ws } = await bootstrapClaude();
+    const init = JSON.parse(ws.sent[0]);
+    expect(init.method).toBe("initialize");
+    expect(init.params.clientCapabilities.elicitation).toEqual({ form: {} });
+  });
+
+  const questionSchema = {
+    type: "object",
+    properties: {
+      question_0: {
+        type: "string", title: "Approach", description: "Which approach should we take?",
+        oneOf: [{ const: "Rewrite", title: "Rewrite — start clean" }, { const: "Patch", title: "Patch — minimal diff" }],
+      },
+      question_0_custom: { type: "string", title: "Other" },
+    },
+  };
+
+  test("renders an elicitation question and answers it with the form content", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    ws.recv({
+      jsonrpc: "2.0", id: 61, method: "elicitation/create",
+      params: { sessionId: "home-session", mode: "form", message: "Which approach should we take?", requestedSchema: questionSchema },
+    });
+    await flush();
+
+    const item = useStore.getState().sessions["home-session"].items.find((it) => it.kind === "elicitation");
+    expect(item).toMatchObject({ reqId: 61, message: "Which approach should we take?", resolved: false });
+    expect((item as any).fields[0].options.map((o: any) => o.value)).toEqual(["Rewrite", "Patch"]);
+    // Tracked like a permission so a reload/resync can re-surface it, and the
+    // badge sees it as a question (no one-tap options).
+    expect((useStore.getState() as any).pendingPermissions).toMatchObject([{ reqId: 61, elicitation: { message: "Which approach should we take?" } }]);
+    expect((useStore.getState() as any).inboxItems).toMatchObject([{ reqId: "61", type: "elicitation" }]);
+
+    const sentBefore = ws.sent.length;
+    (useStore.getState() as any).answerElicitation(61, { action: "accept", content: { question_0: "Patch" } }, "Patch");
+    const reply = JSON.parse(ws.sent[sentBefore]);
+    expect(reply).toMatchObject({ id: 61, result: { action: "accept", content: { question_0: "Patch" } } });
+    expect(useStore.getState().sessions["home-session"].items.find((it) => it.kind === "elicitation"))
+      .toMatchObject({ resolved: true, chosen: "Patch" });
+    expect((useStore.getState() as any).pendingPermissions).toHaveLength(0);
+    expect((useStore.getState() as any).inboxItems).toHaveLength(0);
+  });
+
+  test("does not error-reply to an elicitation for an unloaded session, and re-surfaces it on open", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    const sentBefore = ws.sent.length;
+    ws.recv({
+      jsonrpc: "2.0", id: 62, method: "elicitation/create",
+      params: { sessionId: "bg-session", mode: "form", message: "Pick one", requestedSchema: questionSchema },
+    });
+    await flush();
+
+    // Not answered with an error (the gateway gate is first-reply-wins — an error
+    // would eat the question for every other viewer), just recorded.
+    expect(ws.sent).toHaveLength(sentBefore);
+    expect((useStore.getState() as any).pendingPermissions).toMatchObject([{ reqId: 62, sessionId: "bg-session" }]);
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "earlier work" }] }],
+        total: 1,
+        truncated: false,
+      }),
+    }));
+    await useStore.getState().openHistorySession({ sessionId: "bg-session", title: "Background" });
+    await flush();
+
+    const item = useStore.getState().sessions["bg-session"].items.find((it) => it.kind === "elicitation");
+    expect(item).toMatchObject({ reqId: 62, message: "Pick one", resolved: false });
+    expect((item as any).fields.length).toBe(2);
+  });
+
+  test("auto-approve does not swallow an elicitation — questions always reach the user", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    useStore.setState({ autoApprove: true } as any);
+    const sentBefore = ws.sent.length;
+    ws.recv({
+      jsonrpc: "2.0", id: 63, method: "elicitation/create",
+      params: { sessionId: "home-session", mode: "form", message: "Really?", requestedSchema: questionSchema },
+    });
+    await flush();
+    expect(ws.sent).toHaveLength(sentBefore); // no auto-reply
+    expect(useStore.getState().sessions["home-session"].items.some((it) => it.kind === "elicitation")).toBe(true);
+  });
+
   test("recents derive a title from the first user message instead of Untitled", async () => {
     const { useStore } = await bootstrapClaude();
     const { makeSession, addUserBubble } = await import("./reducers.ts");
@@ -1615,7 +1701,7 @@ describe("store notification routing", () => {
       agentName: "claude", activeId: "other",
       sessions: { S: sess } as any,
       pendingPermissions: [{ reqId: 99, sessionId: "S", agentName: "claude", title: "Edit", options: opts, createdAt: 1 }],
-      inboxItems: [{ id: 1, agentName: "claude", sessionId: "S", reqId: "99", title: "Edit", options: opts, status: "pending", createdAt: "x" }],
+      inboxItems: [{ id: 1, type: "permission", agentName: "claude", sessionId: "S", reqId: "99", title: "Edit", options: opts, status: "pending", createdAt: "x" }],
     });
 
     (useStore.getState() as any).answerInboxItem("claude", "99", "allow");
