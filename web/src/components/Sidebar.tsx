@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getHistory, type HistorySession } from "../lib/api.ts";
+import { getHistory, getDiscoveredHistory, type HistorySession, type DiscoveredHistorySession } from "../lib/api.ts";
 import type { RecentSession } from "../lib/recentSessions.ts";
 import { useStore } from "../store/store.ts";
 import { AgentMark } from "./AgentPill.tsx";
@@ -8,10 +8,12 @@ import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
 
 const RECENT_LIMIT = 5;
+const DISCOVERED_LIMIT = 5;
 const CONVERSATION_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
 // A history row tagged with the agent it was fetched from, so the unified list can
 // show the owning agent's mark and reopen it under that agent.
 type TaggedHistory = HistorySession & { agentName: string };
+type TaggedDiscoveredHistory = DiscoveredHistorySession & { agentName: string };
 function withinRecentWindow(iso: string) {
   const t = new Date(iso).getTime();
   return Number.isFinite(t) && Date.now() - t <= CONVERSATION_WINDOW_MS;
@@ -35,6 +37,8 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const [q, setQ] = useState("");
   const [showMore, setShowMore] = useState(false);
   const [showMoreRecent, setShowMoreRecent] = useState(false);
+  const [showMoreCli, setShowMoreCli] = useState(false);
+  const [discovered, setDiscovered] = useState<TaggedDiscoveredHistory[] | null>(null);
   const [tab, setTab] = useState<"recent" | "conversations">("recent");
   // The gateway marks agents with no native history reader as history:false.
   // Missing flag (dev fallback, older gateway) = supported.
@@ -45,6 +49,9 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // every resumable agent's recents. The active agent still gates the local
   // "Current" fallback (in-memory sessions for agents that can't load history).
   const histAgentNames = s.cfg.agents.filter((a) => a.history !== false).map((a) => a.name);
+  const discoverAgentNames = s.cfg.agents
+    .filter((a) => a.history !== false && (a.kind === "claude" || (!a.kind && a.name === "claude")))
+    .map((a) => a.name);
   const anyHistSupported = histAgentNames.length > 0;
   const agentRef = agentByName.get(s.agentName);
   const histSupported = agentRef?.history !== false;
@@ -54,6 +61,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // persistent (always visible), not a toggle overlay. Agent switching does NOT
   // refetch — the list is unified — so it stays put when you flip agents.
   const histAgentsKey = histAgentNames.join(",");
+  const discoverAgentsKey = discoverAgentNames.join(",");
   function loadHistory(reset: boolean) {
     if (reset) { setItems(null); setErr(false); setShowMore(false); }
     if (!anyHistSupported) { setItems([]); return; }
@@ -70,14 +78,30 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       setItems(merged);
     });
   }
-  useEffect(() => { loadHistory(true); }, [open, s.cwd, histAgentsKey]);
+  function loadDiscovered(reset: boolean) {
+    if (reset) { setDiscovered(null); setShowMoreCli(false); }
+    if (!discoverAgentNames.length) { setDiscovered([]); return; }
+    Promise.all(
+      discoverAgentNames.map((name) =>
+        getDiscoveredHistory(name)
+          .then((list) => list.map((it): TaggedDiscoveredHistory => ({ ...it, agentName: name })))
+          .catch(() => null)),
+    ).then((lists) => {
+      if (lists.every((l) => l === null)) { setDiscovered([]); return; }
+      const merged = lists.flat().filter((it): it is TaggedDiscoveredHistory => it !== null)
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      setDiscovered(merged);
+    });
+  }
+  useEffect(() => { loadHistory(true); loadDiscovered(true); }, [open, s.cwd, histAgentsKey, discoverAgentsKey]);
   // The panel always opens on Recent so cross-folder switching is one tap away,
   // collapsed back to the first few recents.
-  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); } }, [open]);
+  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setShowMoreCli(false); } }, [open]);
   // refresh the list in place (no loading flash) when something renames a session
   useEffect(() => {
     if (s.historyNonce === 0) return;
     loadHistory(false);
+    loadDiscovered(false);
   }, [s.historyNonce]);
 
   // Running indicator, reusing the polled runningTasks. Rows can belong to any
@@ -113,6 +137,12 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     .filter((it) => recentReopenable(agentByName.get(it.agentName)));
   const recentItems = showMoreRecent ? allRecentItems : allRecentItems.slice(0, RECENT_LIMIT);
   const hasMoreRecent = allRecentItems.length > RECENT_LIMIT;
+  const recentKeys = new Set(s.recentSessions.map((it) => it.agentName + "\n" + it.cwd + "\n" + it.sessionId));
+  const allDiscoveredItems = (discovered || [])
+    .filter((it) => recentReopenable(agentByName.get(it.agentName)))
+    .filter((it) => !recentKeys.has(it.agentName + "\n" + it.cwd + "\n" + it.sessionId));
+  const discoveredItems = showMoreCli ? allDiscoveredItems : allDiscoveredItems.slice(0, DISCOVERED_LIMIT);
+  const hasMoreDiscovered = allDiscoveredItems.length > DISCOVERED_LIMIT;
   const currentItems = !localRecentSupported && histSupported
     ? Object.values(s.sessions)
       .filter((it) => !it.viewOnly && it.hasContent)
@@ -152,6 +182,21 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
           <span className="folder-name">{basename(it.cwd)}</span>
         </span>
         <span className="when">{it.lastActiveAt ? timeAgo(it.lastActiveAt) : ""}</span>
+      </button>
+    );
+  };
+  const renderDiscoveredItem = (it: TaggedDiscoveredHistory) => {
+    const active = s.cwd === it.cwd && s.agentName === it.agentName && !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
+    return (
+      <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"discovered:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
+        onClick={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}>
+        {runDot(it.agentName, it.sessionId)}
+        {mark(it.agentName)}
+        <span className="sess-main">
+          <span className="name">{it.title || it.sessionId.slice(0, 8)}</span>
+          <span className="folder-name">{basename(it.cwd)}</span>
+        </span>
+        <span className="when">{it.updatedAt ? timeAgo(it.updatedAt) : ""}</span>
       </button>
     );
   };
@@ -215,7 +260,20 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                     </div>
                   </div>
                 )}
-                {recentItems.length === 0 && currentItems.length === 0 && (
+                {discoveredItems.length > 0 && (
+                  <div className="cli-section recent-section">
+                    <div className="listhead"><span>From Claude CLI</span></div>
+                    <div className="recent-list">
+                      {discoveredItems.map((it) => renderDiscoveredItem(it))}
+                    </div>
+                    {hasMoreDiscovered && (
+                      <button className="see-more" onClick={() => setShowMoreCli((v) => !v)}>
+                        {showMoreCli ? "Show less" : "See more"}
+                      </button>
+                    )}
+                  </div>
+                )}
+                {recentItems.length === 0 && currentItems.length === 0 && discoveredItems.length === 0 && (
                   <div className="panel-empty">No recent conversations yet.</div>
                 )}
               </div>

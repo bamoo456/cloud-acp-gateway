@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, findClaudeSessionFile } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, findClaudeSessionFile } from "./gateway.ts";
 
 // Write a Claude Code transcript (one JSON object per line) to a temp file.
 function writeTranscript(lines: unknown[]): string {
@@ -85,6 +85,37 @@ test("history drops Claude Code's interrupt markers but keeps real turns", async
   const texts = messages.flatMap((m) => m.blocks.filter((b) => b.type === "text").map((b) => b.text ?? ""));
   assert.ok(!texts.some((t) => t.includes("Request interrupted")), "interrupt markers are dropped");
   assert.deepEqual(texts, ["do the thing", "on it", "next prompt"], "real user/assistant turns survive in order");
+});
+
+test("Claude discovery recovers cwd from CLI transcripts and filters outside the filesystem root", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const inCwd = path.join(fsRoot, "repo");
+  const newerCwd = path.join(fsRoot, "newer");
+  const outCwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-outside-"));
+  fs.mkdirSync(inCwd, { recursive: true });
+  fs.mkdirSync(newerCwd, { recursive: true });
+
+  writeClaudeProjectTranscript(projectsRoot, "-encoded-repo", "session-old", [
+    { type: "summary", cwd: inCwd, sessionId: "session-old" },
+    { type: "user", cwd: inCwd, sessionId: "session-old", message: { role: "user", content: "older cli prompt" } },
+  ], 1000);
+  writeClaudeProjectTranscript(projectsRoot, "-encoded-newer", "session-new", [
+    { type: "user", cwd: newerCwd, sessionId: "session-new", message: { role: "user", content: "newer cli prompt" } },
+  ], 3000);
+  writeClaudeProjectTranscript(projectsRoot, "-encoded-outside", "session-out", [
+    { type: "user", cwd: outCwd, sessionId: "session-out", message: { role: "user", content: "outside prompt" } },
+  ], 5000);
+  writeClaudeProjectTranscript(projectsRoot, "-encoded-agent", "agent-sidechain", [
+    { type: "user", cwd: inCwd, sessionId: "agent-sidechain", message: { role: "user", content: "ignore sidechain" } },
+  ], 7000);
+
+  const sessions = await discoverClaudeHistory({ projectsRoot, fsRoot, limit: 10 });
+
+  assert.deepEqual(sessions, [
+    { sessionId: "session-new", title: "newer cli prompt", updatedAt: new Date(3000).toISOString(), cwd: fs.realpathSync(newerCwd), source: "claude-cli" },
+    { sessionId: "session-old", title: "older cli prompt", updatedAt: new Date(1000).toISOString(), cwd: fs.realpathSync(inCwd), source: "claude-cli" },
+  ]);
 });
 
 test("history surfaces image content blocks (base64 + url sources)", async () => {

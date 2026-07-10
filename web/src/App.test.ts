@@ -29,6 +29,7 @@ describe("App running-task polling", () => {
       getInboxPending: vi.fn().mockResolvedValue([]),
       answerInbox: vi.fn().mockResolvedValue(true),
       getHistory: vi.fn().mockResolvedValue([]),
+      getDiscoveredHistory: vi.fn().mockResolvedValue([]),
       getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, truncated: false }),
       renameSession: vi.fn(),
       listDir: vi.fn().mockResolvedValue({ root: "/", path: "/", parent: null, dirs: [] }),
