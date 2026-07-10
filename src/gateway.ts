@@ -1445,12 +1445,13 @@ class Channel {
   // sessionId -> the text of its first prompt, used as the running-task label so
   // concurrent tasks in the same folder don't all collapse to a short id.
   private sessionTitle = new Map<string, string>();
-  // agent request id -> the still-outstanding permission request (its session +
-  // raw frame). A permission blocks the agent until someone answers, but a client
-  // that drops (or reloads) reconnects at cursor=end and never sees the original
-  // frame again. Re-delivered after that session's session/load so the prompt
-  // survives reconnects; dropped once answered or when the agent exits.
-  private pendingPerms = new Map<number | string, { sid: string; seq: number; frame: Buffer }>();
+  // agent request id -> the still-outstanding blocking prompt (its session, raw
+  // frame, and which method it was: session/request_permission or
+  // elicitation/create). A prompt blocks the agent until someone answers, but a
+  // client that drops (or reloads) reconnects at cursor=end and never sees the
+  // original frame again. Re-delivered after that session's session/load so the
+  // prompt survives reconnects; dropped once answered or when the agent exits.
+  private pendingPerms = new Map<number | string, { sid: string; seq: number; frame: Buffer; method: string }>();
   // The `initialize` handshake is per-PROCESS, but one agent process is shared
   // across every client connection. codex-acp answers `initialize` exactly once
   // and returns -32603 "Already initialized" on any later one, so a reconnect /
@@ -1789,18 +1790,31 @@ class Channel {
       // Remember the outstanding prompt so it can be re-delivered to a client that
       // reconnects (or reloads) and reloads this session — see fromAgent's
       // session/load branch above.
-      if (sid && f.id !== undefined && f.id !== null && f.method === "session/request_permission") {
-        this.pendingPerms.set(f.id as string | number, { sid, seq, frame: line });
+      if (sid && f.id !== undefined && f.id !== null &&
+          (f.method === "session/request_permission" || f.method === "elicitation/create")) {
+        this.pendingPerms.set(f.id as string | number, { sid, seq, frame: line, method: f.method });
         // Mirror into the durable inbox so the prompt survives a reload and is
         // visible/answerable across agents via /inbox (pendingPerms stays the
         // in-run, low-latency re-delivery source; the inbox is the audit trail).
-        const params = f.params as { toolCall?: { title?: string }; options?: unknown } | undefined;
-        const options = Array.isArray(params?.options) ? params.options : [];
-        this.store?.addInboxItem({
-          type: "permission", agentName: this.name, sessionId: sid, reqId: String(f.id), seq,
-          title: params?.toolCall?.title || "Run a tool",
-          bodyJson: JSON.stringify(options), createdAt: new Date().toISOString(),
-        });
+        if (f.method === "session/request_permission") {
+          const params = f.params as { toolCall?: { title?: string }; options?: unknown } | undefined;
+          const options = Array.isArray(params?.options) ? params.options : [];
+          this.store?.addInboxItem({
+            type: "permission", agentName: this.name, sessionId: sid, reqId: String(f.id), seq,
+            title: params?.toolCall?.title || "Run a tool",
+            bodyJson: JSON.stringify(options), createdAt: new Date().toISOString(),
+          });
+        } else {
+          // A form elicitation (the agent asking the user question(s), e.g. Claude's
+          // AskUserQuestion). No one-tap options to record — the inbox entry points
+          // the user at the conversation, where the client renders the form.
+          const params = f.params as { message?: string } | undefined;
+          this.store?.addInboxItem({
+            type: "elicitation", agentName: this.name, sessionId: sid, reqId: String(f.id), seq,
+            title: params?.message || "The agent has a question",
+            bodyJson: null, createdAt: new Date().toISOString(),
+          });
+        }
       }
       const targets = sid ? this.subs.viewers(sid) : undefined;
       this.broadcast(seq, line, targets);
@@ -1956,7 +1970,15 @@ class Channel {
     // pendingPerms is keyed by the agent's real (possibly numeric) id; match by
     // string so a stringified reqId from HTTP finds the right entry.
     let key: number | string | undefined;
-    for (const k of this.pendingPerms.keys()) if (String(k) === reqId) { key = k; break; }
+    for (const [k, v] of this.pendingPerms) {
+      if (String(k) !== reqId) continue;
+      // An elicitation expects an {action, content} reply, not an optionId — a
+      // permission-shaped answer would read as "cancel" and abort the tool call.
+      // It must be answered from a client rendering the form, not this route.
+      if (v.method !== "session/request_permission") return false;
+      key = k;
+      break;
+    }
     if (key === undefined || !this.permGate.claim(key)) return false;
     this.pendingPerms.delete(key);
     const result = { outcome: { outcome: "selected", optionId } };

@@ -44,6 +44,7 @@ describe("TopBar pending permissions", () => {
       },
       inboxItems: [{
         id: 1,
+        type: "permission",
         reqId: "88",
         sessionId: "waiting-session",
         agentName: "claude",

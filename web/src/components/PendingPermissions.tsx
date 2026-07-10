@@ -34,7 +34,7 @@ export function PendingPermissions() {
         <>
           <div className="pending-scrim" onClick={() => setOpen(false)} />
           <div className="pending-menu" role="dialog" aria-label="Pending permissions">
-            <div className="pending-head"><IconLock />Permission needed</div>
+            <div className="pending-head"><IconLock />Needs your input</div>
             {pending.map((item) => {
               const sessionTitle = (item.sessionId && s.sessions[item.sessionId]?.title) || item.sessionId?.slice(0, 8) || item.agentName;
               return (
@@ -42,7 +42,18 @@ export function PendingPermissions() {
                   <div className="pending-session">{sessionTitle}</div>
                   <div className="pending-title">{item.title}</div>
                   <div className="pending-actions">
-                    {item.options.map((option) => (
+                    {item.type === "elicitation" ? (
+                      // A question form can't be answered with a one-tap option —
+                      // jump to its conversation, where the form renders in-thread.
+                      <button className="allow" disabled={!item.sessionId}
+                        onClick={() => {
+                          if (!item.sessionId) return;
+                          setOpen(false);
+                          s.jumpToTask({ agentName: item.agentName, sessionId: item.sessionId, state: "awaiting-input" });
+                        }}>
+                        Answer in conversation
+                      </button>
+                    ) : item.options.map((option) => (
                       <button key={option.optionId}
                         className={/allow/.test(option.kind || "") ? "allow" : ""}
                         onClick={() => s.answerInboxItem(item.agentName, item.reqId!, option.optionId)}>

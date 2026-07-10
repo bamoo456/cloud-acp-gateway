@@ -166,6 +166,7 @@ export async function getRunning(): Promise<RunningTask[]> {
 // a page reload and spans every agent — so a device sees prompts raised anywhere.
 export interface InboxItem {
   id: number;
+  type: string; // 'permission' (one-tap options) | 'elicitation' (a form; answered in the conversation)
   agentName: string;
   sessionId: string | null;
   reqId: string | null;
@@ -185,6 +186,7 @@ export async function getInboxPending(): Promise<InboxItem[]> {
     const items: Array<Record<string, unknown>> = Array.isArray(j?.items) ? j.items : [];
     return items.map((it) => ({
       id: Number(it.id),
+      type: String(it.type ?? "permission"),
       agentName: String(it.agentName ?? ""),
       sessionId: (it.sessionId as string | null) ?? null,
       reqId: it.reqId == null ? null : String(it.reqId),
