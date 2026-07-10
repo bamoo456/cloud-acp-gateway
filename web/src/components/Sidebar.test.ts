@@ -166,7 +166,7 @@ describe("Sidebar recent conversations", () => {
     expect(recent!.textContent).toContain("Cross folder work");
   });
 
-  test("shows discovered Claude CLI sessions in Recent and opens them with their recovered cwd", async () => {
+  test("folds discovered Claude CLI sessions into Recent (no separate section) and opens them with their recovered cwd", async () => {
     getDiscoveredHistory.mockResolvedValue([
       { agentName: "claude", cwd: "/already", sessionId: "already-recent", title: "Already recent CLI", updatedAt: "2026-06-10T03:59:00.000Z", source: "claude-cli" },
       { agentName: "claude", cwd: "/cli-repo", sessionId: "cli-only", title: "CLI only work", updatedAt: "2026-06-10T03:30:00.000Z", source: "claude-cli" },
@@ -176,17 +176,22 @@ describe("Sidebar recent conversations", () => {
     ]);
     await renderSidebar();
 
-    const cliSection = container.querySelector(".cli-section");
-    expect(cliSection).not.toBeNull();
-    expect(cliSection!.textContent).toContain("From Claude CLI");
-    expect(cliSection!.textContent).toContain("CLI only work");
-    expect(cliSection!.textContent).toContain("cli-repo");
-    expect(cliSection!.textContent).not.toContain("Already recent CLI");
+    // No dedicated CLI section — discovered sessions ride in the Recent list.
+    expect(container.querySelector(".cli-section")).toBeNull();
+    expect(container.textContent).not.toContain("From Claude CLI");
 
-    const row = cliSection!.querySelector<HTMLButtonElement>(".sess-item");
-    expect(row).not.toBeNull();
+    const recent = container.querySelector(".recent-section");
+    expect(recent).not.toBeNull();
+    const rows = recent!.querySelectorAll<HTMLButtonElement>(".sess-item");
+    // One recent + one CLI-only session, interleaved by activity time; the CLI
+    // copy of the existing recent is deduped away.
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("Already recent CLI");
+    expect(rows[1].textContent).toContain("CLI only work");
+    expect(rows[1].textContent).toContain("cli-repo");
+
     await act(async () => {
-      row!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      rows[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(openHistorySession).toHaveBeenCalledWith(expect.objectContaining({
