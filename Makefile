@@ -26,6 +26,8 @@
 #     make logs-mac     tail the launchd service log
 #     make stop-mac     bootout (unload) the launchd service
 #     make start-mac    bootstrap (load) the launchd service
+#     make undeploy-mac  stop + remove the plist (keeps ledger/logs/TLS — 'make deploy-mac' to redo)
+#     make uninstall-mac full teardown — undeploy + remove ledger and logs (DESTRUCTIVE, no recovery)
 #   Override the label/plist if yours differ from the installed defaults:
 #     make deploy-mac MAC_LABEL=com.acp-gateway
 #
@@ -340,6 +342,26 @@ start-mac: ## macOS: bootstrap (load) the launchd service from its plist
 			printf '%s\n' "$$output" >&2; exit $$status; \
 		fi; \
 	fi
+
+.PHONY: undeploy-mac
+undeploy-mac: ## macOS: stop the launchd service and remove its plist (keeps ledger/logs/TLS — 'make deploy-mac' to redo)
+	@$(MAKE) --no-print-directory stop-mac
+	@if [ -f "$(MAC_PLIST)" ]; then \
+		rm -v "$(MAC_PLIST)" && echo "undeployed '$(MAC_LABEL)'" || { echo "error: failed to remove $(MAC_PLIST)"; exit 1; }; \
+	else \
+		echo "no plist at $(MAC_PLIST)"; \
+	fi
+
+.PHONY: uninstall-mac
+uninstall-mac: ## macOS: full teardown — undeploy + remove ledger (state.sqlite, TLS cert) and logs (DESTRUCTIVE, no recovery)
+	@$(MAKE) --no-print-directory undeploy-mac
+	@if [ -d "$(MAC_LEDGER_DIR)" ]; then \
+		rm -rfv "$(MAC_LEDGER_DIR)" || { echo "error: failed to remove $(MAC_LEDGER_DIR)"; exit 1; }; \
+	else \
+		echo "no ledger at $(MAC_LEDGER_DIR)"; \
+	fi
+	@rm -fv "$(MAC_LOG)" "$(MAC_ERRLOG)" 2>/dev/null || true
+	@echo "uninstalled '$(MAC_LABEL)' — re-run 'make deploy-mac' to recreate everything from scratch"
 
 # ---- housekeeping ----------------------------------------------------------
 .PHONY: clean
