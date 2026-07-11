@@ -162,8 +162,9 @@ route frames back to the right stream. Clients can resume by sending the last SS
 - All HTTP surfaces except `GET /healthz` require the shared gateway account.
 - TLS is on by default. Without configured certs, the gateway generates and
   reuses a self-signed cert under `ACPG_TLS_DIR`.
-- `GET /healthz` is intentionally unauthenticated and returns only status plus
-  agent names. It does not expose `cwd`, history support, or resume details.
+- `GET /healthz` is intentionally unauthenticated and returns only status,
+  version, and agent names. It does not expose `cwd`, history support, or
+  resume details.
 - Auth is a single shared account. There is no per-user identity or permission
   model in the gateway.
 

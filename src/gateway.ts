@@ -44,6 +44,16 @@ import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 
 const ROOT = path.join(__dirname, "..");
 
+// Exposed via /healthz so a fleet of gateway instances can be told apart by
+// version (e.g. from a console listing several saved gateways).
+export const GATEWAY_VERSION: string = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
+
 // Load config from a .env file next to the gateway if one exists, so secrets like
 // ACPG_AUTH_USER / ACPG_AUTH_TOKEN can live in a file instead of the shell. Real environment
 // variables take precedence over .env (Node does not override what's already set).
@@ -1445,12 +1455,13 @@ class Channel {
   // sessionId -> the text of its first prompt, used as the running-task label so
   // concurrent tasks in the same folder don't all collapse to a short id.
   private sessionTitle = new Map<string, string>();
-  // agent request id -> the still-outstanding permission request (its session +
-  // raw frame). A permission blocks the agent until someone answers, but a client
-  // that drops (or reloads) reconnects at cursor=end and never sees the original
-  // frame again. Re-delivered after that session's session/load so the prompt
-  // survives reconnects; dropped once answered or when the agent exits.
-  private pendingPerms = new Map<number | string, { sid: string; seq: number; frame: Buffer }>();
+  // agent request id -> the still-outstanding blocking prompt (its session, raw
+  // frame, and which method it was: session/request_permission or
+  // elicitation/create). A prompt blocks the agent until someone answers, but a
+  // client that drops (or reloads) reconnects at cursor=end and never sees the
+  // original frame again. Re-delivered after that session's session/load so the
+  // prompt survives reconnects; dropped once answered or when the agent exits.
+  private pendingPerms = new Map<number | string, { sid: string; seq: number; frame: Buffer; method: string }>();
   // The `initialize` handshake is per-PROCESS, but one agent process is shared
   // across every client connection. codex-acp answers `initialize` exactly once
   // and returns -32603 "Already initialized" on any later one, so a reconnect /
@@ -1789,18 +1800,31 @@ class Channel {
       // Remember the outstanding prompt so it can be re-delivered to a client that
       // reconnects (or reloads) and reloads this session — see fromAgent's
       // session/load branch above.
-      if (sid && f.id !== undefined && f.id !== null && f.method === "session/request_permission") {
-        this.pendingPerms.set(f.id as string | number, { sid, seq, frame: line });
+      if (sid && f.id !== undefined && f.id !== null &&
+          (f.method === "session/request_permission" || f.method === "elicitation/create")) {
+        this.pendingPerms.set(f.id as string | number, { sid, seq, frame: line, method: f.method });
         // Mirror into the durable inbox so the prompt survives a reload and is
         // visible/answerable across agents via /inbox (pendingPerms stays the
         // in-run, low-latency re-delivery source; the inbox is the audit trail).
-        const params = f.params as { toolCall?: { title?: string }; options?: unknown } | undefined;
-        const options = Array.isArray(params?.options) ? params.options : [];
-        this.store?.addInboxItem({
-          type: "permission", agentName: this.name, sessionId: sid, reqId: String(f.id), seq,
-          title: params?.toolCall?.title || "Run a tool",
-          bodyJson: JSON.stringify(options), createdAt: new Date().toISOString(),
-        });
+        if (f.method === "session/request_permission") {
+          const params = f.params as { toolCall?: { title?: string }; options?: unknown } | undefined;
+          const options = Array.isArray(params?.options) ? params.options : [];
+          this.store?.addInboxItem({
+            type: "permission", agentName: this.name, sessionId: sid, reqId: String(f.id), seq,
+            title: params?.toolCall?.title || "Run a tool",
+            bodyJson: JSON.stringify(options), createdAt: new Date().toISOString(),
+          });
+        } else {
+          // A form elicitation (the agent asking the user question(s), e.g. Claude's
+          // AskUserQuestion). No one-tap options to record — the inbox entry points
+          // the user at the conversation, where the client renders the form.
+          const params = f.params as { message?: string } | undefined;
+          this.store?.addInboxItem({
+            type: "elicitation", agentName: this.name, sessionId: sid, reqId: String(f.id), seq,
+            title: params?.message || "The agent has a question",
+            bodyJson: null, createdAt: new Date().toISOString(),
+          });
+        }
       }
       const targets = sid ? this.subs.viewers(sid) : undefined;
       this.broadcast(seq, line, targets);
@@ -1956,7 +1980,15 @@ class Channel {
     // pendingPerms is keyed by the agent's real (possibly numeric) id; match by
     // string so a stringified reqId from HTTP finds the right entry.
     let key: number | string | undefined;
-    for (const k of this.pendingPerms.keys()) if (String(k) === reqId) { key = k; break; }
+    for (const [k, v] of this.pendingPerms) {
+      if (String(k) !== reqId) continue;
+      // An elicitation expects an {action, content} reply, not an optionId — a
+      // permission-shaped answer would read as "cancel" and abort the tool call.
+      // It must be answered from a client rendering the form, not this route.
+      if (v.method !== "session/request_permission") return false;
+      key = k;
+      break;
+    }
     if (key === undefined || !this.permGate.claim(key)) return false;
     this.pendingPerms.delete(key);
     const result = { outcome: { outcome: "selected", optionId } };
@@ -2510,8 +2542,8 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
   // access, and /fs + /history* expose the host filesystem and past
   // conversations — so reaching the port must not be enough to use any of them.
   // Only /healthz stays open, for external liveness/readiness probes (it reveals
-  // just agent names). The /acp/sse + /acp/rpc paths keep their own token check
-  // and never pass through this handler.
+  // just agent names and the gateway version). The /acp/sse + /acp/rpc paths keep
+  // their own token check and never pass through this handler.
   if (pathname !== "/healthz" && !basicAuthOk(req.headers.authorization, cfg.authUser, cfg.authToken)) {
     res.writeHead(401, {
       "www-authenticate": 'Basic realm="acp-gateway", charset="UTF-8"',
@@ -2521,12 +2553,12 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     return;
   }
   if (pathname === "/healthz") {
-    // Unauthenticated probe: expose only low-sensitivity data (status + agent
-    // names). The richer agentDetails (cwd, history/resume flags) is reachable
-    // only through the Basic-auth'd surface — it's injected into the chat SPA
-    // config — so an open liveness probe never leaks host/project paths.
+    // Unauthenticated probe: expose only low-sensitivity data (status + version +
+    // agent names). The richer agentDetails (cwd, history/resume flags) is
+    // reachable only through the Basic-auth'd surface — it's injected into the
+    // chat SPA config — so an open liveness probe never leaks host/project paths.
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", agents: Object.keys(cfg.agents) }));
+    res.end(JSON.stringify({ status: "ok", version: GATEWAY_VERSION, agents: Object.keys(cfg.agents) }));
     return;
   }
   // Scoped, PTY-backed `claude auth login` terminal so credentials can be
