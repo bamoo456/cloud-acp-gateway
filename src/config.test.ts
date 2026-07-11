@@ -11,6 +11,7 @@ import {
   agentSkinFor,
   listAgentHistory,
   readAgentHistoryMessages,
+  GATEWAY_VERSION,
 } from "./gateway.ts";
 
 function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
@@ -298,4 +299,9 @@ test("loadAgents keeps only one agent when the others are all missing (no FATAL)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("GATEWAY_VERSION matches package.json, so /healthz reports the real version", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")) as { version: string };
+  assert.equal(GATEWAY_VERSION, pkg.version);
 });

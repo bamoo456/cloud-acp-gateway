@@ -44,6 +44,16 @@ import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 
 const ROOT = path.join(__dirname, "..");
 
+// Exposed via /healthz so a fleet of gateway instances can be told apart by
+// version (e.g. from a console listing several saved gateways).
+export const GATEWAY_VERSION: string = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
+
 // Load config from a .env file next to the gateway if one exists, so secrets like
 // ACPG_AUTH_USER / ACPG_AUTH_TOKEN can live in a file instead of the shell. Real environment
 // variables take precedence over .env (Node does not override what's already set).
@@ -2534,8 +2544,8 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
   // access, and /fs + /history* expose the host filesystem and past
   // conversations — so reaching the port must not be enough to use any of them.
   // Only /healthz stays open, for external liveness/readiness probes (it reveals
-  // just agent names). The /acp/sse + /acp/rpc paths keep their own token check
-  // and never pass through this handler.
+  // just agent names and the gateway version). The /acp/sse + /acp/rpc paths keep
+  // their own token check and never pass through this handler.
   if (pathname !== "/healthz" && !basicAuthOk(req.headers.authorization, cfg.authUser, cfg.authToken)) {
     res.writeHead(401, {
       "www-authenticate": 'Basic realm="acp-gateway", charset="UTF-8"',
@@ -2545,12 +2555,12 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     return;
   }
   if (pathname === "/healthz") {
-    // Unauthenticated probe: expose only low-sensitivity data (status + agent
-    // names). The richer agentDetails (cwd, history/resume flags) is reachable
-    // only through the Basic-auth'd surface — it's injected into the chat SPA
-    // config — so an open liveness probe never leaks host/project paths.
+    // Unauthenticated probe: expose only low-sensitivity data (status + version +
+    // agent names). The richer agentDetails (cwd, history/resume flags) is
+    // reachable only through the Basic-auth'd surface — it's injected into the
+    // chat SPA config — so an open liveness probe never leaks host/project paths.
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", agents: Object.keys(cfg.agents) }));
+    res.end(JSON.stringify({ status: "ok", version: GATEWAY_VERSION, agents: Object.keys(cfg.agents) }));
     return;
   }
   // Scoped, PTY-backed `claude auth login` terminal so credentials can be
