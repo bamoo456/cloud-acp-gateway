@@ -59,6 +59,26 @@ export interface ConfigOption {
   options: ConfigOptionChoice[];
 }
 export interface PermissionOption { optionId: string; name?: string; kind?: string; }
+
+// ---- form elicitation (agent questions) ----
+// A renderable field parsed from an `elicitation/create` requestedSchema (see
+// lib/elicitation.ts). claude-agent-acp surfaces the AskUserQuestion tool this
+// way: one select field per question (plus a free-text "Other" companion).
+// `options` empty means a free-text input.
+export interface ElicitationOption { value: string; label: string; description?: string }
+export interface ElicitationField {
+  key: string;
+  title?: string;        // short label (e.g. AskUserQuestion's header chip)
+  description?: string;  // the question / helper text
+  multi: boolean;        // multi-select (array of choices) vs single choice
+  valueType: "string" | "number" | "integer" | "boolean";
+  options: ElicitationOption[];
+}
+// The JSON-RPC reply an elicitation expects. "decline" tells the agent the user
+// skipped the question(s); it does NOT abort the turn (that would be "cancel").
+export type ElicitationResponse =
+  | { action: "accept"; content: Record<string, unknown> }
+  | { action: "decline" };
 export interface PlanEntry { content?: string; status?: string; }
 export interface SlashCommand { name: string; description?: string; }
 
@@ -108,6 +128,10 @@ export type ThreadItem =
       id: string; kind: "permission"; reqId: number | string; title: string;
       options: PermissionOption[]; resolved: boolean; chosen?: string;
     }
+  | {
+      id: string; kind: "elicitation"; reqId: number | string; message: string;
+      fields: ElicitationField[]; resolved: boolean; chosen?: string;
+    }
   | { id: string; kind: "note"; text: string; variant?: "error" };
 
 export interface PendingPermission {
@@ -117,6 +141,10 @@ export interface PendingPermission {
   title: string;
   options: PermissionOption[];
   createdAt: number;
+  // Present when the prompt is a form elicitation (agent question) rather than
+  // a permission: `options` is empty and re-attachment rebuilds the form from
+  // these fields instead of option buttons.
+  elicitation?: { message: string; fields: ElicitationField[] };
 }
 
 export interface Session {

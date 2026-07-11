@@ -258,6 +258,17 @@ export function IconLock() {
   );
 }
 
+// Question mark in a circle — the agent-question (elicitation) card.
+export function IconQuestion() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
+      <path d="M12 17h.01" />
+    </svg>
+  );
+}
+
 // Arrow entering a door frame — the "log in / sign in" action.
 export function IconLogin() {
   return (

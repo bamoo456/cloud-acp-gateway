@@ -7,6 +7,7 @@ import { Markdown } from "./Markdown.tsx";
 import { ToolCall } from "./ToolCall.tsx";
 import { Plan } from "./Plan.tsx";
 import { PermissionPrompt } from "./PermissionPrompt.tsx";
+import { ElicitationPrompt } from "./ElicitationPrompt.tsx";
 import { Working } from "./Working.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 import { CodexMark, IconChevronDown, IconThinking, OpencodeMark, Robot } from "../lib/icons.tsx";
@@ -164,7 +165,7 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
   // prompt lands at the tail, force it into view instantly and re-assert across two
   // frames once its buttons have laid out — regardless of where the user had scrolled.
   const tail = items[items.length - 1];
-  const tailPermId = tail?.kind === "permission" ? tail.id : null;
+  const tailPermId = tail?.kind === "permission" || tail?.kind === "elicitation" ? tail.id : null;
   useEffect(() => {
     if (!tailPermId) return;
     const m = ref.current?.closest("main");
@@ -251,6 +252,7 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
           case "tool": return <ToolCall item={it} key={it.id} />;
           case "plan": return <Plan entries={it.entries} key={it.id} />;
           case "permission": return <PermissionPrompt item={it} key={it.id} />;
+          case "elicitation": return <ElicitationPrompt item={it} key={it.id} />;
           case "note": return <div className={it.variant === "error" ? "err-line" : "loc"} key={it.id}>{it.text}</div>;
         }
       })}
