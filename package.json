@@ -1,6 +1,6 @@
 {
   "name": "acp-gateway",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "description": "SSE+POST gateway fronting one or more ACP agents for remote mobile control over a VPN",
   "engines": {
