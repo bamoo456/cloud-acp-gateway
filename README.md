@@ -157,6 +157,12 @@ The SSE stream first emits `ready` with a `conn` id. POST requests use that id t
 route frames back to the right stream. Clients can resume by sending the last SSE
 `id` as `Last-Event-ID` or `?lastEventId=<n>`.
 
+Native clients first call authenticated `GET /client-config`. It returns a
+schema-versioned, credential-free description of the transport paths, available
+agents, their history/session-load capabilities, and filesystem root. Older
+gateways return 404 so clients can use a compatibility UI; clients must treat an
+unsupported schema as incompatible rather than guessing its fields.
+
 ## Security
 
 - All HTTP surfaces except `GET /healthz` require the shared gateway account.
