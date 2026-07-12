@@ -41,6 +41,7 @@ import { accessUrls } from "./access.ts";
 import { Db, type InboxItem, type InboxStatus } from "./db.ts";
 import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
+import { buildClientConfig } from "./client-config.ts";
 
 const ROOT = path.join(__dirname, "..");
 
@@ -2561,6 +2562,21 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     // chat SPA config — so an open liveness probe never leaks host/project paths.
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ status: "ok", version: GATEWAY_VERSION, agents: Object.keys(cfg.agents) }));
+    return;
+  }
+  // Structured bootstrap metadata for native clients. It mirrors the config
+  // injected into the Web Console, but never embeds a credential or command.
+  if (consoleEnabled && pathname === "/client-config") {
+    const config = buildClientConfig({
+      gatewayVersion: GATEWAY_VERSION,
+      ssePath: cfg.ssePath,
+      rpcPath: cfg.rpcPath,
+      defaultAgent: cfg.defaultAgent,
+      fsRoot: FS_ROOT,
+      agents: agentDetailsNow(),
+    });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(config));
     return;
   }
   // Scoped, PTY-backed `claude auth login` terminal so credentials can be
