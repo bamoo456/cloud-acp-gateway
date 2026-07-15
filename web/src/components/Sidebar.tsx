@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getHistory, getDiscoveredHistory, type HistorySession, type DiscoveredHistorySession, type RunningTask } from "../lib/api.ts";
 import type { RecentSession } from "../lib/recentSessions.ts";
-import { resolveRunningTask } from "../lib/runningTask.ts";
+import { resolveRunningTask, runningView } from "../lib/runningTask.ts";
 import { useStore } from "../store/store.ts";
 import { AgentMark } from "./AgentPill.tsx";
 import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
@@ -130,12 +130,14 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // by agent + id so a cross-agent id collision can't borrow the wrong title.
   const historyTitleById = new Map(allItems.map((it) => [it.agentName + "\n" + it.sessionId, it.title] as const));
   // Running tasks (polled from the gateway across agents/devices) get their own
-  // pinned section at the top of Recent, in stable start order — the /running array
-  // order is the gateway task-map insertion order (≈ when each task started) and
-  // does NOT re-sort on activity. Keeping running sessions OUT of the recency-sorted
-  // list below is what stops that list from flapping while several sessions stream
-  // frames at once (each frame bumps its recents lastActiveAt).
-  const runningKeys = new Set(s.runningTasks.map((t) => t.agentName + "\n" + t.sessionId));
+  // pinned section at the top of Recent. `active` are live tasks in stable start
+  // order — the /running array order is the gateway task-map insertion order (≈ when
+  // each task started) and does NOT re-sort on activity. `cooling` are ones that
+  // finished within the grace window and linger so a session doesn't flip-flop
+  // between Running and Recent across turns. Keeping both OUT of the recency-sorted
+  // list below is what stops that list from flapping while sessions stream frames.
+  const { active: activeTasks, cooling: coolingTasks } = runningView(s.runningTasks, s.runningSeen, Date.now());
+  const runningKeys = new Set([...activeTasks, ...coolingTasks.map((c) => c.task)].map((t) => t.agentName + "\n" + t.sessionId));
   const isRunning = (agentName: string, sessionId: string) => runningKeys.has(agentName + "\n" + sessionId);
   // Local Recent entries need session/load to be reopenable, so list only recents
   // whose owning agent still reports it — across ALL agents, not just the active one.
@@ -179,7 +181,9 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       </button>
     );
   };
-  const renderRunningItem = (t: RunningTask) => {
+  // coolingAt set → the task finished within the grace window: a muted "recently
+  // active" dot and a relative time instead of the live spinner/state label.
+  const renderRunningItem = (t: RunningTask, coolingAt?: number) => {
     // Title/folder come from the shared resolver (gateway cwd first, recents/live as
     // fallback) — the same one jumpToTask uses, so the label can't drift from where
     // the click lands. jumpToTask resolves the agent/folder and opens it.
@@ -188,13 +192,19 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     return (
       <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"running:" + t.agentName + ":" + t.sessionId}
         onClick={() => { s.jumpToTask(t); onClose(); }}>
-        {runDot(t.agentName, t.sessionId)}
+        {coolingAt === undefined
+          ? runDot(t.agentName, t.sessionId)
+          : <span className="run-dot cooling" title="Recently active" />}
         {mark(t.agentName)}
         <span className="sess-main">
           <span className="name">{title || t.sessionId.slice(0, 8)}</span>
           {cwd && <span className="folder-name">{basename(cwd)}</span>}
         </span>
-        <span className="when">{t.state === "awaiting-input" ? "Needs input" : "Working"}</span>
+        <span className="when">
+          {coolingAt === undefined
+            ? (t.state === "awaiting-input" ? "Needs input" : "Working")
+            : timeAgo(new Date(coolingAt).toISOString())}
+        </span>
       </button>
     );
   };
@@ -274,11 +284,12 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
             </div>
             {tab === "recent" && (
               <div className="recent-tab">
-                {s.runningTasks.length > 0 && (
+                {(activeTasks.length > 0 || coolingTasks.length > 0) && (
                   <div className="running-section recent-section">
                     <div className="listhead"><span>Running</span></div>
                     <div className="recent-list">
-                      {s.runningTasks.map((t) => renderRunningItem(t))}
+                      {activeTasks.map((t) => renderRunningItem(t))}
+                      {coolingTasks.map((c) => renderRunningItem(c.task, c.at))}
                     </div>
                   </div>
                 )}
@@ -302,7 +313,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                     </div>
                   </div>
                 )}
-                {recentItems.length === 0 && currentItems.length === 0 && s.runningTasks.length === 0 && (
+                {recentItems.length === 0 && currentItems.length === 0 && activeTasks.length === 0 && coolingTasks.length === 0 && (
                   <div className="panel-empty">No recent conversations yet.</div>
                 )}
               </div>
