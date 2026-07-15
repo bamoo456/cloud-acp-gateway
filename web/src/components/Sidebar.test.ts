@@ -426,6 +426,79 @@ describe("Sidebar recent conversations", () => {
     expect(recent!.textContent).not.toContain("Task A");
   });
 
+  test("keeps a just-finished session in Running (cooling) for the grace window, deduped from Recent", async () => {
+    // run-a is no longer live (not in runningTasks) but was seen running 1 min ago
+    // — inside the 2-min grace window — so it lingers in Running as "cooling".
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "run-a", title: "Task A", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/repo", sessionId: "idle-1", title: "Idle One", lastActiveAt: "2026-06-10T03:00:00.000Z" },
+    ]);
+
+    const { Sidebar } = await import("./Sidebar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      agentName: "claude", cwd: "/repo", agentReady: true,
+      sessions: {}, activeId: null, openHistorySession, newSession: vi.fn(), historyNonce: 0,
+      jumpToTask: vi.fn(),
+      runningTasks: [{ agentName: "claude", sessionId: "run-b", state: "active", cwd: "/repo", title: "Task B" }],
+      runningSeen: {
+        "claude\nrun-b": { task: { agentName: "claude", sessionId: "run-b", state: "active", cwd: "/repo", title: "Task B" }, at: now.getTime() },
+        "claude\nrun-a": { task: { agentName: "claude", sessionId: "run-a", state: "active", cwd: "/repo", title: "Task A" }, at: now.getTime() - 60_000 },
+      },
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Sidebar, { open: true, onClose: vi.fn(), onOpenPicker: vi.fn() }));
+      await flush();
+    });
+
+    const running = container.querySelector(".running-section");
+    expect(running).not.toBeNull();
+    const rows = running!.querySelectorAll<HTMLButtonElement>(".sess-item");
+    // Live task first, then the cooling one.
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("Task B");
+    expect(rows[1].textContent).toContain("Task A");
+    // The live row spins; the cooling row shows a muted ring, not the spinner.
+    expect(rows[0].querySelector(".run-working")).not.toBeNull();
+    expect(rows[1].querySelector(".run-dot.cooling")).not.toBeNull();
+    expect(rows[1].querySelector(".run-working")).toBeNull();
+
+    // The cooling session is deduped out of the plain Recent list below.
+    const recent = container.querySelector(".recent-section:not(.running-section)");
+    expect(recent!.textContent).toContain("Idle One");
+    expect(recent!.textContent).not.toContain("Task A");
+  });
+
+  test("drops a session from Running once it's been idle past the grace window", async () => {
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "run-a", title: "Task A", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+    ]);
+
+    const { Sidebar } = await import("./Sidebar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      agentName: "claude", cwd: "/repo", agentReady: true,
+      sessions: {}, activeId: null, openHistorySession, newSession: vi.fn(), historyNonce: 0,
+      jumpToTask: vi.fn(),
+      runningTasks: [],
+      // Seen running 3 minutes ago — past the 2-minute grace window.
+      runningSeen: {
+        "claude\nrun-a": { task: { agentName: "claude", sessionId: "run-a", state: "active", cwd: "/repo", title: "Task A" }, at: now.getTime() - 3 * 60_000 },
+      },
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Sidebar, { open: true, onClose: vi.fn(), onOpenPicker: vi.fn() }));
+      await flush();
+    });
+
+    // No Running section — it aged out — and the session reappears in plain Recent.
+    expect(container.querySelector(".running-section")).toBeNull();
+    const recent = container.querySelector(".recent-section:not(.running-section)");
+    expect(recent!.textContent).toContain("Task A");
+  });
+
   test("shows the Running section and suppresses the empty state when only running tasks exist", async () => {
     const { Sidebar } = await import("./Sidebar.tsx");
     const { useStore } = await import("../store/store.ts");

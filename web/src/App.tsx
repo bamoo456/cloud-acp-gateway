@@ -31,7 +31,7 @@ export function App() {
     const tick = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       if (useStore.getState().locked) return; // don't poll the gateway while locked
-      void getRunning().then((tasks) => { if (alive) useStore.setState({ runningTasks: tasks }); });
+      void getRunning().then((tasks) => { if (alive) useStore.getState().ingestRunningTasks(tasks); });
       // Durable, cross-agent pending permissions — survives reload and surfaces
       // prompts on agents this client has no live SSE connection to.
       void getInboxPending().then((items) => { if (alive) useStore.setState({ inboxItems: items }); });
