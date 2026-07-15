@@ -383,6 +383,93 @@ describe("Sidebar recent conversations", () => {
     expect(busyRow?.querySelector(".run-dot")).not.toBeNull();
   });
 
+  test("pins running conversations in a stable Running section, out of the recency-sorted Recent list", async () => {
+    // run-a is the most-recently-active recent, so an activity sort would float it
+    // to the top; the Running section must instead follow the /running array order
+    // (run-b first) so concurrent streams don't make the list flap.
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "run-a", title: "Task A", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/repo", sessionId: "idle-1", title: "Idle One", lastActiveAt: "2026-06-10T03:00:00.000Z" },
+    ]);
+
+    const { Sidebar } = await import("./Sidebar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      agentName: "claude", cwd: "/repo", agentReady: true,
+      sessions: {}, activeId: null, openHistorySession, newSession: vi.fn(), historyNonce: 0,
+      jumpToTask: vi.fn(),
+      runningTasks: [
+        { agentName: "claude", sessionId: "run-b", state: "active", cwd: "/repo", title: "Task B" },
+        { agentName: "claude", sessionId: "run-a", state: "active", cwd: "/repo", title: "Task A" },
+      ],
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Sidebar, { open: true, onClose: vi.fn(), onOpenPicker: vi.fn() }));
+      await flush();
+    });
+
+    const running = container.querySelector(".running-section");
+    expect(running).not.toBeNull();
+    expect(running!.textContent).toContain("Running");
+    const runningRows = running!.querySelectorAll<HTMLButtonElement>(".sess-item");
+    expect(runningRows).toHaveLength(2);
+    // Stable start order (the /running array), NOT recency order.
+    expect(runningRows[0].textContent).toContain("Task B");
+    expect(runningRows[1].textContent).toContain("Task A");
+
+    // The running session is deduped out of the plain Recent list below; only the
+    // idle recent remains there.
+    const recent = container.querySelector(".recent-section:not(.running-section)");
+    expect(recent).not.toBeNull();
+    expect(recent!.textContent).toContain("Idle One");
+    expect(recent!.textContent).not.toContain("Task A");
+  });
+
+  test("shows the Running section and suppresses the empty state when only running tasks exist", async () => {
+    const { Sidebar } = await import("./Sidebar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      agentName: "claude", cwd: "/repo", agentReady: true,
+      sessions: {}, activeId: null, openHistorySession, newSession: vi.fn(), historyNonce: 0,
+      jumpToTask: vi.fn(),
+      runningTasks: [{ agentName: "claude", sessionId: "only-run", state: "active", cwd: "/repo", title: "Only running" }],
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Sidebar, { open: true, onClose: vi.fn(), onOpenPicker: vi.fn() }));
+      await flush();
+    });
+
+    expect(container.querySelector(".running-section")).not.toBeNull();
+    expect(container.textContent).toContain("Only running");
+    expect(container.textContent).not.toContain("No recent conversations yet.");
+  });
+
+  test("clicking a running task jumps to it and closes the panel", async () => {
+    const jumpToTask = vi.fn();
+    const onClose = vi.fn();
+    const { Sidebar } = await import("./Sidebar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      agentName: "claude", cwd: "/repo", agentReady: true,
+      sessions: {}, activeId: null, openHistorySession, newSession: vi.fn(), historyNonce: 0,
+      jumpToTask,
+      runningTasks: [{ agentName: "claude", sessionId: "run-x", state: "active", cwd: "/repo", title: "Jumpable" }],
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Sidebar, { open: true, onClose, onOpenPicker: vi.fn() }));
+      await flush();
+    });
+
+    const row = container.querySelector<HTMLButtonElement>(".running-section .sess-item");
+    expect(row).not.toBeNull();
+    await act(async () => { row!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(jumpToTask).toHaveBeenCalledWith(expect.objectContaining({ agentName: "claude", sessionId: "run-x" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
   test("merges Recent across agents and marks each row with its agent glyph", async () => {
     document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
       wsPath: "/acp", token: "test-token", defaultAgent: "claude",

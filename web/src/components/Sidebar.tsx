@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { getHistory, getDiscoveredHistory, type HistorySession, type DiscoveredHistorySession } from "../lib/api.ts";
+import { getHistory, getDiscoveredHistory, type HistorySession, type DiscoveredHistorySession, type RunningTask } from "../lib/api.ts";
 import type { RecentSession } from "../lib/recentSessions.ts";
+import { resolveRunningTask } from "../lib/runningTask.ts";
 import { useStore } from "../store/store.ts";
 import { AgentMark } from "./AgentPill.tsx";
 import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
@@ -128,18 +129,28 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // the same session never wears two different labels across the two lists. Keyed
   // by agent + id so a cross-agent id collision can't borrow the wrong title.
   const historyTitleById = new Map(allItems.map((it) => [it.agentName + "\n" + it.sessionId, it.title] as const));
+  // Running tasks (polled from the gateway across agents/devices) get their own
+  // pinned section at the top of Recent, in stable start order — the /running array
+  // order is the gateway task-map insertion order (≈ when each task started) and
+  // does NOT re-sort on activity. Keeping running sessions OUT of the recency-sorted
+  // list below is what stops that list from flapping while several sessions stream
+  // frames at once (each frame bumps its recents lastActiveAt).
+  const runningKeys = new Set(s.runningTasks.map((t) => t.agentName + "\n" + t.sessionId));
+  const isRunning = (agentName: string, sessionId: string) => runningKeys.has(agentName + "\n" + sessionId);
   // Local Recent entries need session/load to be reopenable, so list only recents
   // whose owning agent still reports it — across ALL agents, not just the active one.
   // Default to the first RECENT_LIMIT; "See more" reveals the rest of the cache.
   const allRecentItems = s.recentSessions
-    .filter((it) => recentReopenable(agentByName.get(it.agentName)));
+    .filter((it) => recentReopenable(agentByName.get(it.agentName)))
+    .filter((it) => !isRunning(it.agentName, it.sessionId));
   const recentKeys = new Set(s.recentSessions.map((it) => it.agentName + "\n" + it.cwd + "\n" + it.sessionId));
   // Sessions discovered from CLI transcripts fold into the same Recent list (no
   // separate section): dedupe against the recents cache, then interleave by
   // last-activity time so they read as one timeline.
   const discoveredExtras = (discovered || [])
     .filter((it) => recentReopenable(agentByName.get(it.agentName)))
-    .filter((it) => !recentKeys.has(it.agentName + "\n" + it.cwd + "\n" + it.sessionId));
+    .filter((it) => !recentKeys.has(it.agentName + "\n" + it.cwd + "\n" + it.sessionId))
+    .filter((it) => !isRunning(it.agentName, it.sessionId));
   const mergedRecentItems = [
     ...allRecentItems.map((it) => ({ kind: "recent" as const, it, when: it.lastActiveAt })),
     ...discoveredExtras.map((it) => ({ kind: "discovered" as const, it, when: it.updatedAt })),
@@ -149,6 +160,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const currentItems = !localRecentSupported && histSupported
     ? Object.values(s.sessions)
       .filter((it) => !it.viewOnly && it.hasContent)
+      .filter((it) => !isRunning(s.agentName, it.id))
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, RECENT_LIMIT)
     : [];
@@ -164,6 +176,25 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
         {mark(it.agentName)}
         <span className="name">{it.title || it.sessionId.slice(0, 8)}</span>
         <span className="when">{it.updatedAt ? timeAgo(it.updatedAt) : ""}</span>
+      </button>
+    );
+  };
+  const renderRunningItem = (t: RunningTask) => {
+    // Title/folder come from the shared resolver (gateway cwd first, recents/live as
+    // fallback) — the same one jumpToTask uses, so the label can't drift from where
+    // the click lands. jumpToTask resolves the agent/folder and opens it.
+    const { title, cwd } = resolveRunningTask(t, s);
+    const active = s.agentName === t.agentName && s.activeId === t.sessionId;
+    return (
+      <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"running:" + t.agentName + ":" + t.sessionId}
+        onClick={() => { s.jumpToTask(t); onClose(); }}>
+        {runDot(t.agentName, t.sessionId)}
+        {mark(t.agentName)}
+        <span className="sess-main">
+          <span className="name">{title || t.sessionId.slice(0, 8)}</span>
+          {cwd && <span className="folder-name">{basename(cwd)}</span>}
+        </span>
+        <span className="when">{t.state === "awaiting-input" ? "Needs input" : "Working"}</span>
       </button>
     );
   };
@@ -243,6 +274,14 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
             </div>
             {tab === "recent" && (
               <div className="recent-tab">
+                {s.runningTasks.length > 0 && (
+                  <div className="running-section recent-section">
+                    <div className="listhead"><span>Running</span></div>
+                    <div className="recent-list">
+                      {s.runningTasks.map((t) => renderRunningItem(t))}
+                    </div>
+                  </div>
+                )}
                 {recentItems.length > 0 && (
                   <div className="recent-section">
                     <div className="recent-list">
@@ -263,7 +302,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                     </div>
                   </div>
                 )}
-                {recentItems.length === 0 && currentItems.length === 0 && (
+                {recentItems.length === 0 && currentItems.length === 0 && s.runningTasks.length === 0 && (
                   <div className="panel-empty">No recent conversations yet.</div>
                 )}
               </div>

@@ -491,6 +491,30 @@ test("a running prompt shows as active, and clears when its response returns", a
   await close();
 });
 
+test("running() keeps start order across interleaved heartbeats (the Recent Running section can't flap)", async () => {
+  const { port, agent, running, close } = await makeTestServer();
+  const a = sse(port);
+  const conn = await a.conn;
+
+  // Two turns start in order S1 then S2 → tasks tracked in that order.
+  await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S1", prompt: [{ type: "text", text: "one" }] } });
+  await post(port, conn, { jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId: "S2", prompt: [{ type: "text", text: "two" }] } });
+  assert.deepEqual(running().map((t) => t.sessionId), ["S1", "S2"], "start order right after both prompts");
+
+  // Interleaved streaming frames keep bumping S2 then S1 as most-recently-active.
+  // running() must still report start order — the client renders the array verbatim,
+  // so any reorder here is exactly the flapping this section exists to prevent.
+  for (let i = 0; i < 3; i++) {
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S2", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "b" } } } })));
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "a" } } } })));
+  }
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(running().map((t) => t.sessionId), ["S1", "S2"], "heartbeats never reorder tasks to most-recently-active");
+
+  a.close();
+  await close();
+});
+
 test("a permission request flips the task to awaiting-input, then back to active", async () => {
   const { port, agent, running, close } = await makeTestServer();
   const a = sse(port);
