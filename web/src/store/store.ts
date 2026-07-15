@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
 import { getMessages, renameSession as apiRename, getPrefs, putTextSize, answerInbox, type RunningTask, type InboxItem } from "../lib/api.ts";
-import { resolveRunningTask } from "../lib/runningTask.ts";
+import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
 import { isLockEnabled, hydrateLock } from "../lib/lock.ts";
@@ -75,6 +75,9 @@ interface State {
   historyNonce: number; // bumped to ask the sidebar to refresh its conversation list (e.g. after rename)
   recentSessions: RecentSession[];
   runningTasks: RunningTask[]; // polled from the gateway: sessions with a prompt in flight, across all agents
+  // Tasks seen running, stamped with last-seen time — keeps a just-finished
+  // conversation in the sidebar's Running section for a short grace window.
+  runningSeen: Record<string, RunningSeen>;
   inboxItems: InboxItem[]; // polled from the gateway: pending permission prompts, durable and across all agents
   locked: boolean; // screen lock engaged — the SSE stream is torn down until unlocked
   lockEnabled: boolean; // a PIN is configured (mirrors lib/lock for UI reactivity)
@@ -100,6 +103,7 @@ interface State {
   answerElicitation: (reqId: number | string, response: ElicitationResponse, summary: string) => void;
   answerInboxItem: (agentName: string, reqId: string, optionId: string) => void;
   jumpToTask: (task: RunningTask) => void;
+  ingestRunningTasks: (tasks: RunningTask[]) => void;
   ensureConnected: () => void;
   lock: () => void;
   unlock: () => void;
@@ -777,6 +781,7 @@ export const useStore = create<State>((set, get) => {
     historyNonce: 0,
     recentSessions: readRecentSessions(),
     runningTasks: [],
+    runningSeen: {},
     inboxItems: [],
     // The live locked state is local to this browser tab. On startup bootstrap()
     // hydrates the persisted setting before opening the agent connection; if the
@@ -1016,6 +1021,13 @@ export const useStore = create<State>((set, get) => {
       // Cross-agent or cross-folder → reconnect and let the deep-link join flow
       // (the same one shared links use) open it once the agent is ready.
       openViaDeepLink(task.agentName, task.sessionId, cwd, "Opening task…");
+    },
+
+    // Called by the /running poll: store the live snapshot and fold it into the
+    // grace-window seen-map so a just-finished session lingers in the sidebar's
+    // Running section for RUNNING_GRACE_MS after its last activity.
+    ingestRunningTasks(tasks) {
+      set({ runningTasks: tasks, runningSeen: ingestSeen(get().runningSeen, tasks, Date.now()) });
     },
 
     async sendPrompt(text, images, files) {
