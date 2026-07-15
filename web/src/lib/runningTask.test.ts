@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest";
-import { resolveRunningTask, type RunningTaskContext } from "./runningTask.ts";
+import { resolveRunningTask, ingestSeen, runningView, RUNNING_GRACE_MS, type RunningTaskContext, type RunningSeen } from "./runningTask.ts";
 import type { RunningTask } from "./api.ts";
 import type { Session } from "../types.ts";
 
@@ -48,5 +48,56 @@ describe("resolveRunningTask", () => {
     // task must not borrow a title from a collision in this agent's sessions.
     const r = resolveRunningTask({ agentName: "codex", sessionId: "s", state: "active" }, ctx({ agentName: "claude", sessions: { s: session("Claude's") } }));
     expect(r.title).toBeNull();
+  });
+});
+
+describe("ingestSeen", () => {
+  const t = (id: string): RunningTask => ({ agentName: "claude", sessionId: id, state: "active" });
+  const NOW = 1_000_000;
+
+  test("stamps every live task with the current time", () => {
+    const seen = ingestSeen({}, [t("a"), t("b")], NOW);
+    expect(seen["claude\na"].at).toBe(NOW);
+    expect(seen["claude\nb"].at).toBe(NOW);
+  });
+
+  test("refreshes a still-running task's timestamp (grace measures inactivity, not lifetime)", () => {
+    const prev: Record<string, RunningSeen> = { "claude\na": { task: t("a"), at: NOW } };
+    const seen = ingestSeen(prev, [t("a")], NOW + 60_000);
+    expect(seen["claude\na"].at).toBe(NOW + 60_000);
+  });
+
+  test("keeps a just-finished task within the window, drops it once past", () => {
+    const prev: Record<string, RunningSeen> = { "claude\ngone": { task: t("gone"), at: NOW } };
+    // Not in the fresh snapshot but still inside the window → retained.
+    expect(ingestSeen(prev, [], NOW + RUNNING_GRACE_MS)["claude\ngone"]).toBeDefined();
+    // Past the window → pruned.
+    expect(ingestSeen(prev, [], NOW + RUNNING_GRACE_MS + 1)["claude\ngone"]).toBeUndefined();
+  });
+});
+
+describe("runningView", () => {
+  const t = (id: string): RunningTask => ({ agentName: "claude", sessionId: id, state: "active" });
+  const NOW = 1_000_000;
+
+  test("active = the live tasks verbatim (stable start order); cooling excludes them", () => {
+    const seen: Record<string, RunningSeen> = {
+      "claude\na": { task: t("a"), at: NOW },
+      "claude\nb": { task: t("b"), at: NOW - 30_000 },
+    };
+    const view = runningView([t("a")], seen, NOW);
+    expect(view.active.map((x) => x.sessionId)).toEqual(["a"]);
+    // b finished within the window and isn't live → cooling.
+    expect(view.cooling.map((c) => c.task.sessionId)).toEqual(["b"]);
+  });
+
+  test("cooling is newest-active first and drops entries past the window", () => {
+    const seen: Record<string, RunningSeen> = {
+      "claude\nold": { task: t("old"), at: NOW - 90_000 },
+      "claude\nnew": { task: t("new"), at: NOW - 10_000 },
+      "claude\nstale": { task: t("stale"), at: NOW - RUNNING_GRACE_MS - 1 },
+    };
+    const view = runningView([], seen, NOW);
+    expect(view.cooling.map((c) => c.task.sessionId)).toEqual(["new", "old"]);
   });
 });
