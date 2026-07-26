@@ -884,8 +884,7 @@ export const useStore = create<State>((set, get) => {
       const sid = get().activeId;
       if (!sid || sid.startsWith("pending-")) return;
       const agentName = get().agentName;
-      const cwd = get().sessions[sid]?.cwd || get().cwd;
-      const { ok, running } = await apiDelete(agentName, cwd, sid);
+      const { ok, running } = await apiDelete(agentName, sid);
       if (!ok) {
         set({ tip: running ? "This conversation is still running." : "Couldn't delete this conversation." });
         return;
