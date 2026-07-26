@@ -56,22 +56,24 @@ describe("recent session storage", () => {
     ]);
   });
 
-  test("removing a deleted conversation drops it under every cwd spelling", () => {
+  test("removing a deleted conversation drops it under every agent and cwd", () => {
     const mk = (agentName: string, cwd: string, sessionId: string, n: number) => ({
       agentName, cwd, sessionId, title: sessionId,
       lastActiveAt: `2026-06-10T0${n}:00:00.000Z`,
     });
-    // The same conversation can be cached under both spellings of its folder
-    // (the gateway realpaths, the client doesn't) — deleting it clears both.
+    // One conversation can be cached under both spellings of its folder (the
+    // gateway realpaths, the client doesn't) and under two agents sharing a
+    // provider. The gateway deleted all of them, so the cache must match.
     touchRecentSession(mk("claude", "/tmp/repo", "s1", 1));
     touchRecentSession(mk("claude", "/private/tmp/repo", "s1", 2));
-    touchRecentSession(mk("codex", "/tmp/repo", "s1", 3)); // other agent's id space
+    touchRecentSession(mk("claude-infra", "/tmp/repo", "s1", 3));
+    touchRecentSession(mk("claude", "/tmp/repo", "s2", 4)); // a different conversation
 
-    const left = removeRecentSession({ agentName: "claude", sessionId: "s1" });
+    const left = removeRecentSession("s1");
 
-    expect(left.map((it) => [it.agentName, it.cwd])).toEqual([["codex", "/tmp/repo"]]);
+    expect(left.map((it) => it.sessionId)).toEqual(["s2"]);
     expect(readRecentSessions()).toEqual(left);
-    expect(removeRecentSession({ agentName: "claude", sessionId: "s1" })).toEqual(left);
+    expect(removeRecentSession("s1")).toEqual(left);
   });
 
   test("hydrating ignores corrupt payloads", () => {

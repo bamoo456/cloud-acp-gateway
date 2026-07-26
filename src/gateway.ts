@@ -1404,24 +1404,40 @@ export async function readAgentHistoryMessages(cmd: string, cwd: string, session
   return null;
 }
 
-// Permanently delete one conversation from the agent's own store, addressed by
-// session id alone. No cwd argument on purpose: ids are unique within an agent
-// (UUIDs for claude/codex, ses_* for opencode) and every provider records the
-// conversation's own cwd, so taking one from the caller adds a way to get it
-// wrong without adding a check — the claude lookup falls back to an id scan
-// across project dirs regardless, so a caller-supplied cwd never bounded it.
-// Returns false when the agent has no history provider, the id is unknown, the
+async function deleteFromProvider(provider: HistoryProvider, sessionId: string, opts?: DeleteHistoryOpts): Promise<boolean> {
+  if (provider === "claude") return deleteClaudeSession(sessionId, opts);
+  if (provider === "codex") return deleteCodexSession(sessionId, opts);
+  const found = listOpenCodeSessions().find((s) => s.id === sessionId);
+  if (!found || !allowedCwd(found.directory, opts)) return false;
+  return deleteOpenCodeSession(sessionId);
+}
+
+// Cheapest lookup first, because this walks providers until one claims the id.
+// claude is a readdir; opencode is one indexed query; codex has to read the head
+// of every rollout on disk, so it goes last.
+const PROVIDER_DELETE_ORDER: HistoryProvider[] = ["claude", "opencode", "codex"];
+
+// Permanently delete one conversation from whichever agent store holds it, given
+// the commands of the configured agents. Neither an agent name nor a cwd is taken
+// from the caller, and that is the point:
+//   cwd   — the claude lookup falls back to an id scan across project dirs, so a
+//           supplied cwd never bounded anything. The FS_ROOT check now runs
+//           against the cwd the conversation itself records (`withinRoot`).
+//   agent — two agents can share one provider AND its transcript store
+//           (agents.example.json ships "claude" and "claude-infra"), so an agent
+//           name doesn't identify a conversation, it only says where it was seen
+//           from. Deleting one is the same operation whichever name you came in
+//           under, and the gateway-side cleanup has to span all of them anyway.
+// Only the providers actually configured are tried, so a host without opencode
+// never touches its DB. Returns false when no configured provider has the id, the
 // conversation lives outside `withinRoot`, or the store refused (opencode DB
 // locked) — the caller still clears the gateway-side records either way, so a
 // half-present conversation can always be tidied away.
-export async function deleteAgentHistorySession(cmd: string, sessionId: string, opts?: DeleteHistoryOpts): Promise<boolean> {
-  const provider = historyProviderFor(cmd);
-  if (provider === "claude") return deleteClaudeSession(sessionId, opts);
-  if (provider === "codex") return deleteCodexSession(sessionId, opts);
-  if (provider === "opencode") {
-    const found = listOpenCodeSessions().find((s) => s.id === sessionId);
-    if (!found || !allowedCwd(found.directory, opts)) return false;
-    return deleteOpenCodeSession(sessionId);
+export async function deleteHistorySession(cmds: string[], sessionId: string, opts?: DeleteHistoryOpts): Promise<boolean> {
+  const configured = new Set(cmds.map(historyProviderFor).filter((p): p is HistoryProvider => p !== null));
+  for (const provider of PROVIDER_DELETE_ORDER) {
+    if (!configured.has(provider)) continue;
+    if (await deleteFromProvider(provider, sessionId, opts)) return true;
   }
   return false;
 }
@@ -3084,27 +3100,28 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
   if (consoleEnabled && pathname === "/history/session") {
     if (req.method !== "DELETE") { res.writeHead(405); res.end(); return; }
     const q = new URL(req.url ?? "/", "http://x").searchParams;
-    const agentName = q.get("agent") ?? cfg.defaultAgent;
-    const prof = cfg.agents[agentName];
-    // Addressed by id alone — see deleteAgentHistorySession. The FS_ROOT bound is
-    // applied to the cwd the conversation itself records, not one sent with the
-    // request. Same id sanitizing as /history/messages (underscores for opencode).
+    // Addressed by session id alone — no agent, no cwd; see deleteHistorySession.
+    // Same id sanitizing as /history/messages (underscores for opencode).
     const sid = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
     if (!sid) { res.writeHead(400); res.end(); return; }
     // A running turn is still appending to the transcript. Unlinking it now would
     // leave the agent writing to an unlinked inode and silently break session/load.
-    if (gateway.running().some((t) => t.agentName === agentName && t.sessionId === sid)) {
+    // Matched on the id across every agent: two agents can share a provider, so the
+    // one running this conversation isn't necessarily the one you came in under.
+    if (gateway.running().some((t) => t.sessionId === sid)) {
       res.writeHead(409, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "conversation is running" }));
       return;
     }
-    deleteAgentHistorySession(prof?.cmd ?? "", sid, { withinRoot: (c) => resolveWithinRoot(c) !== null })
+    deleteHistorySession(Object.values(cfg.agents).map((a) => a.cmd), sid, { withinRoot: (c) => resolveWithinRoot(c) !== null })
       .then((deleted) => {
         // Runs even when the transcript was already gone, so a conversation left
         // half-present (transcript deleted outside the gateway) can still be tidied.
-        db().deleteRecentSession(agentName, sid);
+        // All three span every agent — a conversation recorded under two agents
+        // sharing a provider must not keep half its rows and resurrect.
+        db().deleteRecentSession(sid);
         db().deleteTranscriptMeta(sid);
-        db().cancelInboxForSession(agentName, sid, new Date().toISOString());
+        db().cancelInboxForSessionId(sid, new Date().toISOString());
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, deleted }));
       })

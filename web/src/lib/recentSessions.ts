@@ -55,13 +55,14 @@ export function readRecentSessions(): RecentSession[] {
   return cache;
 }
 
-// Drop a deleted conversation from the cache. Matches on agent + session id, NOT
-// keyOf: the same conversation can be cached under several spellings of its
-// folder (raw vs realpath'd cwd), and all of them are now gone server-side. No
+// Drop a deleted conversation from the cache. Matches on the session id alone,
+// not keyOf: one conversation can be cached under several spellings of its folder
+// (raw vs realpath'd cwd) and under several agent names (two agents can share a
+// provider and its transcripts), and the gateway just deleted all of them. No
 // POST — the gateway's DELETE already removed the rows; this only keeps the
 // current page from showing a conversation that no longer exists.
-export function removeRecentSession(session: Pick<RecentSession, "agentName" | "sessionId">): RecentSession[] {
-  cache = cache.filter((it) => !(it.agentName === session.agentName && it.sessionId === session.sessionId));
+export function removeRecentSession(sessionId: string): RecentSession[] {
+  cache = cache.filter((it) => it.sessionId !== sessionId);
   return cache;
 }
 
