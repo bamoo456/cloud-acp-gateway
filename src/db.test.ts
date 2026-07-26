@@ -1,5 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { Db } from "./db.ts";
 
 test("pin / unpin round-trips and reports membership", () => {
@@ -166,4 +168,57 @@ test("inbox: pending survives, resolved trimmed, across reopen", () => {
   const b = new Db(file);
   assert.deepEqual(b.inbox({ status: "pending" }).map((i) => i.reqId), ["keep"]);
   b.close();
+});
+
+test("recent_sessions gains last_message_at on an existing DB, rows intact", () => {
+  const dir = `/tmp/acpb-db-migrate-${process.pid}-${Date.now()}`;
+  const file = `${dir}/state.sqlite`;
+  fs.mkdirSync(dir, { recursive: true });
+  // The pre-migration schema, with a row in it — the live DB's situation.
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE recent_sessions (
+    agent_name TEXT NOT NULL, cwd TEXT NOT NULL, session_id TEXT NOT NULL,
+    title TEXT NOT NULL, last_active_at TEXT NOT NULL,
+    PRIMARY KEY (agent_name, cwd, session_id)
+  )`);
+  old.prepare("INSERT INTO recent_sessions VALUES (?, ?, ?, ?, ?)")
+    .run("claude", "/repo", "s1", "kept", "2026-06-10T01:00:00.000Z");
+  old.close();
+
+  const kept = { agentName: "claude", cwd: "/repo", sessionId: "s1", title: "kept", lastActiveAt: "2026-06-10T01:00:00.000Z" };
+  const db = new Db(file);
+  assert.deepEqual(db.recentSessions(), [kept], "the existing row survives the migration");
+  assert.deepEqual(db.lastMessageAtBySession(), new Map(), "the new column starts null");
+
+  db.touchSessionMessage({ agentName: "claude", cwd: "/repo", sessionId: "s1", title: "ignored", at: "2026-06-11T02:00:00.000Z" });
+  assert.deepEqual(db.lastMessageAtBySession(), new Map([["s1", "2026-06-11T02:00:00.000Z"]]));
+  assert.deepEqual(db.recentSessions(), [kept], "turn traffic leaves the client's title / last_active_at alone");
+  db.close();
+
+  // Re-running the migration over an already-migrated DB is a no-op.
+  const again = new Db(file);
+  assert.deepEqual(again.lastMessageAtBySession(), new Map([["s1", "2026-06-11T02:00:00.000Z"]]));
+  again.close();
+});
+
+test("touchSessionMessage records a gateway-driven session and bumps it in place", () => {
+  const db = new Db(":memory:");
+  // No client ever recorded this session: the prompt itself creates the row.
+  db.touchSessionMessage({ agentName: "claude", cwd: "/repo", sessionId: "s1", title: "first prompt", at: "2026-06-10T01:00:00.000Z" });
+  assert.deepEqual(db.recentSessions(), [{
+    agentName: "claude", cwd: "/repo", sessionId: "s1", title: "first prompt", lastActiveAt: "2026-06-10T01:00:00.000Z",
+  }]);
+
+  db.touchSessionMessage({ agentName: "claude", cwd: "/repo", sessionId: "s1", title: "second prompt", at: "2026-06-10T03:00:00.000Z" });
+  assert.deepEqual(db.lastMessageAtBySession(), new Map([["s1", "2026-06-10T03:00:00.000Z"]]));
+  assert.equal(db.recentSessions().length, 1, "the same session is bumped, not duplicated");
+  assert.equal(db.recentSessions()[0].lastActiveAt, "2026-06-10T01:00:00.000Z", "last_active_at stays where the row was created");
+
+  // Without a cwd the key is incomplete: an existing row is still bumped, but an
+  // unknown session can't be conjured out of one.
+  db.touchSessionMessage({ agentName: "claude", cwd: "", sessionId: "s1", title: "", at: "2026-06-10T04:00:00.000Z" });
+  db.touchSessionMessage({ agentName: "claude", cwd: "", sessionId: "unknown", title: "", at: "2026-06-10T05:00:00.000Z" });
+  assert.deepEqual(db.lastMessageAtBySession(), new Map([["s1", "2026-06-10T04:00:00.000Z"]]));
+  assert.deepEqual(db.recentSessions().map((r) => r.sessionId), ["s1"]);
+  db.close();
 });

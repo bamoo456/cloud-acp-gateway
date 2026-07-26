@@ -438,3 +438,28 @@ test("a transcript with no derivable activity sorts last and keeps its mtime dat
   assert.equal(sessions[1].updatedAt, new Date(quietMtime).toISOString(), "the fallback row still renders a date");
   assert.equal(sessions[1].title, null);
 });
+
+test("turn traffic the gateway pumped outranks a stale transcript tail", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+  const store = memStore();
+  const gwActivity = "2026-07-18T10:00:00.000Z"; // what the transcript still says
+  const gwMessage = "2026-07-25T10:00:00.000Z";  // the prompt the gateway pumped
+  const otherActivity = "2026-07-22T10:00:00.000Z";
+  writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), "s-gw",
+    [turn(cwd, "s-gw", "user", "gateway prompt", gwActivity)], Date.parse(gwActivity));
+  writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), "s-other",
+    [turn(cwd, "s-other", "user", "other prompt", otherActivity)], Date.parse(otherActivity));
+  store.touchSessionMessage({ agentName: "claude", cwd, sessionId: "s-gw", title: "gateway prompt", at: gwMessage });
+
+  const listed = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot, store });
+  assert.deepEqual(listed.map((s) => [s.sessionId, s.updatedAt]), [["s-gw", gwMessage], ["s-other", otherActivity]],
+    "the DB's turn traffic wins over the transcript's older tail, and drives the order");
+
+  const discovered = await discoverClaudeHistory({ projectsRoot, fsRoot, limit: 10, store });
+  assert.deepEqual(discovered.map((s) => [s.sessionId, s.updatedAt]), [["s-gw", gwMessage], ["s-other", otherActivity]],
+    "the discovery path merges the same way");
+  store.close();
+});
