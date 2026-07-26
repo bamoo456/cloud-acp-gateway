@@ -647,6 +647,23 @@ async function claudeTranscriptMeta(
   return { cwd: head.cwd || null, title: head.title || null, lastActivityAt };
 }
 
+// The newer of two ISO instants, either of which may be missing or unparseable.
+// Never returns something the ranking below can't compare.
+function laterIso(a: string | null, b: string | null): string | null {
+  const am = a ? Date.parse(a) : NaN;
+  const bm = b ? Date.parse(b) : NaN;
+  if (!Number.isFinite(am)) return Number.isFinite(bm) ? b : null;
+  if (!Number.isFinite(bm)) return a;
+  return bm > am ? b : a;
+}
+
+// Turn traffic the gateway pumped itself, merged into the transcript recency
+// below: sessions driven only through the gateway are the half the CLI's own
+// files may not have caught up with, so the DB is their only fresh source.
+function lastMessageAts(store: Db | null): Map<string, string> {
+  try { return store?.lastMessageAtBySession() ?? new Map(); } catch { return new Map(); }
+}
+
 // Rank by real conversation activity, newest first; a transcript with none sorts
 // after every transcript that has some. mtime breaks ties WITHIN a rank but is
 // never a rank of its own — that is the seam the phantom touches came through.
@@ -687,10 +704,11 @@ export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRo
   // Resolve every candidate's activity BEFORE ranking: the sort and the limit cut
   // have to agree on one value, or a phantom-touched transcript still evicts a
   // genuinely-recent session. Cheap in steady state — unchanged files are cached.
+  const messaged = lastMessageAts(store);
   const metas: Array<typeof files[number] & ClaudeTranscriptMeta & ClaudeRecency> = [];
   for (const f of files) {
     const meta = await claudeTranscriptMeta(f.sessionId, f.file, f.size, f.mtime, store);
-    metas.push({ ...f, ...meta, recencyAt: meta.lastActivityAt });
+    metas.push({ ...f, ...meta, recencyAt: laterIso(meta.lastActivityAt, messaged.get(f.sessionId) ?? null) });
   }
   metas.sort(byClaudeRecency);
 
@@ -722,6 +740,7 @@ async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: stri
   let files: string[];
   try { files = await fs.promises.readdir(dir); } catch { return []; }
   const cache = transcriptStore(store);
+  const messaged = lastMessageAts(cache);
   const sess = files.filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"));
   const metas = (await Promise.all(
     sess.map(async (f) => {
@@ -731,7 +750,7 @@ async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: stri
       const sessionId = f.replace(/\.jsonl$/, "");
       const mtime = Math.round(st.mtimeMs);
       const meta = await claudeTranscriptMeta(sessionId, fp, st.size, mtime, cache);
-      return { sessionId, mtime, ...meta, recencyAt: meta.lastActivityAt };
+      return { sessionId, mtime, ...meta, recencyAt: laterIso(meta.lastActivityAt, messaged.get(sessionId) ?? null) };
     }),
   )).filter((m): m is NonNullable<typeof m> => !!m);
   const top = metas.sort(byClaudeRecency).slice(0, limit);
@@ -2023,6 +2042,22 @@ class Channel {
         const t = promptText(f.params);
         if (t) this.sessionTitle.set(sid, t.length > 100 ? t.slice(0, 100) : t);
       }
+      // A prompt on its way to the agent is the one unambiguous "this conversation
+      // is live NOW" signal the gateway owns, and the conversation list needs it:
+      // the transcript on disk gets rewritten without gaining a turn, and a session
+      // driven purely through the gateway may not be reflected there at all. Kept
+      // apart from last_active_at, which a client bumps just by opening a session.
+      // Guarded: this write sits in front of the forward below, so a failing store
+      // would swallow the prompt itself — a recency hint must never cost a turn.
+      try {
+        this.store?.touchSessionMessage({
+          agentName: this.name,
+          cwd: cwd ?? this.sessionCwd.get(sid) ?? "",
+          sessionId: sid,
+          title: this.sessionTitle.get(sid) ?? "",
+          at: new Date().toISOString(),
+        });
+      } catch { /* recency is best-effort */ }
     }
     const gatewayId = this.idmux.outbound(conn.id, f.id as string | number, method || null, sid || undefined, cwd || undefined);
     const out = Buffer.from(JSON.stringify({ ...f, id: gatewayId }));

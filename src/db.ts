@@ -102,8 +102,16 @@ export class Db {
       session_id TEXT NOT NULL,
       title TEXT NOT NULL,
       last_active_at TEXT NOT NULL,
+      last_message_at TEXT,
       PRIMARY KEY (agent_name, cwd, session_id)
     )`);
+    // `last_message_at` arrived after the table did, and CREATE IF NOT EXISTS is a
+    // no-op on a DB that already has rows — graft the column on instead. Guarded by
+    // table_info so this is safe on every boot (ALTER would otherwise throw).
+    const recentCols = this.db.prepare("PRAGMA table_info(recent_sessions)").all() as Array<{ name: string }>;
+    if (!recentCols.some((c) => c.name === "last_message_at")) {
+      this.db.exec("ALTER TABLE recent_sessions ADD COLUMN last_message_at TEXT");
+    }
     this.db.exec(`CREATE TABLE IF NOT EXISTS recent_folders (
       path TEXT PRIMARY KEY,
       last_used_at TEXT NOT NULL
@@ -174,10 +182,50 @@ export class Db {
         ON CONFLICT(agent_name, cwd, session_id)
         DO UPDATE SET title = excluded.title, last_active_at = excluded.last_active_at`)
       .run(s);
+    this.trimRecentSessions();
+    return this.recentSessions();
+  }
+
+  private trimRecentSessions(): void {
     this.db.prepare(`DELETE FROM recent_sessions WHERE rowid NOT IN (
       SELECT rowid FROM recent_sessions ORDER BY last_active_at DESC LIMIT ${MAX_RECENT_SESSIONS}
     )`).run();
-    return this.recentSessions();
+  }
+
+  // Record real turn traffic for a session — the gateway calls this when it
+  // actually pumps a prompt to the agent. Deliberately NOT last_active_at, which a
+  // client also bumps merely by opening a conversation; only this column means
+  // "someone talked to it". Inserts when no client has recorded the session yet
+  // (not every client POSTs /prefs/recent-session) — a prompt IS activity, so
+  // seeding last_active_at from it is honest — while an existing row keeps the
+  // title and last_active_at the client owns.
+  touchSessionMessage(s: { agentName: string; cwd: string; sessionId: string; title: string; at: string }): void {
+    if (!s.cwd) {
+      // Without a cwd the primary key can't be completed, so this can only bump
+      // whatever rows already exist for the session (any of its folders).
+      this.db.prepare("UPDATE recent_sessions SET last_message_at = ? WHERE agent_name = ? AND session_id = ?")
+        .run(s.at, s.agentName, s.sessionId);
+      return;
+    }
+    this.db
+      .prepare(`INSERT INTO recent_sessions (agent_name, cwd, session_id, title, last_active_at, last_message_at)
+        VALUES (@agentName, @cwd, @sessionId, @title, @at, @at)
+        ON CONFLICT(agent_name, cwd, session_id)
+        DO UPDATE SET last_message_at = excluded.last_message_at`)
+      .run(s);
+    this.trimRecentSessions();
+  }
+
+  // sessionId -> newest turn traffic, for the conversation list's recency. The
+  // transcript on disk is not the whole story: a session driven only through the
+  // gateway may have nothing fresh in it, so the two sources are merged. MAX()
+  // because one session id can be recorded under several (agent, cwd) rows.
+  lastMessageAtBySession(): Map<string, string> {
+    const rows = this.db
+      .prepare(`SELECT session_id, MAX(last_message_at) AS last_message_at FROM recent_sessions
+        WHERE last_message_at IS NOT NULL GROUP BY session_id`)
+      .all() as Array<{ session_id: string; last_message_at: string }>;
+    return new Map(rows.map((r) => [r.session_id, r.last_message_at]));
   }
 
   recentFolders(): RecentFolder[] {
