@@ -286,6 +286,17 @@ export async function findClaudeSessionFile(cwd: string, sessionId: string, proj
   return null;
 }
 
+// Delete a conversation's transcript. The lookup (and its id guard) is shared
+// with viewing, so a crafted id can't unlink anything outside the session store.
+// The custom-title sidecar entry goes with it — nothing else references the id.
+export async function deleteClaudeSession(cwd: string, sessionId: string, projectsRoot?: string): Promise<boolean> {
+  const file = await findClaudeSessionFile(cwd, sessionId, projectsRoot ?? claudeProjectsRoot());
+  if (!file) return false;
+  try { await fs.promises.unlink(file); } catch { return false; }
+  await writeTitle(cwd, sessionId, "", projectsRoot);
+  return true;
+}
+
 // Locate the project dir for a cwd: the computed name when it exists, else the
 // dir whose newest transcript records this cwd (realpath-compared, since all
 // transcripts in one project dir share the same cwd). Covers listing sessions
@@ -346,21 +357,46 @@ function withOpenCodeDb<T>(fn: (db: DatabaseSync) => T, fallback: T): T {
   }
 }
 
+// Same, but writable — deleting a conversation is the one thing the gateway
+// changes in opencode's store. Degrades the same way: a locked DB (opencode
+// mid-write) returns `fallback` so the caller reports the delete as failed
+// instead of throwing. The existsSync guard is load-bearing here in a way it
+// isn't above: read-only mode refuses to create a missing file, but a writable
+// open would happily conjure an empty DB where opencode has none.
+function withOpenCodeDbWrite<T>(fn: (db: DatabaseSync) => T, fallback: T): T {
+  if (!fs.existsSync(opencodeDbFile())) return fallback;
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(opencodeDbFile());
+    return fn(db);
+  } catch {
+    return fallback;
+  } finally {
+    try { db?.close(); } catch { /* ignore */ }
+  }
+}
+
 // Custom conversation titles (from rename) — a per-cwd sidecar next to the
 // session files. claude-code owns the .jsonl files, so titles live separately.
-const titlesFile = (cwd: string) => path.join(projectDirFor(cwd), ".acpb-titles.json");
-async function readTitles(cwd: string): Promise<Record<string, string>> {
+// projectsRoot is injectable so deletion (which WRITES this sidecar) can be
+// tested against a temp store instead of the real ~/.claude.
+const titlesDir = (cwd: string, projectsRoot?: string) =>
+  projectsRoot ? path.join(projectsRoot, encodeProjectPath(cwd)) : projectDirFor(cwd);
+const titlesFile = (cwd: string, projectsRoot?: string) => path.join(titlesDir(cwd, projectsRoot), ".acpb-titles.json");
+async function readTitles(cwd: string, projectsRoot?: string): Promise<Record<string, string>> {
   try {
-    const o = JSON.parse(await fs.promises.readFile(titlesFile(cwd), "utf8")) as unknown;
+    const o = JSON.parse(await fs.promises.readFile(titlesFile(cwd, projectsRoot), "utf8")) as unknown;
     return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, string>) : {};
   } catch { return {}; }
 }
-async function writeTitle(cwd: string, sessionId: string, title: string): Promise<void> {
-  const t = await readTitles(cwd);
+async function writeTitle(cwd: string, sessionId: string, title: string, projectsRoot?: string): Promise<void> {
+  const t = await readTitles(cwd, projectsRoot);
   const trimmed = title.trim().slice(0, 120);
-  if (trimmed) t[sessionId] = trimmed; else delete t[sessionId]; // empty title reverts to the derived one
-  await fs.promises.mkdir(projectDirFor(cwd), { recursive: true });
-  await fs.promises.writeFile(titlesFile(cwd), JSON.stringify(t));
+  if (trimmed) t[sessionId] = trimmed;
+  else if (sessionId in t) delete t[sessionId]; // empty title reverts to the derived one
+  else return;                                  // nothing to clear — don't create an empty sidecar
+  await fs.promises.mkdir(titlesDir(cwd, projectsRoot), { recursive: true });
+  await fs.promises.writeFile(titlesFile(cwd, projectsRoot), JSON.stringify(t));
 }
 
 // ACPG_FS_ROOT bounds which host directories the console may browse and pick as
@@ -983,6 +1019,19 @@ async function findCodexSessionFile(cwd: string, sessionId: string): Promise<Cod
   return sessions.find((s) => s.id === sessionId && sameCwd(s.cwd, cwd)) ?? null;
 }
 
+// Delete a codex conversation: unlink its rollout file (active or archived).
+// session_index.jsonl is deliberately left alone — listCodexHistory walks the
+// filesystem and only joins the index onto files it found, so an index entry
+// with no rollout is already invisible. Rewriting that append-only file would be
+// far riskier than the stale line it removes.
+async function deleteCodexSession(cwd: string, sessionId: string): Promise<boolean> {
+  const session = await findCodexSessionFile(cwd, sessionId);
+  if (!session) return false;
+  try { await fs.promises.unlink(session.file); } catch { return false; }
+  await writeTitle(cwd, sessionId, "");
+  return true;
+}
+
 async function readCodexHistoryMessages(file: string, limit: number): Promise<HistoryMessagesResult> {
   const rl = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
   const msgs: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }> = [];
@@ -1260,6 +1309,33 @@ async function readOpenCodeHistoryMessages(sessionId: string, limit: number): Pr
   return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
 }
 
+// Delete an opencode conversation. Unlike claude/codex there is no file to
+// unlink — the conversation is rows across three tables, so all of it goes in
+// one transaction (part -> message -> session, children first since nothing
+// enforces the FKs). Sub-agent sessions (parent_id) go with their parent: the
+// reader hides them, so leaving them behind would orphan rows nothing can reach.
+function deleteOpenCodeSession(sessionId: string): boolean {
+  return withOpenCodeDbWrite((db) => {
+    const kids = db.prepare("SELECT id FROM session WHERE parent_id = ?").all(sessionId) as Array<{ id: string }>;
+    const ids = [sessionId, ...kids.map((k) => k.id)];
+    const holes = ids.map(() => "?").join(",");
+    // node:sqlite has no transaction() wrapper, so drive BEGIN/COMMIT directly —
+    // a half-deleted conversation (parts gone, session row left) would list as an
+    // empty thread rather than disappearing.
+    db.exec("BEGIN");
+    try {
+      db.prepare(`DELETE FROM part WHERE message_id IN (SELECT id FROM message WHERE session_id IN (${holes}))`).run(...ids);
+      db.prepare(`DELETE FROM message WHERE session_id IN (${holes})`).run(...ids);
+      const gone = Number(db.prepare(`DELETE FROM session WHERE id IN (${holes})`).run(...ids).changes);
+      db.exec("COMMIT");
+      return gone > 0;
+    } catch (e) {
+      try { db.exec("ROLLBACK"); } catch { /* the BEGIN may never have taken */ }
+      throw e; // caught by withOpenCodeDbWrite -> reported as a failed delete
+    }
+  }, false);
+}
+
 export async function listAgentHistory(cmd: string, cwd: string, limit: number, opts?: { projectsRoot?: string; store?: Db }): Promise<HistorySessionItem[]> {
   const provider = historyProviderFor(cmd);
   if (provider === "claude") return listClaudeHistory(cwd, limit, opts?.projectsRoot, opts?.store);
@@ -1293,6 +1369,24 @@ export async function readAgentHistoryMessages(cmd: string, cwd: string, session
     return readOpenCodeHistoryMessages(sessionId, limit);
   }
   return null;
+}
+
+// Permanently delete one conversation from the agent's own store. Returns false
+// when the agent has no history provider, the session isn't in this cwd, or the
+// store refused (opencode DB locked) — the caller still clears the gateway-side
+// records either way, so a half-present conversation can always be tidied away.
+export async function deleteAgentHistorySession(cmd: string, cwd: string, sessionId: string, opts?: { projectsRoot?: string }): Promise<boolean> {
+  const provider = historyProviderFor(cmd);
+  if (provider === "claude") return deleteClaudeSession(cwd, sessionId, opts?.projectsRoot);
+  if (provider === "codex") return deleteCodexSession(cwd, sessionId);
+  if (provider === "opencode") {
+    // Same cwd scoping as reading: the id is globally unique, but one cwd must
+    // not be able to delete another's conversation.
+    const found = listOpenCodeSessions().find((s) => s.id === sessionId && typeof s.directory === "string" && sameCwd(s.directory, cwd));
+    if (!found) return false;
+    return deleteOpenCodeSession(sessionId);
+  }
+  return false;
 }
 
 // ----------------------------------------------------------------- agent ----
@@ -2942,6 +3036,40 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     if (!cwd || !session) { res.writeHead(400); res.end(); return; }
     writeTitle(cwd, session, q.get("title") ?? "")
       .then(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true })); })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Permanently delete a conversation: the agent's own transcript AND every
+  // gateway-side record of it. Skipping the latter isn't cosmetic — the recents
+  // row rehydrates from /prefs on the next load (resurrecting a conversation that
+  // now 404s), the transcript cache keeps feeding the recency ranking, and a
+  // pending prompt lingers in the inbox as a badge nothing can answer.
+  if (consoleEnabled && pathname === "/history/session") {
+    if (req.method !== "DELETE") { res.writeHead(405); res.end(); return; }
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const agentName = q.get("agent") ?? cfg.defaultAgent;
+    const prof = cfg.agents[agentName];
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "") ?? (prof ? prof.cwd : null);
+    // Same id sanitizing as /history/messages — underscores allowed for opencode.
+    const sid = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+    if (!cwd || !sid) { res.writeHead(400); res.end(); return; }
+    // A running turn is still appending to the transcript. Unlinking it now would
+    // leave the agent writing to an unlinked inode and silently break session/load.
+    if (gateway.running().some((t) => t.agentName === agentName && t.sessionId === sid)) {
+      res.writeHead(409, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "conversation is running" }));
+      return;
+    }
+    deleteAgentHistorySession(prof?.cmd ?? "", cwd, sid)
+      .then((deleted) => {
+        // Runs even when the transcript was already gone, so a conversation left
+        // half-present (transcript deleted outside the gateway) can still be tidied.
+        db().deleteRecentSession(agentName, sid);
+        db().deleteTranscriptMeta(sid);
+        db().cancelInboxForSession(agentName, sid, new Date().toISOString());
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, deleted }));
+      })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
   }

@@ -81,6 +81,29 @@ test("recent sessions upsert newest-first and cap at 50", () => {
   db.close();
 });
 
+test("deleting a conversation drops its recency rows under every cwd spelling", () => {
+  const db = new Db(":memory:");
+  const mk = (agentName: string, cwd: string, id: string) => ({
+    agentName, cwd, sessionId: id, title: id, lastActiveAt: "2026-07-20T01:00:00.000Z",
+  });
+  // Clients write whatever cwd string they hold, so one conversation can be
+  // recorded under both a symlinked and a realpath'd folder. Both must go.
+  db.touchRecentSession(mk("claude", "/tmp/repo", "s1"));
+  db.touchRecentSession(mk("claude", "/private/tmp/repo", "s1"));
+  db.touchRecentSession(mk("codex", "/tmp/repo", "s1")); // same id, different agent's id space
+  db.saveTranscriptMeta({ sessionId: "s1", file: "/t/s1.jsonl", cwd: "/repo", title: "t", lastActivityAt: null, size: 1, mtimeMs: 1 });
+
+  const left = db.deleteRecentSession("claude", "s1");
+  assert.deepEqual(left.map((r) => [r.agentName, r.cwd]), [["codex", "/tmp/repo"]],
+    "every cwd spelling for this agent's session goes; another agent's id is untouched");
+  assert.deepEqual(db.deleteRecentSession("claude", "s1"), left, "deleting again is a no-op");
+
+  db.deleteTranscriptMeta("s1");
+  assert.equal(db.transcriptMeta("s1"), null);
+  db.deleteTranscriptMeta("s1"); // idempotent
+  db.close();
+});
+
 test("recent folders upsert newest-first and cap at 20", () => {
   const db = new Db(":memory:");
   db.touchRecentFolder("/a", "2026-06-10T01:00:00.000Z");

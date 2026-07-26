@@ -1712,4 +1712,43 @@ describe("store notification routing", () => {
     const item = st.sessions.S.items.find((it: any) => it.kind === "permission" && String(it.reqId) === "99");
     expect(item.resolved).toBe(true);
   });
+  test("deleting a conversation clears it everywhere the UI can surface it", async () => {
+    setPrefs({ recentSessions: [
+      { agentName: "claude", cwd: "/old", sessionId: "home-session", title: "Doomed", lastActiveAt: "2026-07-20T01:00:00.000Z" },
+      { agentName: "claude", cwd: "/other", sessionId: "keep-me", title: "Keeper", lastActiveAt: "2026-07-20T02:00:00.000Z" },
+    ] });
+    const { useStore } = await bootstrapClaude();
+    const nonceBefore = useStore.getState().historyNonce;
+    let seen = "";
+    setHistoryFetch(async (url, init) => {
+      seen = `${init?.method} ${url}`;
+      return { ok: true, status: 200, json: async () => ({ ok: true, deleted: true }) };
+    });
+
+    await useStore.getState().deleteSession();
+
+    expect(seen).toContain("DELETE ");
+    expect(seen).toContain("/history/session?agent=claude&cwd=%2Fold&session=home-session");
+    const st = useStore.getState();
+    expect(st.sessions["home-session"]).toBeUndefined();
+    expect(st.activeId).toBeNull();
+    expect(st.recentSessions.map((r) => r.sessionId)).toEqual(["keep-me"]);
+    expect(st.historyNonce).toBe(nonceBefore + 1);
+  });
+
+  test("a refused delete (running turn) leaves the conversation alone", async () => {
+    setPrefs({ recentSessions: [
+      { agentName: "claude", cwd: "/old", sessionId: "home-session", title: "Busy", lastActiveAt: "2026-07-20T01:00:00.000Z" },
+    ] });
+    const { useStore } = await bootstrapClaude();
+    setHistoryFetch(async () => ({ ok: false, status: 409, json: async () => ({ error: "conversation is running" }) }));
+
+    await useStore.getState().deleteSession();
+
+    const st = useStore.getState();
+    expect(st.sessions["home-session"]).toBeDefined();
+    expect(st.activeId).toBe("home-session");
+    expect(st.recentSessions.map((r) => r.sessionId)).toEqual(["home-session"]);
+    expect(st.tip).toContain("still running");
+  });
 });

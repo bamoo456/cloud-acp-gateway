@@ -356,6 +356,8 @@
   .btn { padding: 8px 14px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--surface); font: inherit; font-weight: 600; cursor: pointer; color: var(--text); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover { background: var(--accent-press); }
+  .btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
+  .btn.danger:hover { filter: brightness(.93); }
   .btn:disabled { opacity: .45; cursor: default; }
   .btn.primary:disabled:hover { background: var(--accent); }
   .search { padding: 0 10px 10px; }
@@ -802,6 +804,9 @@
   .amenu-note { padding: 4px 14px 10px; color: var(--muted); font-size: 13px; line-height: 1.45; }
   .amenu-subhead { padding: 8px 14px 4px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
   .amenu .arow.danger .col span:first-child { color: var(--err); }
+  .amenu .delete-body { display: flex; flex-direction: column; gap: 4px; padding: 4px 0 14px; }
+  .amenu .delete-title { padding: 6px 14px 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .amenu .delete-body .btn { margin: 2px 14px 0; }
   .lock-error { color: var(--err); font-size: 13px; }
   /* full-screen unlock gate (LockScreen) — above the action menu and everything else */
   .lockscreen { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px;

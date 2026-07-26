@@ -195,6 +195,36 @@ describe("ActionMenu config options", () => {
     expect(useStore.getState().lockEnabled).toBe(false);
   });
 
+  test("deleting a conversation needs a confirm step and is blocked while it runs", async () => {
+    const { ActionMenu } = await import("./ActionMenu.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const deleteSession = vi.fn(async () => {});
+    useStore.setState({
+      agentName: "codex", cwd: "/p", activeId: "live-codex",
+      sessions: liveSession("live-codex", "Live Codex"),
+      runningTasks: [], deleteSession,
+    });
+    root = createRoot(container);
+    act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
+
+    // The main menu only navigates — it must not delete on the first click.
+    await act(async () => { rowByText("Delete conversation")!.click(); });
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("can't be undone");
+    expect(container.querySelector(".delete-title")?.textContent).toBe("Live Codex");
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".btn.danger")!.click(); });
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+
+    // A conversation with a turn in flight can't be deleted — the gateway would
+    // refuse it (409), so the row is disabled rather than offering a dead confirm.
+    act(() => root!.render(React.createElement(ActionMenu, { open: false, onClose: () => {} })));
+    act(() => useStore.setState({ runningTasks: [{ agentName: "codex", sessionId: "live-codex", state: "active" }] }));
+    act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
+    expect(rowByText("Delete conversation")).toBeDisabled();
+    expect(rowByText("Delete conversation")?.textContent).toContain("still running");
+  });
+
   test("disables the resume command for agents that keep no history", async () => {
     document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
       wsPath: "/acp",

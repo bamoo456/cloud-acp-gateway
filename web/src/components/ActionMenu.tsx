@@ -3,7 +3,7 @@ import { TEXT_SIZE_OPTIONS, useStore } from "../store/store.ts";
 import { resumeCommand } from "../lib/config.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { setLockPin, clearLock, MIN_PIN_LENGTH } from "../lib/lock.ts";
-import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconPencil, IconType, IconLock, IconX } from "../lib/icons.tsx";
+import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconPencil, IconTrash, IconType, IconLock, IconX } from "../lib/icons.tsx";
 import type { ConfigOption } from "../types.ts";
 
 function configRank(option: ConfigOption): number {
@@ -39,6 +39,10 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   const hasConfigOptions = s.configOptions.length > 0;
   const agentRef = s.cfg.agents.find((a) => a.name === s.agentName);
   const hasHistory = agentRef?.history !== false;
+  // The gateway refuses to delete a conversation with a turn in flight (it would
+  // unlink a transcript the agent is still writing), so disable it here too
+  // rather than letting the user click into a confirm that can only fail.
+  const isRunning = s.runningTasks.some((t) => t.agentName === s.agentName && t.sessionId === resumableId);
   const pinTitle = s.lockEnabled ? "Change PIN" : "Set a PIN";
   const pinError = pin1.length > 0 && pin1.length < MIN_PIN_LENGTH
     ? `PIN must be at least ${MIN_PIN_LENGTH} digits`
@@ -141,6 +145,9 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
             <button className="arow" onClick={() => { setRenameText(sess && sess.title !== "Untitled" ? sess.title : ""); setView("rename"); }} disabled={!resumableId}>
               <IconPencil />Rename
             </button>
+            <button className="arow danger" onClick={() => setView("delete")} disabled={!resumableId || isRunning}>
+              <IconTrash /><span className="col"><span>Delete conversation</span>{isRunning && <span className="sub">still running — stop it first</span>}</span>
+            </button>
           </>
         )}
         {view === "model" && (
@@ -231,6 +238,19 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
               <button type="submit" className="btn primary">Save</button>
             </div>
           </form>
+        )}
+        {view === "delete" && (
+          <>
+            <div className="ahead"><button className="iback" onClick={() => setView("main")}><IconBack /></button>Delete conversation</div>
+            <div className="delete-body">
+              <div className="delete-title">{sess && sess.title !== "Untitled" ? sess.title : resumableId?.slice(0, 8)}</div>
+              <div className="amenu-note">
+                Permanently deletes this conversation's transcript from the agent's own history.
+                It can't be undone, and it won't be resumable from your terminal afterwards either.
+              </div>
+              <button className="btn danger" onClick={() => { void s.deleteSession(); onClose(); }}>Delete</button>
+            </div>
+          </>
         )}
         {view.startsWith("cfg:") && (() => {
           const opt = s.configOptions.find((o) => "cfg:" + o.id === view);
