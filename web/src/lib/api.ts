@@ -50,6 +50,23 @@ export async function renameSession(agent: string, cwd: string, session: string,
   await fetch(url, { method: "POST" });
 }
 
+// Permanently delete a conversation — the transcript plus the gateway's own
+// records of it. Addressed by session id alone: the id identifies the
+// conversation, while an agent name or cwd only says where this client happened
+// to see it (two agents can share one provider and its transcripts), so neither
+// is something the client should be trusted to get right. `running`
+// distinguishes the one refusal the UI can explain (409: a turn is still in
+// flight) from a generic failure.
+export async function deleteSession(session: string): Promise<{ ok: boolean; running: boolean }> {
+  const url = base() + "/history/session?session=" + encodeURIComponent(session);
+  try {
+    const r = await fetch(url, { method: "DELETE" });
+    return { ok: r.ok, running: r.status === 409 };
+  } catch {
+    return { ok: false, running: false };
+  }
+}
+
 export async function listDir(path: string): Promise<FsResult> {
   const url = base() + "/fs?path=" + encodeURIComponent(path);
   return (await fetch(url)).json();

@@ -1,9 +1,9 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, getPrefs, putTextSize, answerInbox, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, type RunningTask, type InboxItem } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
-import { readRecentSessions, touchRecentSession, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
+import { readRecentSessions, touchRecentSession, removeRecentSession, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
 import { isLockEnabled, hydrateLock } from "../lib/lock.ts";
 import {
@@ -99,6 +99,7 @@ interface State {
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
   renameSession: (title: string) => void;
+  deleteSession: () => Promise<void>;
   answerPermission: (reqId: number | string, optionId: string) => void;
   answerElicitation: (reqId: number | string, response: ElicitationResponse, summary: string) => void;
   answerInboxItem: (agentName: string, reqId: string, optionId: string) => void;
@@ -875,6 +876,26 @@ export const useStore = create<State>((set, get) => {
       apiRename(get().agentName, get().sessions[sid]?.cwd || get().cwd, sid, t)
         .then(() => set((st) => ({ historyNonce: st.historyNonce + 1 })))
         .catch(() => {});
+    },
+    // Unlike rename, this is NOT optimistic: the gateway can refuse (a running
+    // turn), and removing the conversation from the UI first would leave the
+    // sidebar disagreeing with a transcript that's still on disk.
+    async deleteSession() {
+      const sid = get().activeId;
+      if (!sid || sid.startsWith("pending-")) return;
+      const { ok, running } = await apiDelete(sid);
+      if (!ok) {
+        set({ tip: running ? "This conversation is still running." : "Couldn't delete this conversation." });
+        return;
+      }
+      const recentSessions = removeRecentSession(sid);
+      set((st) => {
+        const sessions = { ...st.sessions };
+        delete sessions[sid];
+        // Nothing to activate — land on the empty state rather than picking an
+        // arbitrary neighbour. historyNonce re-pulls both sidebar lists.
+        return { sessions, activeId: null, recentSessions, historyNonce: st.historyNonce + 1, tip: "" };
+      });
     },
     answerPermission(reqId, optionId) {
       const pending = findActivePrompt(reqId);
