@@ -186,6 +186,19 @@ export class Db {
     return this.recentSessions();
   }
 
+  // Drop a deleted conversation's recency rows. Deliberately NOT keyed on cwd,
+  // even though that's the primary key: the writers store whatever cwd string the
+  // client sent, while the delete route resolves (realpaths) it first, so a
+  // symlinked project path leaves the row behind — and /prefs then resurrects a
+  // conversation whose transcript is gone. Session ids are unique within an agent
+  // (UUIDs for claude/codex, ses_* for opencode), so every row under this id IS
+  // this conversation, just recorded under stale folder spellings. Idempotent.
+  deleteRecentSession(agentName: string, sessionId: string): RecentSession[] {
+    this.db.prepare("DELETE FROM recent_sessions WHERE agent_name = ? AND session_id = ?")
+      .run(agentName, sessionId);
+    return this.recentSessions();
+  }
+
   private trimRecentSessions(): void {
     this.db.prepare(`DELETE FROM recent_sessions WHERE rowid NOT IN (
       SELECT rowid FROM recent_sessions ORDER BY last_active_at DESC LIMIT ${MAX_RECENT_SESSIONS}
@@ -269,6 +282,12 @@ export class Db {
           file = excluded.file, cwd = excluded.cwd, title = excluded.title,
           last_activity_at = excluded.last_activity_at, size = excluded.size, mtime_ms = excluded.mtime_ms`)
       .run(m);
+  }
+
+  // Forget one transcript's cached metadata — the transcript is gone, so the row
+  // would otherwise keep feeding lastMessageAtBySession and the recency ranking.
+  deleteTranscriptMeta(sessionId: string): void {
+    this.db.prepare("DELETE FROM transcript_meta WHERE session_id = ?").run(sessionId);
   }
 
   // Pinned ("favorite") folders, oldest-pinned first for a stable display order.

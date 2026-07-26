@@ -35,6 +35,14 @@ export function IconPencil() {
   );
 }
 
+export function IconTrash() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7h16" /><path d="M10 4h4" /><path d="M6 7l1 13h10l1-13" /><path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
 export function IconType() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
