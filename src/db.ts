@@ -39,6 +39,22 @@ export interface RecentSession {
 }
 export interface RecentFolder { path: string; lastUsedAt: string; }
 
+// One Claude CLI transcript's derived metadata, cached so listing conversations
+// doesn't re-read the files. `cwd`/`title` are immutable per session (derived
+// once from the head); `last_activity_at` is the timestamp of the last real turn
+// INSIDE the transcript and is re-derived whenever (size, mtime_ms) move. `file`
+// is part of the freshness check: the same session id can appear under two
+// project dirs when the CLI truncates a long encoded name.
+export interface TranscriptMeta {
+  sessionId: string;
+  file: string;
+  cwd: string;
+  title: string | null;
+  lastActivityAt: string | null;
+  size: number;
+  mtimeMs: number;
+}
+
 // A durable "inbox" item. Generic over `type` so it can hold permission prompts
 // today and other notification kinds (task-done, agent-error, ...) later. A
 // permission row additionally carries `reqId`/`seq`/`frame` so the live answer
@@ -112,6 +128,17 @@ export class Db {
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox(status)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_lookup ON inbox(agent_name, req_id, status)`);
+    // Derived metadata for the Claude CLI transcripts, keyed by session id — see
+    // TranscriptMeta. Purely a cache: dropping the table only costs a re-derive.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS transcript_meta (
+      session_id       TEXT PRIMARY KEY,
+      file             TEXT NOT NULL,
+      cwd              TEXT NOT NULL,
+      title            TEXT,
+      last_activity_at TEXT,
+      size             INTEGER NOT NULL,
+      mtime_ms         INTEGER NOT NULL
+    )`);
   }
 
   // Generic key/value state shared across devices: the UI's text-size preference
@@ -170,6 +197,31 @@ export class Db {
       SELECT rowid FROM recent_folders ORDER BY last_used_at DESC LIMIT ${MAX_RECENT_FOLDERS}
     )`).run();
     return this.recentFolders();
+  }
+
+  // ------------------------------------------------------- transcript cache ----
+
+  transcriptMeta(sessionId: string): TranscriptMeta | null {
+    const row = this.db
+      .prepare("SELECT session_id, file, cwd, title, last_activity_at, size, mtime_ms FROM transcript_meta WHERE session_id = ?")
+      .get(sessionId) as
+        | { session_id: string; file: string; cwd: string; title: string | null; last_activity_at: string | null; size: number; mtime_ms: number }
+        | undefined;
+    if (!row) return null;
+    return {
+      sessionId: row.session_id, file: row.file, cwd: row.cwd, title: row.title,
+      lastActivityAt: row.last_activity_at, size: Number(row.size), mtimeMs: Number(row.mtime_ms),
+    };
+  }
+
+  saveTranscriptMeta(m: TranscriptMeta): void {
+    this.db
+      .prepare(`INSERT INTO transcript_meta (session_id, file, cwd, title, last_activity_at, size, mtime_ms)
+        VALUES (@sessionId, @file, @cwd, @title, @lastActivityAt, @size, @mtimeMs)
+        ON CONFLICT(session_id) DO UPDATE SET
+          file = excluded.file, cwd = excluded.cwd, title = excluded.title,
+          last_activity_at = excluded.last_activity_at, size = excluded.size, mtime_ms = excluded.mtime_ms`)
+      .run({ ...m }); // spread to a plain literal: node:sqlite wants Record<string, …>
   }
 
   // Pinned ("favorite") folders, oldest-pinned first for a stable display order.

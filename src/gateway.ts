@@ -38,7 +38,7 @@ import { Ledger } from "./ledger.ts";
 import { basicAuthOk, wsAuthOk } from "./auth.ts";
 import { resolveTls } from "./tls.ts";
 import { accessUrls } from "./access.ts";
-import { Db, type InboxItem, type InboxStatus } from "./db.ts";
+import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.ts";
 import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { buildClientConfig } from "./client-config.ts";
@@ -529,29 +529,6 @@ function normalizeContent(content: unknown): ViewBlock[] {
   return out;
 }
 
-// Stream a session file just far enough to grab a title (first user text).
-async function firstUserText(file: string): Promise<string | null> {
-  const rl = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-  try {
-    for await (const line of rl) {
-      const t = line.trim();
-      if (!t) continue;
-      let e: { type?: string; isSidechain?: boolean; message?: { content?: unknown } };
-      try { e = JSON.parse(t); } catch { continue; }
-      if (e.type !== "user" || e.isSidechain) continue;
-      const blocks = normalizeContent(e.message?.content);
-      const txt = blocks.find((b) => b.type === "text")?.text;
-      if (txt && txt.trim()) {
-        rl.close();
-        return txt.trim().replace(/\s+/g, " ").slice(0, 80);
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  return null;
-}
-
 async function claudeTranscriptSummary(file: string): Promise<{ cwd: string | null; title: string | null }> {
   const rl = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
   let cwd: string | null = null;
@@ -579,14 +556,119 @@ async function claudeTranscriptSummary(file: string): Promise<{ cwd: string | nu
   return { cwd, title };
 }
 
-export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRoot?: string; limit?: number }): Promise<DiscoveredHistorySessionItem[]> {
+// A transcript's recency must come from its CONTENT, not its file mtime. Claude
+// Code rewrites transcripts without appending a turn (trailing `system` entries
+// like away_summary / turn_duration / stop_hook_summary, and the `last-prompt`
+// bookkeeping line), so mtime moves while the conversation stands still: rows
+// showed "27s ago" for week-old sessions AND — because the same mtime drove the
+// `slice(limit)` cut — phantom-touched sessions evicted genuinely-recent ones
+// from the list entirely. Both the ranking and the cut below use the derived
+// activity instead, cached per transcript so an unchanged file costs zero reads.
+
+// The tail is read in chunks and scanned backwards; a transcript can be tens of
+// MB, so it is never read whole (the head scan for cwd/title stops early too).
+const TAIL_CHUNK_BYTES = 256 * 1024;
+const TAIL_MAX_BYTES = 4 * 1024 * 1024;
+
+type ClaudeEntryHead = { type?: string; isSidechain?: boolean; isMeta?: boolean; timestamp?: unknown };
+
+// The timestamp of an entry that counts as conversation activity: a real user
+// prompt or an assistant turn. `system` (away_summary, turn_duration, …),
+// `attachment` and `last-prompt` (which carries no timestamp at all) are
+// bookkeeping the CLI writes on its own — exactly the noise that makes mtime
+// untrustworthy. Normalized to a comparable ISO instant.
+function claudeActivityAt(e: ClaudeEntryHead): string | null {
+  const real = e.type === "assistant" || (e.type === "user" && e.isSidechain !== true && e.isMeta !== true);
+  if (!real || typeof e.timestamp !== "string") return null;
+  const ms = Date.parse(e.timestamp);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+// Last real turn in a transcript, found by scanning its tail backwards. Expands
+// the window (doubling) when a tail holds nothing but bookkeeping, then gives up
+// rather than dragging a huge file through memory.
+async function claudeLastActivityAt(file: string, size: number): Promise<string | null> {
+  if (size <= 0) return null;
+  for (let chunk = TAIL_CHUNK_BYTES; ; chunk = Math.min(chunk * 2, TAIL_MAX_BYTES)) {
+    const start = Math.max(0, size - chunk);
+    let text: string;
+    try {
+      const fh = await fs.promises.open(file, "r");
+      try {
+        const buf = Buffer.alloc(size - start);
+        const { bytesRead } = await fh.read(buf, 0, buf.length, start);
+        text = buf.subarray(0, bytesRead).toString("utf8");
+      } finally { await fh.close(); }
+    } catch { return null; }
+    const lines = text.split("\n");
+    if (start > 0) lines.shift(); // started mid-file: the first line is a fragment
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const t = lines[i].trim();
+      if (!t) continue;
+      let e: ClaudeEntryHead;
+      try { e = JSON.parse(t) as ClaudeEntryHead; } catch { continue; }
+      const at = claudeActivityAt(e);
+      if (at) return at;
+    }
+    if (start === 0 || chunk >= TAIL_MAX_BYTES) return null; // whole file (or the cap) scanned
+  }
+}
+
+// The transcript cache lives in the shared prefs DB. Resolved once per listing so
+// an unopenable store (no writable ledger dir — e.g. a test that only imports
+// this module) degrades to deriving everything from the files.
+function transcriptStore(injected?: Db): Db | null {
+  if (injected) return injected;
+  try { return db(); } catch { return null; }
+}
+
+type ClaudeTranscriptMeta = { cwd: string | null; title: string | null; lastActivityAt: string | null };
+
+// One transcript's metadata, re-deriving only what can have changed. An unchanged
+// (file, size, mtime) triple is a full hit: no file is opened at all. Otherwise
+// the tail is rescanned for the last turn, while cwd/title — immutable per
+// session — are read from the head only when the cache has never recorded them
+// ("" records "scanned, none found": a title-less transcript has no early exit,
+// so re-deriving it would stream the whole file on every rewrite).
+async function claudeTranscriptMeta(
+  sessionId: string, file: string, size: number, mtimeMs: number, store: Db | null,
+): Promise<ClaudeTranscriptMeta> {
+  let row: TranscriptMeta | null = null;
+  try { row = store?.transcriptMeta(sessionId) ?? null; } catch { /* cache miss */ }
+  const sameFile = !!row && row.file === file;
+  if (row && sameFile && row.size === size && row.mtimeMs === mtimeMs) {
+    return { cwd: row.cwd || null, title: row.title || null, lastActivityAt: row.lastActivityAt };
+  }
+  const head = row && sameFile && row.title !== null
+    ? { cwd: row.cwd, title: row.title }
+    : await claudeTranscriptSummary(file);
+  const lastActivityAt = await claudeLastActivityAt(file, size);
+  try {
+    store?.saveTranscriptMeta({ sessionId, file, cwd: head.cwd ?? "", title: head.title ?? "", lastActivityAt, size, mtimeMs });
+  } catch { /* the cache is an optimization, never a hard dependency */ }
+  return { cwd: head.cwd || null, title: head.title || null, lastActivityAt };
+}
+
+// Rank by real conversation activity, newest first; a transcript with none sorts
+// after every transcript that has some. mtime breaks ties WITHIN a rank but is
+// never a rank of its own — that is the seam the phantom touches came through.
+type ClaudeRecency = { recencyAt: string | null; mtime: number };
+function byClaudeRecency(a: ClaudeRecency, b: ClaudeRecency): number {
+  const am = a.recencyAt ? Date.parse(a.recencyAt) : -Infinity;
+  const bm = b.recencyAt ? Date.parse(b.recencyAt) : -Infinity;
+  if (am !== bm) return bm - am;
+  return b.mtime - a.mtime;
+}
+
+export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRoot?: string; limit?: number; store?: Db }): Promise<DiscoveredHistorySessionItem[]> {
   const projectsRoot = opts?.projectsRoot ?? path.join(CLAUDE_DIR, "projects");
   const fsRoot = opts?.fsRoot ?? FS_ROOT;
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
+  const store = transcriptStore(opts?.store);
   let projects: fs.Dirent[];
   try { projects = await fs.promises.readdir(projectsRoot, { withFileTypes: true }); } catch { return []; }
 
-  const files: Array<{ sessionId: string; file: string; mtime: number }> = [];
+  const files: Array<{ sessionId: string; file: string; size: number; mtime: number }> = [];
   for (const project of projects) {
     if (!project.isDirectory()) continue;
     let entries: fs.Dirent[];
@@ -597,29 +679,39 @@ export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRo
       const file = path.join(dir, entry.name);
       try {
         const st = await fs.promises.stat(file);
-        files.push({ sessionId: entry.name.replace(/\.jsonl$/, ""), file, mtime: st.mtimeMs });
+        files.push({ sessionId: entry.name.replace(/\.jsonl$/, ""), file, size: st.size, mtime: Math.round(st.mtimeMs) });
       } catch {
         /* ignore */
       }
     }
   }
 
-  files.sort((a, b) => b.mtime - a.mtime);
+  // Resolve every candidate's activity BEFORE ranking: the sort and the limit cut
+  // have to agree on one value, or a phantom-touched transcript still evicts a
+  // genuinely-recent session. Cheap in steady state — unchanged files are cached.
+  const metas: Array<typeof files[number] & ClaudeTranscriptMeta & ClaudeRecency> = [];
+  for (const f of files) {
+    const meta = await claudeTranscriptMeta(f.sessionId, f.file, f.size, f.mtime, store);
+    metas.push({ ...f, ...meta, recencyAt: meta.lastActivityAt });
+  }
+  metas.sort(byClaudeRecency);
+
   const out: DiscoveredHistorySessionItem[] = [];
   const seen = new Set<string>();
-  for (const f of files) {
+  for (const m of metas) {
     if (out.length >= limit) break;
-    const summary = await claudeTranscriptSummary(f.file);
-    if (!summary.cwd) continue;
-    const cwd = resolveWithinRootBase(summary.cwd, fsRoot);
+    if (!m.cwd) continue;
+    // The cwd may come from the cache, so it is guarded here (not at derive time).
+    const cwd = resolveWithinRootBase(m.cwd, fsRoot);
     if (!cwd) continue;
-    const key = cwd + "\n" + f.sessionId;
+    const key = cwd + "\n" + m.sessionId;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
-      sessionId: f.sessionId,
-      title: summary.title,
-      updatedAt: new Date(f.mtime).toISOString(),
+      sessionId: m.sessionId,
+      title: m.title,
+      // No derivable activity: fall back to mtime so the client still renders a date.
+      updatedAt: m.recencyAt ?? new Date(m.mtime).toISOString(),
       cwd,
       source: "claude-cli",
     });
@@ -627,32 +719,30 @@ export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRo
   return out;
 }
 
-async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: string): Promise<HistorySessionItem[]> {
+async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: string, store?: Db): Promise<HistorySessionItem[]> {
   const dir = (await findClaudeProjectDir(cwd, projectsRoot)) ?? path.join(projectsRoot ?? claudeProjectsRoot(), encodeProjectPath(cwd));
   let files: string[];
   try { files = await fs.promises.readdir(dir); } catch { return []; }
+  const cache = transcriptStore(store);
   const sess = files.filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"));
-  const stats = await Promise.all(
+  const metas = (await Promise.all(
     sess.map(async (f) => {
       const fp = path.join(dir, f);
-      try { const st = await fs.promises.stat(fp); return { f, fp, mtime: st.mtimeMs }; } catch { return null; }
+      let st: fs.Stats;
+      try { st = await fs.promises.stat(fp); } catch { return null; }
+      const sessionId = f.replace(/\.jsonl$/, "");
+      const mtime = Math.round(st.mtimeMs);
+      const meta = await claudeTranscriptMeta(sessionId, fp, st.size, mtime, cache);
+      return { sessionId, mtime, ...meta, recencyAt: meta.lastActivityAt };
     }),
-  );
-  const top = stats
-    .filter((s): s is { f: string; fp: string; mtime: number } => !!s)
-    .sort((a, b) => b.mtime - a.mtime)
-    .slice(0, limit);
+  )).filter((m): m is NonNullable<typeof m> => !!m);
+  const top = metas.sort(byClaudeRecency).slice(0, limit);
   const custom = await readTitles(cwd); // custom (renamed) titles override the derived one
-  return Promise.all(
-    top.map(async (s) => {
-      const sessionId = s.f.replace(/\.jsonl$/, "");
-      return {
-        sessionId,
-        title: custom[sessionId] ?? (await firstUserText(s.fp)),
-        updatedAt: new Date(s.mtime).toISOString(),
-      };
-    }),
-  );
+  return top.map((m) => ({
+    sessionId: m.sessionId,
+    title: custom[m.sessionId] ?? m.title,
+    updatedAt: m.recencyAt ?? new Date(m.mtime).toISOString(),
+  }));
 }
 
 // Claude Code injects these as user-role text when a turn is interrupted — one
@@ -1151,9 +1241,9 @@ async function readOpenCodeHistoryMessages(sessionId: string, limit: number): Pr
   return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
 }
 
-export async function listAgentHistory(cmd: string, cwd: string, limit: number, opts?: { projectsRoot?: string }): Promise<HistorySessionItem[]> {
+export async function listAgentHistory(cmd: string, cwd: string, limit: number, opts?: { projectsRoot?: string; store?: Db }): Promise<HistorySessionItem[]> {
   const provider = historyProviderFor(cmd);
-  if (provider === "claude") return listClaudeHistory(cwd, limit, opts?.projectsRoot);
+  if (provider === "claude") return listClaudeHistory(cwd, limit, opts?.projectsRoot, opts?.store);
   if (provider === "codex") return listCodexHistory(cwd, limit);
   if (provider === "opencode") return listOpenCodeHistory(cwd, limit);
   return [];
