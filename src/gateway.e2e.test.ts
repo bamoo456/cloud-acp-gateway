@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeTestServer, Gateway } from "./gateway.ts";
+import { makeTestServer, Gateway, type Conn } from "./gateway.ts";
 import { Db } from "./db.ts";
 import { sse, post, sseStatus, USER, TOKEN, parseFrame, type Evt } from "./sse-testclient.ts";
 
@@ -464,6 +464,30 @@ test("inbox: the gateway reuses an injected store (one SQLite connection) instea
   // A row written straight to the shared Db surfaces through the gateway → same handle.
   shared.addInboxItem({ type: "permission", agentName: "claude", reqId: "1", title: "x", createdAt: "t" });
   assert.deepEqual(gw.inbox().map((i) => i.reqId), ["1"]);
+  shared.close();
+});
+
+test("recent sessions record turn traffic on a prompt, never on merely attaching", () => {
+  // The conversation list's recency must not conflate "a client opened this" with
+  // "someone talked to it" — that conflation is exactly why last_active_at can't
+  // carry it, so the bump lives where the gateway pumps a turn.
+  const shared = new Db(":memory:");
+  const gw = new Gateway(
+    { claude: { cmd: "x", args: [], cwd: process.cwd() } } as unknown as Record<string, never>,
+    fs.mkdtempSync(path.join(os.tmpdir(), "acpb-store-")),
+    (_p, _cb, _onExit) => ({ send() {}, kill() {}, restart() {} }),
+    () => shared,
+  );
+  const ch = gw.channel("claude");
+  const conn: Conn = { id: "c1", sink: { send() {}, close() {}, get alive() { return true; } } };
+
+  ch.fromClient(conn, Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/load", params: { sessionId: "S1", cwd: "/repo" } })));
+  assert.deepEqual([...shared.lastMessageAtBySession()], [], "attaching to a conversation is not turn traffic");
+
+  ch.fromClient(conn, Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId: "S1", prompt: [{ type: "text", text: "hello there" }] } })));
+  assert.deepEqual([...shared.lastMessageAtBySession()].map(([sid]) => sid), ["S1"], "a prompt is");
+  assert.deepEqual(shared.recentSessions().map((r) => [r.sessionId, r.cwd, r.title]), [["S1", "/repo", "hello there"]],
+    "a session no client had recorded is created by its first prompt, under the cwd its load carried");
   shared.close();
 });
 

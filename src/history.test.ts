@@ -5,6 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, findClaudeSessionFile } from "./gateway.ts";
+import { Db } from "./db.ts";
+
+// The Claude history paths cache derived transcript metadata in the shared prefs
+// DB. Tests inject an in-memory one so they never touch the real state.sqlite.
+const memStore = () => new Db(":memory:");
 
 // Write a Claude Code transcript (one JSON object per line) to a temp file.
 function writeTranscript(lines: unknown[]): string {
@@ -110,7 +115,7 @@ test("Claude discovery recovers cwd from CLI transcripts and filters outside the
     { type: "user", cwd: inCwd, sessionId: "agent-sidechain", message: { role: "user", content: "ignore sidechain" } },
   ], 7000);
 
-  const sessions = await discoverClaudeHistory({ projectsRoot, fsRoot, limit: 10 });
+  const sessions = await discoverClaudeHistory({ projectsRoot, fsRoot, limit: 10, store: memStore() });
 
   assert.deepEqual(sessions, [
     { sessionId: "session-new", title: "newer cli prompt", updatedAt: new Date(3000).toISOString(), cwd: fs.realpathSync(newerCwd), source: "claude-cli" },
@@ -296,7 +301,7 @@ test("claude history survives a project dir name the gateway can't derive (CLI l
     { type: "assistant", cwd, sessionId: "11111111-aaaa-bbbb-cccc-000000000001", message: { role: "assistant", content: [{ type: "text", text: "reply" }] } },
   ], 3000);
 
-  const sessions = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot });
+  const sessions = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot, store: memStore() });
   assert.deepEqual(sessions.map((s) => s.sessionId), ["11111111-aaaa-bbbb-cccc-000000000001"], "listing resolves the dir via the transcript's recorded cwd");
 
   const r = await readAgentHistoryMessages(CLAUDE_CMD, cwd, "11111111-aaaa-bbbb-cccc-000000000001", 20, { projectsRoot });
@@ -315,10 +320,146 @@ test("claude messages resolve by session id when the client sent the wrong cwd",
   assert.equal(r?.messages.length, 1, "wrong-cwd view still finds the transcript");
 
   // But a wrong cwd must NOT leak other projects' sessions into the LIST.
-  const sessions = await listAgentHistory(CLAUDE_CMD, "/some/other/folder", 10, { projectsRoot });
+  const sessions = await listAgentHistory(CLAUDE_CMD, "/some/other/folder", 10, { projectsRoot, store: memStore() });
   assert.deepEqual(sessions, [], "listing stays scoped to the requested cwd");
 
   // Unknown ids and traversal-shaped ids stay 404.
   assert.equal(await readAgentHistoryMessages(CLAUDE_CMD, "/real/repo", "33333333-aaaa-bbbb-cccc-000000000003", 20, { projectsRoot }), null);
   assert.equal(await findClaudeSessionFile("/real/repo", "../../../etc/passwd", projectsRoot), null, "path-shaped session ids are rejected");
+});
+
+// ---------------------------------------------------- transcript recency ----
+// A real turn line, carrying the `timestamp` the list's recency is derived from.
+function turn(cwd: string, sessionId: string, role: "user" | "assistant", text: string, timestamp: string) {
+  return {
+    type: role, cwd, sessionId, timestamp, isSidechain: false,
+    message: role === "user" ? { role, content: text } : { role, content: [{ type: "text", text }] },
+  };
+}
+const encodeProject = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
+
+test("a phantom transcript touch neither reorders the list nor evicts a genuinely-recent session", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-repo-"));
+  const project = encodeProject(cwd);
+  const store = memStore();
+  const at = (iso: string) => Date.parse(iso);
+  const staleAt = "2026-07-18T10:00:00.000Z";
+  const midAt = "2026-07-22T10:00:00.000Z";
+  const freshAt = "2026-07-24T10:00:00.000Z";
+  const stale = writeClaudeProjectTranscript(projectsRoot, project, "s-stale",
+    [turn(cwd, "s-stale", "user", "stale prompt", staleAt)], at(staleAt));
+  writeClaudeProjectTranscript(projectsRoot, project, "s-mid",
+    [turn(cwd, "s-mid", "user", "mid prompt", midAt)], at(midAt));
+  writeClaudeProjectTranscript(projectsRoot, project, "s-fresh",
+    [turn(cwd, "s-fresh", "user", "fresh prompt", freshAt)], at(freshAt));
+
+  // limit 2 of 3 sessions: the cut is where a phantom touch used to do real damage.
+  const before = await listAgentHistory(CLAUDE_CMD, cwd, 2, { projectsRoot, store });
+  assert.deepEqual(before.map((s) => s.sessionId), ["s-fresh", "s-mid"]);
+
+  // Something rewrote the oldest transcript without appending a turn: mtime jumps
+  // to "now" while its content is untouched.
+  const phantom = new Date("2026-07-26T10:41:40.000Z");
+  fs.utimesSync(stale, phantom, phantom);
+
+  const after = await listAgentHistory(CLAUDE_CMD, cwd, 2, { projectsRoot, store });
+  assert.deepEqual(after.map((s) => s.sessionId), ["s-fresh", "s-mid"],
+    "the touched session stays last and does not evict the genuinely-recent one");
+  assert.deepEqual(after.map((s) => s.updatedAt), [freshAt, midAt], "dates come from the transcripts, not the mtimes");
+  store.close();
+});
+
+test("an unchanged transcript is answered from the cache without re-reading the file", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-repo-"));
+  const store = memStore();
+  const file = writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), "s-cached",
+    [turn(cwd, "s-cached", "user", "cached title", "2026-07-20T10:00:00.000Z")], Date.parse("2026-07-20T10:00:00.000Z"));
+
+  const first = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot, store });
+  assert.deepEqual(first, [{ sessionId: "s-cached", title: "cached title", updatedAt: "2026-07-20T10:00:00.000Z" }]);
+
+  // Rewrite the content with the SAME byte length, then restore the mtime, so the
+  // (file, size, mtime) triple is unchanged. Getting the old values back proves
+  // neither the head nor the tail was read a second time.
+  const st = fs.statSync(file);
+  fs.writeFileSync(file, JSON.stringify(turn(cwd, "s-cached", "user", "edited title", "2026-07-25T10:00:00.000Z")) + "\n");
+  assert.equal(fs.statSync(file).size, st.size, "fixture rewrite must keep the byte length identical");
+  fs.utimesSync(file, st.mtime, st.mtime);
+
+  const second = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot, store });
+  assert.deepEqual(second, first, "cache hit: the edited content was never read");
+  store.close();
+});
+
+test("recency skips trailing system/bookkeeping lines and comes from the last real turn", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+  const lastRealTurn = "2026-07-24T16:04:20.000Z";
+  // The observed tail: hook/turn/away summaries and a last-prompt line (which has
+  // no timestamp at all) written long after the conversation actually ended, plus
+  // meta and sidechain user entries that are not the user talking either.
+  writeClaudeProjectTranscript(projectsRoot, "-encoded-repo", "s-noise", [
+    turn(cwd, "s-noise", "user", "the real prompt", "2026-07-24T16:00:00.000Z"),
+    turn(cwd, "s-noise", "assistant", "the real reply", lastRealTurn),
+    { type: "system", subtype: "stop_hook_summary", cwd, sessionId: "s-noise", isSidechain: false, timestamp: "2026-07-24T16:04:21.760Z" },
+    { type: "system", subtype: "turn_duration", cwd, sessionId: "s-noise", isSidechain: false, isMeta: false, timestamp: "2026-07-24T16:04:21.762Z" },
+    { type: "system", subtype: "away_summary", cwd, sessionId: "s-noise", isSidechain: false, isMeta: true, timestamp: "2026-07-26T10:41:40.000Z" },
+    { type: "user", cwd, sessionId: "s-noise", isMeta: true, timestamp: "2026-07-26T10:41:41.000Z", message: { role: "user", content: "meta bookkeeping" } },
+    { type: "user", cwd, sessionId: "s-noise", isSidechain: true, timestamp: "2026-07-26T10:41:42.000Z", message: { role: "user", content: "sidechain prompt" } },
+    { type: "last-prompt", lastPrompt: "the real prompt", leafUuid: "u1", sessionId: "s-noise" },
+  ], Date.parse("2026-07-26T10:41:40.000Z"));
+
+  const sessions = await discoverClaudeHistory({ projectsRoot, fsRoot, limit: 10, store: memStore() });
+  assert.deepEqual(sessions, [{
+    sessionId: "s-noise", title: "the real prompt", updatedAt: lastRealTurn,
+    cwd: fs.realpathSync(cwd), source: "claude-cli",
+  }]);
+});
+
+test("a transcript with no derivable activity sorts last and keeps its mtime date", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+  const quietMtime = Date.parse("2026-07-26T10:41:40.000Z");
+  writeClaudeProjectTranscript(projectsRoot, "-encoded-repo", "s-quiet", [
+    { type: "system", subtype: "away_summary", cwd, sessionId: "s-quiet", isSidechain: false, timestamp: "2026-07-26T10:41:40.000Z" },
+  ], quietMtime);
+  writeClaudeProjectTranscript(projectsRoot, "-encoded-repo", "s-real",
+    [turn(cwd, "s-real", "user", "a real prompt", "2026-07-19T09:00:00.000Z")], Date.parse("2026-07-19T09:00:00.000Z"));
+
+  const sessions = await discoverClaudeHistory({ projectsRoot, fsRoot, limit: 10, store: memStore() });
+  assert.deepEqual(sessions.map((s) => s.sessionId), ["s-real", "s-quiet"],
+    "no derivable activity sorts after every session that has some, newest mtime notwithstanding");
+  assert.equal(sessions[1].updatedAt, new Date(quietMtime).toISOString(), "the fallback row still renders a date");
+  assert.equal(sessions[1].title, null);
+});
+
+test("turn traffic the gateway pumped outranks a stale transcript tail", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+  const store = memStore();
+  const gwActivity = "2026-07-18T10:00:00.000Z"; // what the transcript still says
+  const gwMessage = "2026-07-25T10:00:00.000Z";  // the prompt the gateway pumped
+  const otherActivity = "2026-07-22T10:00:00.000Z";
+  writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), "s-gw",
+    [turn(cwd, "s-gw", "user", "gateway prompt", gwActivity)], Date.parse(gwActivity));
+  writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), "s-other",
+    [turn(cwd, "s-other", "user", "other prompt", otherActivity)], Date.parse(otherActivity));
+  store.touchSessionMessage({ agentName: "claude", cwd, sessionId: "s-gw", title: "gateway prompt", at: gwMessage });
+
+  const listed = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot, store });
+  assert.deepEqual(listed.map((s) => [s.sessionId, s.updatedAt]), [["s-gw", gwMessage], ["s-other", otherActivity]],
+    "the DB's turn traffic wins over the transcript's older tail, and drives the order");
+
+  const discovered = await discoverClaudeHistory({ projectsRoot, fsRoot, limit: 10, store });
+  assert.deepEqual(discovered.map((s) => [s.sessionId, s.updatedAt]), [["s-gw", gwMessage], ["s-other", otherActivity]],
+    "the discovery path merges the same way");
+  store.close();
 });

@@ -39,6 +39,22 @@ export interface RecentSession {
 }
 export interface RecentFolder { path: string; lastUsedAt: string; }
 
+// One Claude CLI transcript's derived metadata, cached so listing conversations
+// doesn't re-read the files. `cwd`/`title` are immutable per session (derived
+// once from the head); `last_activity_at` is the timestamp of the last real turn
+// INSIDE the transcript and is re-derived whenever (size, mtime_ms) move. `file`
+// is part of the freshness check: the same session id can appear under two
+// project dirs when the CLI truncates a long encoded name.
+export interface TranscriptMeta {
+  sessionId: string;
+  file: string;
+  cwd: string;
+  title: string | null;
+  lastActivityAt: string | null;
+  size: number;
+  mtimeMs: number;
+}
+
 // A durable "inbox" item. Generic over `type` so it can hold permission prompts
 // today and other notification kinds (task-done, agent-error, ...) later. A
 // permission row additionally carries `reqId`/`seq`/`frame` so the live answer
@@ -87,8 +103,16 @@ export class Db {
       session_id TEXT NOT NULL,
       title TEXT NOT NULL,
       last_active_at TEXT NOT NULL,
+      last_message_at TEXT,
       PRIMARY KEY (agent_name, cwd, session_id)
     )`);
+    // `last_message_at` arrived after the table did, and CREATE IF NOT EXISTS is a
+    // no-op on a DB that already has rows — graft the column on instead. Guarded by
+    // table_info so this is safe on every boot (ALTER would otherwise throw).
+    const recentCols = this.db.prepare("PRAGMA table_info(recent_sessions)").all() as Array<{ name: string }>;
+    if (!recentCols.some((c) => c.name === "last_message_at")) {
+      this.db.exec("ALTER TABLE recent_sessions ADD COLUMN last_message_at TEXT");
+    }
     this.db.exec(`CREATE TABLE IF NOT EXISTS recent_folders (
       path TEXT PRIMARY KEY,
       last_used_at TEXT NOT NULL
@@ -112,6 +136,17 @@ export class Db {
     )`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox(status)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_lookup ON inbox(agent_name, req_id, status)`);
+    // Derived metadata for the Claude CLI transcripts, keyed by session id — see
+    // TranscriptMeta. Purely a cache: dropping the table only costs a re-derive.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS transcript_meta (
+      session_id       TEXT PRIMARY KEY,
+      file             TEXT NOT NULL,
+      cwd              TEXT NOT NULL,
+      title            TEXT,
+      last_activity_at TEXT,
+      size             INTEGER NOT NULL,
+      mtime_ms         INTEGER NOT NULL
+    )`);
   }
 
   // Generic key/value state shared across devices: the UI's text-size preference
@@ -148,10 +183,50 @@ export class Db {
         ON CONFLICT(agent_name, cwd, session_id)
         DO UPDATE SET title = excluded.title, last_active_at = excluded.last_active_at`)
       .run({ ...s }); // spread to a plain literal: node:sqlite wants Record<string, …>, which the RecentSession interface isn't
+    this.trimRecentSessions();
+    return this.recentSessions();
+  }
+
+  private trimRecentSessions(): void {
     this.db.prepare(`DELETE FROM recent_sessions WHERE rowid NOT IN (
       SELECT rowid FROM recent_sessions ORDER BY last_active_at DESC LIMIT ${MAX_RECENT_SESSIONS}
     )`).run();
-    return this.recentSessions();
+  }
+
+  // Record real turn traffic for a session — the gateway calls this when it
+  // actually pumps a prompt to the agent. Deliberately NOT last_active_at, which a
+  // client also bumps merely by opening a conversation; only this column means
+  // "someone talked to it". Inserts when no client has recorded the session yet
+  // (not every client POSTs /prefs/recent-session) — a prompt IS activity, so
+  // seeding last_active_at from it is honest — while an existing row keeps the
+  // title and last_active_at the client owns.
+  touchSessionMessage(s: { agentName: string; cwd: string; sessionId: string; title: string; at: string }): void {
+    if (!s.cwd) {
+      // Without a cwd the primary key can't be completed, so this can only bump
+      // whatever rows already exist for the session (any of its folders).
+      this.db.prepare("UPDATE recent_sessions SET last_message_at = ? WHERE agent_name = ? AND session_id = ?")
+        .run(s.at, s.agentName, s.sessionId);
+      return;
+    }
+    this.db
+      .prepare(`INSERT INTO recent_sessions (agent_name, cwd, session_id, title, last_active_at, last_message_at)
+        VALUES (@agentName, @cwd, @sessionId, @title, @at, @at)
+        ON CONFLICT(agent_name, cwd, session_id)
+        DO UPDATE SET last_message_at = excluded.last_message_at`)
+      .run({ ...s });
+    this.trimRecentSessions();
+  }
+
+  // sessionId -> newest turn traffic, for the conversation list's recency. The
+  // transcript on disk is not the whole story: a session driven only through the
+  // gateway may have nothing fresh in it, so the two sources are merged. MAX()
+  // because one session id can be recorded under several (agent, cwd) rows.
+  lastMessageAtBySession(): Map<string, string> {
+    const rows = this.db
+      .prepare(`SELECT session_id, MAX(last_message_at) AS last_message_at FROM recent_sessions
+        WHERE last_message_at IS NOT NULL GROUP BY session_id`)
+      .all() as Array<{ session_id: string; last_message_at: string }>;
+    return new Map(rows.map((r) => [r.session_id, r.last_message_at]));
   }
 
   recentFolders(): RecentFolder[] {
@@ -170,6 +245,31 @@ export class Db {
       SELECT rowid FROM recent_folders ORDER BY last_used_at DESC LIMIT ${MAX_RECENT_FOLDERS}
     )`).run();
     return this.recentFolders();
+  }
+
+  // ------------------------------------------------------- transcript cache ----
+
+  transcriptMeta(sessionId: string): TranscriptMeta | null {
+    const row = this.db
+      .prepare("SELECT session_id, file, cwd, title, last_activity_at, size, mtime_ms FROM transcript_meta WHERE session_id = ?")
+      .get(sessionId) as
+        | { session_id: string; file: string; cwd: string; title: string | null; last_activity_at: string | null; size: number; mtime_ms: number }
+        | undefined;
+    if (!row) return null;
+    return {
+      sessionId: row.session_id, file: row.file, cwd: row.cwd, title: row.title,
+      lastActivityAt: row.last_activity_at, size: Number(row.size), mtimeMs: Number(row.mtime_ms),
+    };
+  }
+
+  saveTranscriptMeta(m: TranscriptMeta): void {
+    this.db
+      .prepare(`INSERT INTO transcript_meta (session_id, file, cwd, title, last_activity_at, size, mtime_ms)
+        VALUES (@sessionId, @file, @cwd, @title, @lastActivityAt, @size, @mtimeMs)
+        ON CONFLICT(session_id) DO UPDATE SET
+          file = excluded.file, cwd = excluded.cwd, title = excluded.title,
+          last_activity_at = excluded.last_activity_at, size = excluded.size, mtime_ms = excluded.mtime_ms`)
+      .run({ ...m }); // spread to a plain literal: node:sqlite wants Record<string, …>
   }
 
   // Pinned ("favorite") folders, oldest-pinned first for a stable display order.
