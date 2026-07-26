@@ -1728,7 +1728,8 @@ describe("store notification routing", () => {
     await useStore.getState().deleteSession();
 
     expect(seen).toContain("DELETE ");
-    expect(seen).toContain("/history/session?agent=claude&cwd=%2Fold&session=home-session");
+    // Addressed by id alone — no cwd for the client to get wrong.
+    expect(seen).toContain("/history/session?agent=claude&session=home-session");
     const st = useStore.getState();
     expect(st.sessions["home-session"]).toBeUndefined();
     expect(st.activeId).toBeNull();

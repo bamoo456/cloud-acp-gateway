@@ -482,7 +482,7 @@ test("deleting a claude conversation unlinks its transcript and its custom title
   const sidecar = path.join(projectsRoot, encodeProject(cwd), ".acpb-titles.json");
   fs.writeFileSync(sidecar, JSON.stringify({ [drop]: "custom name", [keep]: "keep name" }));
 
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, cwd, drop, { projectsRoot }), true);
+  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, drop, { projectsRoot }), true);
 
   assert.equal(fs.existsSync(dropFile), false, "transcript unlinked");
   assert.deepEqual(JSON.parse(fs.readFileSync(sidecar, "utf8")), { [keep]: "keep name" }, "only the deleted session's title is dropped");
@@ -493,15 +493,51 @@ test("deleting a claude conversation unlinks its transcript and its custom title
 
 test("claude deletion rejects traversal-shaped ids and unknown sessions", async () => {
   const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-repo-"));
   const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "acpb-victim-")), "secret.jsonl");
   fs.writeFileSync(outside, "{}\n");
 
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, cwd, "../../../etc/passwd", { projectsRoot }), false);
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, cwd, "66666666-aaaa-bbbb-cccc-000000000006", { projectsRoot }), false, "unknown id is a no-op");
+  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, "../../../etc/passwd", { projectsRoot }), false);
+  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, "66666666-aaaa-bbbb-cccc-000000000006", { projectsRoot }), false, "unknown id is a no-op");
   assert.equal(fs.existsSync(outside), true, "nothing outside the session store is touched");
   // An agent with no history provider can't delete anything either.
-  assert.equal(await deleteAgentHistorySession("/usr/bin/some-other-agent", cwd, "66666666-aaaa-bbbb-cccc-000000000006", { projectsRoot }), false);
+  assert.equal(await deleteAgentHistorySession("/usr/bin/some-other-agent", "66666666-aaaa-bbbb-cccc-000000000006", { projectsRoot }), false);
+});
+
+// Addressing by id is what makes this work: the sidecar is taken from the
+// transcript's OWN directory, so it is cleaned even when the CLI truncated the
+// encoded project name and projectDirFor(cwd) points at a dir that never existed
+// — the case where a rename's sidecar was already unreadable before this change.
+test("claude deletion clears the sidecar in a project dir the gateway can't derive", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-deep-"));
+  const sid = "77777777-aaaa-bbbb-cccc-000000000007";
+  const at = "2026-07-20T10:00:00.000Z";
+  // NOT encodeProject(cwd) — the CLI's truncated-and-hashed name.
+  const file = writeClaudeProjectTranscript(projectsRoot, "-truncated-xyz789", sid, [turn(cwd, sid, "user", "delete me", at)], Date.parse(at));
+  const sidecar = path.join(projectsRoot, "-truncated-xyz789", ".acpb-titles.json");
+  fs.writeFileSync(sidecar, JSON.stringify({ [sid]: "custom name" }));
+
+  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, sid, { projectsRoot }), true);
+
+  assert.equal(fs.existsSync(file), false, "transcript unlinked");
+  assert.deepEqual(JSON.parse(fs.readFileSync(sidecar, "utf8")), {}, "the sidecar entry went with it");
+});
+
+test("claude deletion is refused for a conversation outside the filesystem root", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-outside-repo-"));
+  const sid = "88888888-aaaa-bbbb-cccc-000000000008";
+  const at = "2026-07-20T10:00:00.000Z";
+  const file = writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), sid, [turn(cwd, sid, "user", "out of bounds", at)], Date.parse(at));
+
+  // withinRoot sees the cwd recorded IN the transcript, not one the caller sent.
+  const seen: string[] = [];
+  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, sid, { projectsRoot, withinRoot: (c) => { seen.push(c); return false; } }), false);
+  assert.deepEqual(seen, [cwd], "the bound is applied to the transcript's own cwd");
+  assert.equal(fs.existsSync(file), true, "nothing unlinked");
+
+  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, sid, { projectsRoot, withinRoot: () => true }), true);
+  assert.equal(fs.existsSync(file), false);
 });
 
 test("deleting a codex conversation unlinks its rollout and leaves the index alone", async () => {
@@ -523,12 +559,16 @@ test("deleting a codex conversation unlinks its rollout and leaves the index alo
   const prev = process.env.CODEX_HOME;
   process.env.CODEX_HOME = home;
   try {
-    assert.equal(await deleteAgentHistorySession(CODEX_CMD, cwd, "CDX-1"), true);
+    // withinRoot is checked against the cwd the rollout itself records, so a
+    // conversation outside the filesystem root is refused before anything is unlinked.
+    assert.equal(await deleteAgentHistorySession(CODEX_CMD, "CDX-1", { withinRoot: () => false }), false, "refused outside the filesystem root");
+    assert.equal(fs.existsSync(file), true, "and nothing was unlinked");
+
+    assert.equal(await deleteAgentHistorySession(CODEX_CMD, "CDX-1"), true);
     assert.equal(fs.existsSync(file), false, "rollout unlinked");
     assert.equal(fs.readFileSync(index, "utf8"), indexBefore, "session_index.jsonl untouched");
     assert.deepEqual(await listAgentHistory(CODEX_CMD, cwd, 10), [], "the stale index entry does not resurrect the row");
-    assert.equal(await deleteAgentHistorySession(CODEX_CMD, cwd, "CDX-1"), false, "deleting again is a no-op");
-    assert.equal(await deleteAgentHistorySession(CODEX_CMD, "/some/other/folder", "CDX-1"), false, "another cwd can't delete it");
+    assert.equal(await deleteAgentHistorySession(CODEX_CMD, "CDX-1"), false, "deleting again is a no-op");
   } finally {
     if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
   }
@@ -555,12 +595,12 @@ test("deleting an opencode conversation removes its rows, including sub-agent se
   });
 
   await withXdgDataHome(xdg, async () => {
-    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, cwd, "ses_drop"), true);
+    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "ses_keep", { withinRoot: () => false }), false, "refused outside the filesystem root");
+    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "ses_drop"), true);
     const left = await listAgentHistory(OPENCODE_CMD, cwd, 10);
     assert.deepEqual(left.map((s) => s.sessionId), ["ses_keep"], "only the survivor lists");
     assert.equal(await readAgentHistoryMessages(OPENCODE_CMD, cwd, "ses_drop", 20), null, "and the deleted one no longer opens");
-    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, cwd, "ses_drop"), false, "deleting again is a no-op");
-    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "/some/other/folder", "ses_keep"), false, "another cwd can't delete it");
+    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "ses_drop"), false, "deleting again is a no-op");
   });
 
   const db = new Database(path.join(xdg, "opencode", "opencode.db"), { readonly: true });
@@ -577,7 +617,7 @@ test("deleting an opencode conversation with no store on disk creates nothing", 
   // guards with existsSync instead — same behaviour, asserted the same way.)
   const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-opencode-empty-"));
   await withXdgDataHome(xdg, async () => {
-    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "/work/repo", "ses_nope"), false);
+    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "ses_nope"), false);
   });
   assert.equal(fs.existsSync(path.join(xdg, "opencode", "opencode.db")), false, "no DB was conjured");
 });
