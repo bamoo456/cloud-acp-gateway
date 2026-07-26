@@ -186,16 +186,20 @@ export class Db {
     return this.recentSessions();
   }
 
-  // Drop a deleted conversation's recency rows. Deliberately NOT keyed on cwd,
-  // even though that's the primary key: the writers store whatever cwd string the
-  // client sent, while the delete route resolves (realpaths) it first, so a
-  // symlinked project path leaves the row behind — and /prefs then resurrects a
-  // conversation whose transcript is gone. Session ids are unique within an agent
-  // (UUIDs for claude/codex, ses_* for opencode), so every row under this id IS
-  // this conversation, just recorded under stale folder spellings. Idempotent.
-  deleteRecentSession(agentName: string, sessionId: string): RecentSession[] {
-    this.db.prepare("DELETE FROM recent_sessions WHERE agent_name = ? AND session_id = ?")
-      .run(agentName, sessionId);
+  // Drop a deleted conversation's recency rows — every one of them, keyed on the
+  // session id alone rather than the table's (agent, cwd, session) primary key.
+  // Both of the other columns produce rows this would otherwise miss, and a missed
+  // row is not cosmetic: /prefs rehydrates it and resurrects a conversation whose
+  // transcript is gone.
+  //   cwd    — writers store whatever string the client sent, the delete route
+  //            realpaths it, so a symlinked project path never matches.
+  //   agent  — two agents can share one provider (agents.example.json ships
+  //            "claude" and "claude-infra"), and they share its transcript store,
+  //            so the same conversation is recorded under both names.
+  // The id identifies the conversation on its own; the extra columns only record
+  // where it was seen from. Idempotent.
+  deleteRecentSession(sessionId: string): RecentSession[] {
+    this.db.prepare("DELETE FROM recent_sessions WHERE session_id = ?").run(sessionId);
     return this.recentSessions();
   }
 
@@ -380,6 +384,15 @@ export class Db {
   cancelInboxForSession(agentName: string, sessionId: string, resolvedAt: string): void {
     this.db.prepare("UPDATE inbox SET status = 'cancelled', resolved_at = ? WHERE agent_name = ? AND session_id = ? AND status = 'pending'")
       .run(resolvedAt, agentName, sessionId);
+  }
+
+  // The conversation itself is gone, so void its pending prompts under every
+  // agent — unlike a cancelled turn, which is scoped to the one agent that was
+  // running it. Two agents sharing a provider share its conversations, so an
+  // agent-scoped cancel would leave a badge pointing at a deleted conversation.
+  cancelInboxForSessionId(sessionId: string, resolvedAt: string): void {
+    this.db.prepare("UPDATE inbox SET status = 'cancelled', resolved_at = ? WHERE session_id = ? AND status = 'pending'")
+      .run(resolvedAt, sessionId);
   }
 
   // The agent died: its pending prompts can never be answered (the request it was

@@ -883,13 +883,12 @@ export const useStore = create<State>((set, get) => {
     async deleteSession() {
       const sid = get().activeId;
       if (!sid || sid.startsWith("pending-")) return;
-      const agentName = get().agentName;
-      const { ok, running } = await apiDelete(agentName, sid);
+      const { ok, running } = await apiDelete(sid);
       if (!ok) {
         set({ tip: running ? "This conversation is still running." : "Couldn't delete this conversation." });
         return;
       }
-      const recentSessions = removeRecentSession({ agentName, sessionId: sid });
+      const recentSessions = removeRecentSession(sid);
       set((st) => {
         const sessions = { ...st.sessions };
         delete sessions[sid];

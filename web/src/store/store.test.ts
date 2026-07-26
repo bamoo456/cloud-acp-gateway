@@ -1729,7 +1729,7 @@ describe("store notification routing", () => {
 
     expect(seen).toContain("DELETE ");
     // Addressed by id alone — no cwd for the client to get wrong.
-    expect(seen).toContain("/history/session?agent=claude&session=home-session");
+    expect(seen).toContain("/history/session?session=home-session");
     const st = useStore.getState();
     expect(st.sessions["home-session"]).toBeUndefined();
     expect(st.activeId).toBeNull();

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, findClaudeSessionFile, deleteAgentHistorySession } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, findClaudeSessionFile, deleteHistorySession } from "./gateway.ts";
 import { Db } from "./db.ts";
 
 // The Claude history paths cache derived transcript metadata in the shared prefs
@@ -482,7 +482,7 @@ test("deleting a claude conversation unlinks its transcript and its custom title
   const sidecar = path.join(projectsRoot, encodeProject(cwd), ".acpb-titles.json");
   fs.writeFileSync(sidecar, JSON.stringify({ [drop]: "custom name", [keep]: "keep name" }));
 
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, drop, { projectsRoot }), true);
+  assert.equal(await deleteHistorySession([CLAUDE_CMD], drop, { projectsRoot }), true);
 
   assert.equal(fs.existsSync(dropFile), false, "transcript unlinked");
   assert.deepEqual(JSON.parse(fs.readFileSync(sidecar, "utf8")), { [keep]: "keep name" }, "only the deleted session's title is dropped");
@@ -496,11 +496,11 @@ test("claude deletion rejects traversal-shaped ids and unknown sessions", async 
   const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "acpb-victim-")), "secret.jsonl");
   fs.writeFileSync(outside, "{}\n");
 
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, "../../../etc/passwd", { projectsRoot }), false);
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, "66666666-aaaa-bbbb-cccc-000000000006", { projectsRoot }), false, "unknown id is a no-op");
+  assert.equal(await deleteHistorySession([CLAUDE_CMD], "../../../etc/passwd", { projectsRoot }), false);
+  assert.equal(await deleteHistorySession([CLAUDE_CMD], "66666666-aaaa-bbbb-cccc-000000000006", { projectsRoot }), false, "unknown id is a no-op");
   assert.equal(fs.existsSync(outside), true, "nothing outside the session store is touched");
   // An agent with no history provider can't delete anything either.
-  assert.equal(await deleteAgentHistorySession("/usr/bin/some-other-agent", "66666666-aaaa-bbbb-cccc-000000000006", { projectsRoot }), false);
+  assert.equal(await deleteHistorySession(["/usr/bin/some-other-agent"], "66666666-aaaa-bbbb-cccc-000000000006", { projectsRoot }), false);
 });
 
 // Addressing by id is what makes this work: the sidecar is taken from the
@@ -517,7 +517,7 @@ test("claude deletion clears the sidecar in a project dir the gateway can't deri
   const sidecar = path.join(projectsRoot, "-truncated-xyz789", ".acpb-titles.json");
   fs.writeFileSync(sidecar, JSON.stringify({ [sid]: "custom name" }));
 
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, sid, { projectsRoot }), true);
+  assert.equal(await deleteHistorySession([CLAUDE_CMD], sid, { projectsRoot }), true);
 
   assert.equal(fs.existsSync(file), false, "transcript unlinked");
   assert.deepEqual(JSON.parse(fs.readFileSync(sidecar, "utf8")), {}, "the sidecar entry went with it");
@@ -532,11 +532,11 @@ test("claude deletion is refused for a conversation outside the filesystem root"
 
   // withinRoot sees the cwd recorded IN the transcript, not one the caller sent.
   const seen: string[] = [];
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, sid, { projectsRoot, withinRoot: (c) => { seen.push(c); return false; } }), false);
+  assert.equal(await deleteHistorySession([CLAUDE_CMD], sid, { projectsRoot, withinRoot: (c: string) => { seen.push(c); return false; } }), false);
   assert.deepEqual(seen, [cwd], "the bound is applied to the transcript's own cwd");
   assert.equal(fs.existsSync(file), true, "nothing unlinked");
 
-  assert.equal(await deleteAgentHistorySession(CLAUDE_CMD, sid, { projectsRoot, withinRoot: () => true }), true);
+  assert.equal(await deleteHistorySession([CLAUDE_CMD], sid, { projectsRoot, withinRoot: () => true }), true);
   assert.equal(fs.existsSync(file), false);
 });
 
@@ -561,14 +561,14 @@ test("deleting a codex conversation unlinks its rollout and leaves the index alo
   try {
     // withinRoot is checked against the cwd the rollout itself records, so a
     // conversation outside the filesystem root is refused before anything is unlinked.
-    assert.equal(await deleteAgentHistorySession(CODEX_CMD, "CDX-1", { withinRoot: () => false }), false, "refused outside the filesystem root");
+    assert.equal(await deleteHistorySession([CODEX_CMD], "CDX-1", { withinRoot: () => false }), false, "refused outside the filesystem root");
     assert.equal(fs.existsSync(file), true, "and nothing was unlinked");
 
-    assert.equal(await deleteAgentHistorySession(CODEX_CMD, "CDX-1"), true);
+    assert.equal(await deleteHistorySession([CODEX_CMD], "CDX-1"), true);
     assert.equal(fs.existsSync(file), false, "rollout unlinked");
     assert.equal(fs.readFileSync(index, "utf8"), indexBefore, "session_index.jsonl untouched");
     assert.deepEqual(await listAgentHistory(CODEX_CMD, cwd, 10), [], "the stale index entry does not resurrect the row");
-    assert.equal(await deleteAgentHistorySession(CODEX_CMD, "CDX-1"), false, "deleting again is a no-op");
+    assert.equal(await deleteHistorySession([CODEX_CMD], "CDX-1"), false, "deleting again is a no-op");
   } finally {
     if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
   }
@@ -595,12 +595,12 @@ test("deleting an opencode conversation removes its rows, including sub-agent se
   });
 
   await withXdgDataHome(xdg, async () => {
-    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "ses_keep", { withinRoot: () => false }), false, "refused outside the filesystem root");
-    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "ses_drop"), true);
+    assert.equal(await deleteHistorySession([OPENCODE_CMD], "ses_keep", { withinRoot: () => false }), false, "refused outside the filesystem root");
+    assert.equal(await deleteHistorySession([OPENCODE_CMD], "ses_drop"), true);
     const left = await listAgentHistory(OPENCODE_CMD, cwd, 10);
     assert.deepEqual(left.map((s) => s.sessionId), ["ses_keep"], "only the survivor lists");
     assert.equal(await readAgentHistoryMessages(OPENCODE_CMD, cwd, "ses_drop", 20), null, "and the deleted one no longer opens");
-    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "ses_drop"), false, "deleting again is a no-op");
+    assert.equal(await deleteHistorySession([OPENCODE_CMD], "ses_drop"), false, "deleting again is a no-op");
   });
 
   const db = new Database(path.join(xdg, "opencode", "opencode.db"), { readonly: true });
@@ -617,7 +617,48 @@ test("deleting an opencode conversation with no store on disk creates nothing", 
   // guards with existsSync instead — same behaviour, asserted the same way.)
   const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-opencode-empty-"));
   await withXdgDataHome(xdg, async () => {
-    assert.equal(await deleteAgentHistorySession(OPENCODE_CMD, "ses_nope"), false);
+    assert.equal(await deleteHistorySession([OPENCODE_CMD], "ses_nope"), false);
   });
   assert.equal(fs.existsSync(path.join(xdg, "opencode", "opencode.db")), false, "no DB was conjured");
+});
+
+test("deletion finds the right provider without being told the agent", async () => {
+  // Two agents can share one provider (agents.example.json ships "claude" and
+  // "claude-infra"), so an agent name never identified a conversation. Passing
+  // every configured agent's cmd, the id alone has to land in the right store —
+  // and only configured providers may be touched.
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-repo-"));
+  const sid = "99999999-aaaa-bbbb-cccc-000000000009";
+  const at = "2026-07-20T10:00:00.000Z";
+  const file = writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), sid, [turn(cwd, sid, "user", "which store?", at)], Date.parse(at));
+
+  const xdg = writeOpenCodeStorage({
+    sessions: [{ id: "ses_other", projectID: "p", directory: cwd, title: "opencode one", time: { created: 1, updated: 1 } }],
+    messages: [{ id: "m1", sessionID: "ses_other", role: "user" }],
+    parts: [{ id: "p1", messageID: "m1", sessionID: "ses_other", type: "text", text: "hi" }],
+  });
+
+  await withXdgDataHome(xdg, async () => {
+    // Two claude agents plus an opencode one: the claude transcript is found once,
+    // not once per agent sharing that provider.
+    const cmds = [CLAUDE_CMD, CLAUDE_CMD, OPENCODE_CMD];
+    assert.equal(await deleteHistorySession(cmds, sid, { projectsRoot }), true, "the claude id lands in the claude store");
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(await deleteHistorySession(cmds, "ses_other", { projectsRoot }), true, "the opencode id lands in the opencode store");
+    assert.equal(await deleteHistorySession(cmds, "ses_other", { projectsRoot }), false, "and is gone");
+
+    // An unconfigured provider is never consulted: with only claude configured,
+    // an opencode id is not found even though its DB is right there.
+    const xdg2 = writeOpenCodeStorage({
+      sessions: [{ id: "ses_untouched", projectID: "p", directory: cwd, title: "keep", time: { created: 1, updated: 1 } }],
+      messages: [{ id: "m2", sessionID: "ses_untouched", role: "user" }],
+      parts: [{ id: "p2", messageID: "m2", sessionID: "ses_untouched", type: "text", text: "hi" }],
+    });
+    await withXdgDataHome(xdg2, async () => {
+      assert.equal(await deleteHistorySession([CLAUDE_CMD], "ses_untouched", { projectsRoot }), false);
+      const rows = await listAgentHistory(OPENCODE_CMD, cwd, 10);
+      assert.deepEqual(rows.map((r) => r.sessionId), ["ses_untouched"], "the opencode row survives");
+    });
+  });
 });

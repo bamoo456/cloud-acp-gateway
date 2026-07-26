@@ -81,22 +81,24 @@ test("recent sessions upsert newest-first and cap at 50", () => {
   db.close();
 });
 
-test("deleting a conversation drops its recency rows under every cwd spelling", () => {
+test("deleting a conversation drops its recency rows under every agent and cwd", () => {
   const db = new Db(":memory:");
   const mk = (agentName: string, cwd: string, id: string) => ({
     agentName, cwd, sessionId: id, title: id, lastActiveAt: "2026-07-20T01:00:00.000Z",
   });
-  // Clients write whatever cwd string they hold, so one conversation can be
-  // recorded under both a symlinked and a realpath'd folder. Both must go.
+  // One conversation, several rows. Clients write whatever cwd string they hold
+  // (symlinked vs realpath'd), and two agents can share a provider AND its
+  // transcript store — agents.example.json ships "claude" and "claude-infra".
+  // A row left behind is rehydrated by /prefs and resurrects the conversation.
   db.touchRecentSession(mk("claude", "/tmp/repo", "s1"));
   db.touchRecentSession(mk("claude", "/private/tmp/repo", "s1"));
-  db.touchRecentSession(mk("codex", "/tmp/repo", "s1")); // same id, different agent's id space
+  db.touchRecentSession(mk("claude-infra", "/tmp/repo", "s1"));
+  db.touchRecentSession(mk("claude", "/tmp/repo", "s2")); // a different conversation
   db.saveTranscriptMeta({ sessionId: "s1", file: "/t/s1.jsonl", cwd: "/repo", title: "t", lastActivityAt: null, size: 1, mtimeMs: 1 });
 
-  const left = db.deleteRecentSession("claude", "s1");
-  assert.deepEqual(left.map((r) => [r.agentName, r.cwd]), [["codex", "/tmp/repo"]],
-    "every cwd spelling for this agent's session goes; another agent's id is untouched");
-  assert.deepEqual(db.deleteRecentSession("claude", "s1"), left, "deleting again is a no-op");
+  const left = db.deleteRecentSession("s1");
+  assert.deepEqual(left.map((r) => r.sessionId), ["s2"], "every row for the id goes; other conversations stay");
+  assert.deepEqual(db.deleteRecentSession("s1"), left, "deleting again is a no-op");
 
   db.deleteTranscriptMeta("s1");
   assert.equal(db.transcriptMeta("s1"), null);
@@ -165,6 +167,20 @@ test("inbox: cancel a session voids its pending prompts", () => {
   db.cancelInboxForSession("claude", "sA", "2026-06-10T01:01:00.000Z");
   assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.reqId), ["2"]);
   assert.deepEqual(db.inbox({ status: "cancelled" }).map((i) => i.reqId), ["1"]);
+  db.close();
+});
+
+test("inbox: deleting a conversation voids its pending prompts under every agent", () => {
+  const db = new Db(":memory:");
+  db.addInboxItem(perm("1", "sA"));
+  db.addInboxItem({ ...perm("2", "sA"), agentName: "claude-infra" }); // same conversation, other agent
+  db.addInboxItem(perm("3", "sB"));
+
+  db.cancelInboxForSessionId("sA", "2026-07-20T01:01:00.000Z");
+
+  assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.reqId), ["3"], "only the other conversation is left pending");
+  assert.deepEqual(db.inbox({ status: "cancelled" }).map((i) => i.reqId).sort(), ["1", "2"],
+    "the agent-scoped cancel would have missed the second one");
   db.close();
 });
 
