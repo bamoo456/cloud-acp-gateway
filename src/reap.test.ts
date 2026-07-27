@@ -108,7 +108,7 @@ test("answering the permission and ending the turn makes the session reapable ag
   await shutdown(streams, close);
 });
 
-test("a silently running turn is not reaped when the idle window opens", async () => {
+test("a silently running turn is never reaped, however long it stays quiet", async () => {
   const { port, agent, running, reap, close } = await makeTestServer();
   const streams: Stream[] = [];
   const { conn } = await openSession(port, agent, "S1", streams);
@@ -116,16 +116,79 @@ test("a silently running turn is not reaped when the idle window opens", async (
   agent().sent.length = 0;
 
   // One `xcodebuild test` runs for minutes emitting no ACP frames, so nothing
-  // heartbeats the task and nothing refreshes the idle window either. The task is
-  // the reaper's only evidence the turn is alive, so its TTL has to outlast the
-  // idle TTL — otherwise the console's own poll prunes the task in the gap and
-  // the next sweep tears down a session that is genuinely working.
+  // heartbeats the task and nothing refreshes the idle window either.
   const base = Date.now();
-  assert.ok(TASK_TTL_MS > SESSION_IDLE_TTL_MS, "the task TTL must never expire before the idle TTL would");
-  const t = base + SESSION_IDLE_TTL_MS + 1_000; // idle window open, task TTL not yet
-  assert.equal(running(t)[0]?.state, "active", "the poll keeps the silently running task");
-  reap(t);
+  assert.ok(TASK_TTL_MS > SESSION_IDLE_TTL_MS, "the task TTL outlasts the idle TTL, so /running doesn't call a quiet turn finished");
+  const early = base + SESSION_IDLE_TTL_MS + 1_000; // idle window open, task TTL not yet
+  assert.equal(running(early)[0]?.state, "active", "the poll keeps the silently running task");
+  reap(early);
   assert.deepEqual(closeSidsIn(agent().sent), [], "still working → not reaped");
+
+  // Past the task TTL the poll DOES prune the task — and that must not hand the
+  // session to the reaper. Raising the task TTL only postponed the same kill; the
+  // unanswered session/prompt is the evidence no clock can retract, and it is what
+  // the reaper actually consults.
+  const late = base + TASK_TTL_MS + 1_000;
+  assert.deepEqual(running(late), [], "the task itself is still TTL-pruned, as before");
+  reap(late);
+  assert.deepEqual(closeSidsIn(agent().sent), [], "prompt still unanswered → still not reaped");
+  await shutdown(streams, close);
+});
+
+test("a turn whose prompt has been answered becomes reapable again", async () => {
+  const { port, agent, reap, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  const { conn } = await openSession(port, agent, "S1", streams);
+  await post(port, conn, { jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId: "S1", prompt: [{ type: "text", text: "go" }] } });
+  const prompt = agent().sent.map(parse).find((o) => o.method === "session/prompt")!;
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } })));
+  await new Promise((r) => setTimeout(r, 40));
+  agent().sent.length = 0;
+
+  // The exemption has to lift, or the fix trades a killed turn for a leaked
+  // subprocess — reaping exists to bound exactly that.
+  reap(FAR_FUTURE);
+  assert.deepEqual(closeSidsIn(agent().sent), ["S1"], "the finished turn no longer holds the session open");
+  await shutdown(streams, close);
+});
+
+test("a prompt is released even when the client that sent it is already gone", async () => {
+  const { port, agent, reap, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  const { conn, stream } = await openSession(port, agent, "S1", streams);
+  await post(port, conn, { jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId: "S1", prompt: [{ type: "text", text: "go" }] } });
+  const prompt = agent().sent.map(parse).find((o) => o.method === "session/prompt")!;
+
+  // The phone drops mid-turn. idmux.forgetConn discards this request's origin, so
+  // the response below arrives with nothing to route it to — the exact path the
+  // old code left to the TTL, and the reason the release is keyed on the gateway
+  // id instead. Without it the session stays pinned as "running" forever and its
+  // backing CLI is never reclaimed.
+  stream.close();
+  await new Promise((r) => setTimeout(r, 60));
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } })));
+  await new Promise((r) => setTimeout(r, 40));
+  agent().sent.length = 0;
+
+  reap(FAR_FUTURE);
+  assert.deepEqual(closeSidsIn(agent().sent), ["S1"], "the orphaned response still released the session");
+  await shutdown(streams, close);
+});
+
+test("session/cancel releases the turn it ended", async () => {
+  const { port, agent, reap, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  const { conn } = await openSession(port, agent, "S1", streams);
+  await post(port, conn, { jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId: "S1", prompt: [{ type: "text", text: "go" }] } });
+
+  // The agent may never answer a cancelled prompt (the ACP contract lets it just
+  // stop), so cancel has to release the turn itself or the session is pinned.
+  await post(port, conn, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "S1" } });
+  await new Promise((r) => setTimeout(r, 40));
+  agent().sent.length = 0;
+
+  reap(FAR_FUTURE);
+  assert.deepEqual(closeSidsIn(agent().sent), ["S1"], "a cancelled turn does not keep the session alive");
   await shutdown(streams, close);
 });
 
