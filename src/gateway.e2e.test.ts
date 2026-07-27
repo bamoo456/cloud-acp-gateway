@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeTestServer, Gateway, type Conn } from "./gateway.ts";
+import { makeTestServer, Gateway, TASK_TTL_MS, type Conn } from "./gateway.ts";
 import { Db } from "./db.ts";
 import { sse, post, sseStatus, USER, TOKEN, parseFrame, type Evt } from "./sse-testclient.ts";
 
@@ -553,10 +553,20 @@ test("a permission request flips the task to awaiting-input, then back to active
   // awaiting-input never expires by TTL — a human may take any amount of time.
   assert.deepEqual(running(Date.now() + 10 * 60_000), [{ agentName: "claude", sessionId: "S", state: "awaiting-input", cwd: undefined, title: "go" }], "awaiting-input survives the TTL");
 
-  // Once the agent resumes (any frame for the session) it is active again.
+  // An agent frame while the prompt is STILL unanswered must not flip it back:
+  // request_permission is always immediately followed by a usage_update for the
+  // same session, so a heartbeat that pinned "active" undid awaiting-input one
+  // frame later and handed the turn to the TTL (and then to the reaper).
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", update: { sessionUpdate: "usage_update", usage: {} } } })));
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(running()[0]?.state, "awaiting-input", "a frame arriving while the prompt is unanswered stays awaiting-input");
+
+  // Once the user answers AND the agent resumes (any frame for the session) it is
+  // active again — the resume half of the heartbeat is unchanged.
+  await post(port, conn, { jsonrpc: "2.0", id: 99, result: { outcome: { outcome: "selected", optionId: "yes" } } });
   agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } } } })));
   await new Promise((r) => setTimeout(r, 40));
-  assert.deepEqual(running(), [{ agentName: "claude", sessionId: "S", state: "active", cwd: undefined, title: "go" }], "agent resumed → active");
+  assert.deepEqual(running(), [{ agentName: "claude", sessionId: "S", state: "active", cwd: undefined, title: "go" }], "answered + agent resumed → active");
 
   a.close();
   await close();
@@ -634,7 +644,10 @@ test("an active task whose response never arrives is reaped by the TTL", async (
 
   await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S", prompt: [{ type: "text", text: "go" }] } });
   assert.equal(running().length, 1, "active right after the prompt");
-  assert.deepEqual(running(Date.now() + 60_000), [], "no heartbeat for 60s → TTL reaps it");
+  // Relative to the constant, not a wall-clock guess: TASK_TTL_MS is derived from
+  // SESSION_IDLE_TTL_MS (and so moves with ACPG_SESSION_IDLE_TTL_MS), and a
+  // hardcoded offset silently stops reaching it the moment either one changes.
+  assert.deepEqual(running(Date.now() + TASK_TTL_MS + 1_000), [], "no heartbeat past the task TTL → it is pruned");
 
   a.close();
   await close();

@@ -1643,15 +1643,6 @@ function promptText(params: unknown): string {
     .join("");
   return stripCommandMarkup(joined);
 }
-// Completion is detected from the prompt's response (precise, immediate). The TTL
-// is only a safety net for the cases where that response never arrives — the
-// client disconnected mid-turn (its idmux entry is forgotten) or the agent died
-// between heartbeats. It is deliberately generous so normal completion is never
-// driven by it. "awaiting-input" never expires by TTL: a human can take any
-// amount of time to answer, so it clears only when the user cancels the turn,
-// the agent resumes (a fresh frame), the turn ends (response), or the agent exits.
-const TASK_TTL_MS = 45_000;
-
 // --- idle session reaping ---------------------------------------------------
 // claude-agent-acp / codex-acp spawn one backing CLI per ACP session and keep it
 // alive for the session's lifetime (no protocol "end a turn" reaps it — only
@@ -1663,7 +1654,25 @@ const TASK_TTL_MS = 45_000;
 // abort the query → kill the CLI). The conversation is not lost — it persists on
 // disk, so a later client frame transparently re-loads it via session/load.
 const MAX_LIVE_SESSIONS = Math.max(1, Number(process.env.ACPG_MAX_LIVE_SESSIONS) || 5);
-const SESSION_IDLE_TTL_MS = Math.max(10_000, Number(process.env.ACPG_SESSION_IDLE_TTL_MS) || 180_000);
+// Exported so the reaping tests can probe the window between the two TTLs rather
+// than hardcode wall-clock numbers that a config change would silently invalidate.
+export const SESSION_IDLE_TTL_MS = Math.max(10_000, Number(process.env.ACPG_SESSION_IDLE_TTL_MS) || 180_000);
+// Completion is detected from the prompt's response (precise, immediate). The TTL
+// is only a safety net for the cases where that response never arrives — the
+// client disconnected mid-turn (its idmux entry is forgotten) or the agent died
+// between heartbeats. "awaiting-input" never expires by TTL: a human can take any
+// amount of time to answer, so it clears only when the user cancels the turn, the
+// agent resumes (a fresh frame), the turn ends (response), or the agent exits.
+// Derived from SESSION_IDLE_TTL_MS (hence declared after it) and it MUST stay
+// strictly greater: a live task is the reaper's only evidence that a silently
+// running turn is still working (reapIdle skips sessions that have one), so a TTL
+// that can fire first hands the reaper the very turns the guard exists to protect
+// — one `xcodebuild test` emits no ACP frames for minutes, and at the old flat 45s
+// the guard was gone long before the 180s idle window even opened. The margin over
+// it is deliberately small: a task whose response never arrives also lingers this
+// long in /running (a phantom bolt badge, and /history/session refuses the
+// conversation with 409 "conversation is running" for the whole window).
+export const TASK_TTL_MS = SESSION_IDLE_TTL_MS + 60_000;
 // Gateway-originated requests (the reaping session/close and the transparent
 // session/load) carry a fake origin conn id so their agent response/replay routes
 // to no real connection and is harmlessly dropped. Two distinct ids so logs can
@@ -1869,10 +1878,24 @@ class Channel {
     this.liveSessions.set(sid, { lastActivity: now, cwd });
   }
 
-  // The least-recently-active live session with no in-flight task, or undefined if
-  // all are busy (a running / awaiting-input turn is never reaped).
+  // Whether this session is blocked on a human: it has an unanswered permission /
+  // elicitation outstanding. Unlike `tasks`, pendingPerms is never pruned by a TTL
+  // — it is emptied only by a real answer, a session/cancel, the turn's own
+  // response, or the agent exiting — so it is the durable fact both the task
+  // heartbeat and the reaper trust when deciding "a person still owes this turn a
+  // reply". O(n) is fine: at most a couple of prompts are ever outstanding.
+  private hasPendingPromptFor(sid: string): boolean {
+    for (const p of this.pendingPerms.values()) if (p.sid === sid) return true;
+    return false;
+  }
+
+  // The least-recently-active live session that is neither running a turn nor
+  // waiting on the user, or undefined if all are busy (either one is never reaped).
   private firstEvictable(): string | undefined {
-    for (const sid of this.liveSessions.keys()) if (!this.tasks.has(sid)) return sid;
+    // The pendingPerms check is not redundant with tasks.has(): a task is TTL-
+    // prunable, an unanswered prompt is not, so this is what keeps a session that
+    // is waiting on the user out of the LRU victim pool once its task has expired.
+    for (const sid of this.liveSessions.keys()) if (!this.tasks.has(sid) && !this.hasPendingPromptFor(sid)) return sid;
     return undefined;
   }
 
@@ -1883,6 +1906,13 @@ class Channel {
     if (!this.reapable) return;
     for (const [sid, e] of [...this.liveSessions]) {
       if (this.tasks.has(sid)) continue;
+      // A session blocked on an unanswered prompt is idle only because it is
+      // waiting for the user, and reaping it means session/close → the adapter's
+      // teardownSession → query.interrupt() → the turn dies with a synthetic
+      // "[Request interrupted by user for tool use]". The tasks check above cannot
+      // carry this on its own: the task is TTL-pruned out from under it while the
+      // human thinks, which is precisely how live turns were being killed.
+      if (this.hasPendingPromptFor(sid)) continue;
       if (now - e.lastActivity >= SESSION_IDLE_TTL_MS) this.closeSession(sid, "idle");
     }
   }
@@ -1959,7 +1989,21 @@ class Channel {
       if (!origin) return;
       // A prompt's response ends its turn → the task is done. (If the origin was
       // forgotten — client gone mid-turn — the TTL clears it instead.)
-      if (origin.method === "session/prompt" && origin.sessionId) this.tasks.delete(origin.sessionId);
+      if (origin.method === "session/prompt" && origin.sessionId) {
+        this.tasks.delete(origin.sessionId);
+        // Drop any prompt the ended turn was still blocked on. Usually there is
+        // none — answering it is what let the turn finish — but a turn that ends
+        // another way (interrupted, or a Codex reply forking a fresh session)
+        // strands one, and an outstanding prompt now vetoes both idle reaping and
+        // LRU eviction. A few strays would silently disable session reclamation
+        // for this agent, which is the subprocess leak reaping exists to prevent.
+        // Same shape as the session/cancel path in fromClient, inbox included, so
+        // /inbox can't keep a badge that answerPermission would refuse to honour.
+        if (this.hasPendingPromptFor(origin.sessionId)) {
+          for (const [id, p] of this.pendingPerms) if (p.sid === origin.sessionId) this.pendingPerms.delete(id);
+          this.store?.cancelInboxForSession(this.name, origin.sessionId, new Date().toISOString());
+        }
+      }
       // The agent's `initialize` response carries its true capabilities — surface
       // `loadSession` so the gateway stops relying on a name-based guess (codex-acp,
       // once unable to resume, now reports loadSession:true).
@@ -2083,7 +2127,14 @@ class Channel {
     // Heartbeat an in-flight task: each agent frame for the session proves it is
     // still working (and resumes "active" after an awaiting-input pause). Only
     // refresh existing tasks — a session/load replay must not look like a new run.
-    if (nsid && this.tasks.has(nsid)) this.tasks.set(nsid, { state: "active", lastSeen: Date.now() });
+    // The state is re-derived from pendingPerms rather than pinned to "active",
+    // because a session/request_permission is immediately followed by a
+    // usage_update notification for the same session: a flat "active" here undid
+    // the awaiting-input set above one frame later, and awaiting-input is the only
+    // thing keeping the TTL (and so the reaper) off a turn blocked on the user.
+    if (nsid && this.tasks.has(nsid)) {
+      this.tasks.set(nsid, { state: this.hasPendingPromptFor(nsid) ? "awaiting-input" : "active", lastSeen: Date.now() });
+    }
     if (nsid) this.touchSession(nsid); // any agent frame for a session keeps it alive
     if (nsid && this.loadGate.has(nsid)) { this.sendTo(this.loadGate.get(nsid)!, seq, line); return; }
     this.broadcast(seq, line);
