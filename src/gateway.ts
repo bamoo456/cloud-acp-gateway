@@ -1657,21 +1657,23 @@ const MAX_LIVE_SESSIONS = Math.max(1, Number(process.env.ACPG_MAX_LIVE_SESSIONS)
 // Exported so the reaping tests can probe the window between the two TTLs rather
 // than hardcode wall-clock numbers that a config change would silently invalidate.
 export const SESSION_IDLE_TTL_MS = Math.max(10_000, Number(process.env.ACPG_SESSION_IDLE_TTL_MS) || 180_000);
-// Completion is detected from the prompt's response (precise, immediate). The TTL
-// is only a safety net for the cases where that response never arrives — the
-// client disconnected mid-turn (its idmux entry is forgotten) or the agent died
-// between heartbeats. "awaiting-input" never expires by TTL: a human can take any
-// amount of time to answer, so it clears only when the user cancels the turn, the
-// agent resumes (a fresh frame), the turn ends (response), or the agent exits.
-// Derived from SESSION_IDLE_TTL_MS (hence declared after it) and it MUST stay
-// strictly greater: a live task is the reaper's only evidence that a silently
-// running turn is still working (reapIdle skips sessions that have one), so a TTL
-// that can fire first hands the reaper the very turns the guard exists to protect
-// — one `xcodebuild test` emits no ACP frames for minutes, and at the old flat 45s
-// the guard was gone long before the 180s idle window even opened. The margin over
-// it is deliberately small: a task whose response never arrives also lingers this
-// long in /running (a phantom bolt badge, and /history/session refuses the
-// conversation with 409 "conversation is running" for the whole window).
+// Completion is detected from the prompt's response (precise, immediate); the TTL
+// only bounds how long /running keeps advertising a turn whose response never
+// arrived at all — the agent died between heartbeats, or a Codex reply forked a
+// fresh session and abandoned this one. "awaiting-input" never expires by TTL: a
+// human can take any amount of time to answer, so it clears only when the user
+// cancels the turn, the agent resumes (a fresh frame), the turn ends (response),
+// or the agent exits.
+//
+// This value is NOT load-bearing for reaping. `promptsInFlight`/`pendingPerms` are
+// what reapIdle and firstEvictable consult, precisely because they cannot be
+// retracted by a clock; leaning on `tasks` is what let the reaper tear down live
+// turns. Keeping it above SESSION_IDLE_TTL_MS (hence declared after it) is now
+// only about not lying in the UI: a silently running turn — one `xcodebuild test`
+// emits no ACP frames for minutes — should still show as running. The margin is
+// deliberately small, because a turn that really is dead also lingers this long as
+// a phantom bolt badge, and /history/session refuses to delete the conversation
+// with 409 "conversation is running" for the whole window.
 export const TASK_TTL_MS = SESSION_IDLE_TTL_MS + 60_000;
 // Gateway-originated requests (the reaping session/close and the transparent
 // session/load) carry a fake origin conn id so their agent response/replay routes
@@ -1702,6 +1704,18 @@ class Channel {
   // forwarded, refreshed by each agent frame for that session, and cleared when
   // the prompt's response returns (or by TTL / agent exit as a fallback).
   private tasks = new Map<string, { state: TaskState; lastSeen: number }>();
+  // The reaper's durable evidence that a turn is genuinely still running:
+  // gateway req id -> the session whose session/prompt is unanswered, plus the
+  // per-session count. `tasks` cannot carry this — running() TTL-prunes it, and a
+  // turn that is merely quiet (one `xcodebuild test` emits no ACP frames for
+  // minutes) then looks finished to the reaper. These move only on the prompt's
+  // own response, a session/cancel, the session closing, or the agent exiting.
+  // Keyed by gateway id rather than by connection on purpose: idmux.forgetConn
+  // drops a departed client's entries, so the response for a client that left
+  // mid-turn arrives with no origin — this map still resolves it and releases the
+  // session, which is the one case a conn-keyed record would pin forever.
+  private promptReq = new Map<number, string>();
+  private promptsInFlight = new Map<string, number>();
   // sessionId -> the cwd it runs in. Captured from session/new (paired on its
   // response, since the id isn't known until then), session/load, and any prompt
   // that carries a cwd. Surfaced in running() so cross-device tasks show the
@@ -1801,6 +1815,8 @@ class Channel {
       this.sendTo(o.connId, seq, frame);
     }
     this.tasks.clear();
+    this.promptReq.clear();
+    this.promptsInFlight.clear();
     this.sessionCwd.clear();
     this.sessionTitle.clear();
     // The agent process is gone, so the requests it was blocking on can never be
@@ -1889,13 +1905,34 @@ class Channel {
     return false;
   }
 
+  private hasPromptInFlight(sid: string): boolean {
+    return (this.promptsInFlight.get(sid) ?? 0) > 0;
+  }
+
+  // Release one in-flight prompt for `sid`. Clamped at zero: a double release must
+  // not leave a negative count that reads as "in flight" and vetoes reaping forever.
+  private releasePrompt(sid: string): void {
+    const left = (this.promptsInFlight.get(sid) ?? 0) - 1;
+    if (left > 0) this.promptsInFlight.set(sid, left); else this.promptsInFlight.delete(sid);
+  }
+
+  // Forget every in-flight prompt for `sid` — the turn is over by other means
+  // (cancelled by the user, or the session itself is being torn down), so its
+  // response, if one ever comes, no longer has anything to release.
+  private forgetPromptsFor(sid: string): void {
+    this.promptsInFlight.delete(sid);
+    for (const [gid, s] of this.promptReq) if (s === sid) this.promptReq.delete(gid);
+  }
+
   // The least-recently-active live session that is neither running a turn nor
   // waiting on the user, or undefined if all are busy (either one is never reaped).
   private firstEvictable(): string | undefined {
-    // The pendingPerms check is not redundant with tasks.has(): a task is TTL-
-    // prunable, an unanswered prompt is not, so this is what keeps a session that
-    // is waiting on the user out of the LRU victim pool once its task has expired.
-    for (const sid of this.liveSessions.keys()) if (!this.tasks.has(sid) && !this.hasPendingPromptFor(sid)) return sid;
+    // Neither extra check is redundant with tasks.has(): a task is TTL-prunable,
+    // while an unanswered prompt and an in-flight turn are not, so these are what
+    // keep a busy session out of the LRU victim pool once its task has expired.
+    for (const sid of this.liveSessions.keys()) {
+      if (!this.tasks.has(sid) && !this.hasPendingPromptFor(sid) && !this.hasPromptInFlight(sid)) return sid;
+    }
     return undefined;
   }
 
@@ -1913,6 +1950,11 @@ class Channel {
       // carry this on its own: the task is TTL-pruned out from under it while the
       // human thinks, which is precisely how live turns were being killed.
       if (this.hasPendingPromptFor(sid)) continue;
+      // A turn whose session/prompt has not been answered yet is running, however
+      // quiet it is. The tasks check above expires (running() prunes it at
+      // TASK_TTL_MS), so on its own it only postpones the same kill: a build that
+      // emits no frames for long enough would still be torn down mid-flight.
+      if (this.hasPromptInFlight(sid)) continue;
       if (now - e.lastActivity >= SESSION_IDLE_TTL_MS) this.closeSession(sid, "idle");
     }
   }
@@ -1926,6 +1968,7 @@ class Channel {
     this.liveSessions.delete(sid);
     this.rememberReaped(sid, e?.cwd ?? this.sessionCwd.get(sid));
     this.tasks.delete(sid);
+    this.forgetPromptsFor(sid);
     this.sessionTitle.delete(sid);
     this.sessionCwd.delete(sid);
     const gid = this.idmux.outbound(CLOSE_SENTINEL, `close:${sid}`, "session/close", sid);
@@ -1985,25 +2028,31 @@ class Channel {
       // are never appended; they ride the current head seq, leaving the resume cursor on
       // the last genuinely replayable frame.
       const seq = this.ledger.headSeq();
-      const origin = this.idmux.inbound(Number(f.id));
-      if (!origin) return;
-      // A prompt's response ends its turn → the task is done. (If the origin was
-      // forgotten — client gone mid-turn — the TTL clears it instead.)
-      if (origin.method === "session/prompt" && origin.sessionId) {
-        this.tasks.delete(origin.sessionId);
+      // A prompt's response ends its turn. This runs BEFORE the origin lookup and
+      // is keyed on the gateway id rather than on `origin`, because
+      // idmux.forgetConn drops the entry when a client leaves mid-turn — so
+      // `origin` is null in exactly the case that used to be left to the TTL, and
+      // the TTL expiring is what handed live turns to the reaper.
+      const endedSid = this.promptReq.get(Number(f.id));
+      if (endedSid !== undefined) {
+        this.promptReq.delete(Number(f.id));
+        this.releasePrompt(endedSid);
+        this.tasks.delete(endedSid);
         // Drop any prompt the ended turn was still blocked on. Usually there is
         // none — answering it is what let the turn finish — but a turn that ends
         // another way (interrupted, or a Codex reply forking a fresh session)
-        // strands one, and an outstanding prompt now vetoes both idle reaping and
-        // LRU eviction. A few strays would silently disable session reclamation
-        // for this agent, which is the subprocess leak reaping exists to prevent.
+        // strands one, and an outstanding prompt vetoes both idle reaping and LRU
+        // eviction. A few strays would silently disable session reclamation for
+        // this agent, which is the subprocess leak reaping exists to prevent.
         // Same shape as the session/cancel path in fromClient, inbox included, so
         // /inbox can't keep a badge that answerPermission would refuse to honour.
-        if (this.hasPendingPromptFor(origin.sessionId)) {
-          for (const [id, p] of this.pendingPerms) if (p.sid === origin.sessionId) this.pendingPerms.delete(id);
-          this.store?.cancelInboxForSession(this.name, origin.sessionId, new Date().toISOString());
+        if (this.hasPendingPromptFor(endedSid)) {
+          for (const [id, p] of this.pendingPerms) if (p.sid === endedSid) this.pendingPerms.delete(id);
+          this.store?.cancelInboxForSession(this.name, endedSid, new Date().toISOString());
         }
       }
+      const origin = this.idmux.inbound(Number(f.id));
+      if (!origin) return;
       // The agent's `initialize` response carries its true capabilities — surface
       // `loadSession` so the gateway stops relying on a name-based guess (codex-acp,
       // once unable to resume, now reports loadSession:true).
@@ -2193,6 +2242,7 @@ class Channel {
       const csid = sessionIdOf(f);
       if (csid) {
         this.tasks.delete(csid);
+        this.forgetPromptsFor(csid);
         for (const [id, p] of this.pendingPerms) if (p.sid === csid) this.pendingPerms.delete(id);
         this.store?.cancelInboxForSession(this.name, csid, new Date().toISOString());
       }
@@ -2247,6 +2297,14 @@ class Channel {
       } catch { /* recency is best-effort */ }
     }
     const gatewayId = this.idmux.outbound(conn.id, f.id as string | number, method || null, sid || undefined, cwd || undefined);
+    // Record the turn against its gateway id (the id the agent will answer with),
+    // so the reaper has a fact about it that no TTL can retract. Counted rather
+    // than flagged: a second prompt for the same session must not be released by
+    // the first response.
+    if (method === "session/prompt" && sid) {
+      this.promptReq.set(gatewayId, sid);
+      this.promptsInFlight.set(sid, (this.promptsInFlight.get(sid) ?? 0) + 1);
+    }
     const out = Buffer.from(JSON.stringify({ ...f, id: gatewayId }));
     // Gate this session's replay to the loader until the load response returns.
     if (method === "session/load" && sid) {
