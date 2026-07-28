@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, findClaudeSessionFile, deleteHistorySession } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession } from "./gateway.ts";
 import { Db } from "./db.ts";
 
 // The Claude history paths cache derived transcript metadata in the shared prefs
@@ -121,6 +121,79 @@ test("Claude discovery recovers cwd from CLI transcripts and filters outside the
     { sessionId: "session-new", title: "newer cli prompt", updatedAt: new Date(3000).toISOString(), cwd: fs.realpathSync(newerCwd), source: "claude-cli" },
     { sessionId: "session-old", title: "older cli prompt", updatedAt: new Date(1000).toISOString(), cwd: fs.realpathSync(inCwd), source: "claude-cli" },
   ]);
+});
+
+// Codex's counterpart. The cwd needs no recovering — a rollout's head line
+// records it outright — so what matters here is that discovery spans folders
+// (the gap that made codex conversations invisible outside the selected one),
+// still honours the filesystem root, and ranks by the index's updated_at.
+function writeCodexRollout(
+  home: string,
+  name: string,
+  meta: { id: string; cwd: string; timestamp: string },
+  userText: string,
+): string {
+  const dir = path.join(home, "sessions", "2026", "07", "20");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `rollout-${name}.jsonl`);
+  fs.writeFileSync(file, [
+    { type: "session_meta", payload: meta },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: userText }] } },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+  return file;
+}
+
+async function withCodexHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = home;
+  try { return await fn(); } finally {
+    if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
+  }
+}
+
+test("Codex discovery spans folders and filters outside the filesystem root", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codexhome-"));
+  const inCwd = path.join(fsRoot, "repo");
+  const otherCwd = path.join(fsRoot, "other");
+  const outCwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-outside-"));
+  fs.mkdirSync(inCwd, { recursive: true });
+  fs.mkdirSync(otherCwd, { recursive: true });
+
+  writeCodexRollout(home, "A", { id: "CDX-A", cwd: inCwd, timestamp: "2026-07-20T10:00:00.000Z" }, "older prompt");
+  writeCodexRollout(home, "B", { id: "CDX-B", cwd: otherCwd, timestamp: "2026-07-20T12:00:00.000Z" }, "newer prompt");
+  writeCodexRollout(home, "C", { id: "CDX-C", cwd: outCwd, timestamp: "2026-07-20T14:00:00.000Z" }, "out of bounds");
+  // The index supplies a thread name and the authoritative recency; a session
+  // absent from it falls back to the rollout's own first user message + mtime.
+  fs.writeFileSync(path.join(home, "session_index.jsonl"),
+    JSON.stringify({ id: "CDX-B", thread_name: "named thread", updated_at: "2026-07-20T12:00:00.000Z" }) + "\n");
+  // mtime is what an un-indexed session ranks and dates by.
+  fs.utimesSync(path.join(home, "sessions", "2026", "07", "20", "rollout-A.jsonl"), new Date(1000), new Date(1000));
+
+  const sessions = await withCodexHome(home, () => discoverCodexHistory({ fsRoot, limit: 10 }));
+
+  assert.deepEqual(sessions, [
+    { sessionId: "CDX-B", title: "named thread", updatedAt: "2026-07-20T12:00:00.000Z", cwd: fs.realpathSync(otherCwd), source: "codex-cli" },
+    { sessionId: "CDX-A", title: "older prompt", updatedAt: new Date(1000).toISOString(), cwd: fs.realpathSync(inCwd), source: "codex-cli" },
+  ], "both in-root folders listed, newest first; the out-of-root rollout is dropped");
+});
+
+// The limit is a recency cut, not an arbitrary one — deriving titles happens
+// after it, so a truncated listing must still be the most recent sessions.
+test("Codex discovery applies its limit to the most recent sessions", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codexhome-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+
+  writeCodexRollout(home, "OLD", { id: "CDX-OLD", cwd, timestamp: "2026-07-20T10:00:00.000Z" }, "old");
+  writeCodexRollout(home, "NEW", { id: "CDX-NEW", cwd, timestamp: "2026-07-20T10:00:00.000Z" }, "new");
+  fs.utimesSync(path.join(home, "sessions", "2026", "07", "20", "rollout-OLD.jsonl"), new Date(1000), new Date(1000));
+  fs.utimesSync(path.join(home, "sessions", "2026", "07", "20", "rollout-NEW.jsonl"), new Date(9000), new Date(9000));
+
+  const sessions = await withCodexHome(home, () => discoverCodexHistory({ fsRoot, limit: 1 }));
+
+  assert.deepEqual(sessions.map((s) => [s.sessionId, s.title]), [["CDX-NEW", "new"]]);
 });
 
 test("history surfaces image content blocks (base64 + url sources)", async () => {

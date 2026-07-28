@@ -5,6 +5,11 @@ export type NativeAgentConfig = {
   cwd: string;
   kind: "claude" | "codex" | "opencode" | null;
   history: boolean;
+  // Whether /history/discovered can list this agent's sessions from folders the
+  // console isn't currently in. Server-owned so clients don't re-derive it from
+  // `kind` — the web sidebar and the iOS console each hardcoded "claude", and
+  // both silently dropped codex conversations outside the selected folder.
+  discover: boolean;
   sessionLoad: boolean;
   skin?: "codex" | "opencode";
 };
