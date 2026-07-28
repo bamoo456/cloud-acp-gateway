@@ -14,6 +14,7 @@ test("native client config exposes capabilities without credentials or commands"
       cwd: "/workspace/app",
       kind: "codex",
       history: true,
+      discover: true,
       sessionLoad: true,
       skin: "codex",
       cmd: "/secret/codex-acp",
@@ -27,6 +28,7 @@ test("native client config exposes capabilities without credentials or commands"
     cwd: "/workspace/app",
     kind: "codex",
     history: true,
+    discover: true,
     sessionLoad: true,
     skin: "codex",
   }]);

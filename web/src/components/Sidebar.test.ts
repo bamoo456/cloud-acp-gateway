@@ -202,6 +202,44 @@ describe("Sidebar recent conversations", () => {
     }));
   });
 
+  // Discovery used to be gated on `kind === "claude"` here, so a codex session
+  // was only ever reachable from the folder the console happened to be in. The
+  // gateway now advertises the capability and the sidebar just reads it.
+  test("discovers sessions for every agent the gateway marks discoverable, not just claude", async () => {
+    document.body.querySelector("#acpg-cfg")!.textContent = JSON.stringify({
+      wsPath: "/acp",
+      token: "test-token",
+      defaultAgent: "claude",
+      agents: [
+        { name: "claude", cwd: "/repo", kind: "claude", discover: true },
+        { name: "codex", cwd: "/repo", kind: "codex", discover: true },
+        { name: "opencode", cwd: "/repo", kind: "opencode", discover: false },
+      ],
+      fsRoot: "/",
+    });
+    await renderSidebar();
+
+    expect(getDiscoveredHistory.mock.calls.map((c) => c[0]).sort()).toEqual(["claude", "codex"]);
+  });
+
+  // Older gateways don't send `discover` at all; absent must not read as false
+  // for claude, whose discovery those gateways do support.
+  test("falls back to the claude kind check when the gateway sends no discover flag", async () => {
+    document.body.querySelector("#acpg-cfg")!.textContent = JSON.stringify({
+      wsPath: "/acp",
+      token: "test-token",
+      defaultAgent: "claude",
+      agents: [
+        { name: "claude", cwd: "/repo", kind: "claude" },
+        { name: "codex", cwd: "/repo", kind: "codex" },
+      ],
+      fsRoot: "/",
+    });
+    await renderSidebar();
+
+    expect(getDiscoveredHistory.mock.calls.map((c) => c[0])).toEqual(["claude"]);
+  });
+
   test("limits Conversations to the last two days until See more is clicked", async () => {
     await renderSidebar();
     await clickConversationsTab();

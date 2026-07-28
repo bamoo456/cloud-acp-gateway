@@ -27,6 +27,13 @@ function matchesQuery(it: HistorySession, q: string) {
 function recentReopenable(agent?: AgentRef) {
   return !!agent && agent.history !== false && agent.sessionLoad !== false;
 }
+// Whether /history/discovered can list this agent's conversations from folders
+// we aren't in. The gateway advertises it; the kind check is only the fallback
+// for gateways predating that field, and stays claude-only on purpose — those
+// gateways answer empty for codex anyway.
+function discoverable(agent: AgentRef) {
+  return agent.discover ?? (agent.kind === "claude" || (!agent.kind && agent.name === "claude"));
+}
 function sessionTitle(id: string, title?: string | null) {
   return title && title !== "Untitled" ? title : id.slice(0, 8);
 }
@@ -49,7 +56,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // "Current" fallback (in-memory sessions for agents that can't load history).
   const histAgentNames = s.cfg.agents.filter((a) => a.history !== false).map((a) => a.name);
   const discoverAgentNames = s.cfg.agents
-    .filter((a) => a.history !== false && (a.kind === "claude" || (!a.kind && a.name === "claude")))
+    .filter((a) => a.history !== false && discoverable(a))
     .map((a) => a.name);
   const anyHistSupported = histAgentNames.length > 0;
   const agentRef = agentByName.get(s.agentName);

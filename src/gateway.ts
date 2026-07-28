@@ -239,6 +239,19 @@ function historyProviderFor(cmd: string): HistoryProvider | null {
 export function supportsAgentHistory(cmd: string): boolean {
   return historyProviderFor(cmd) !== null;
 }
+// Which providers can answer /history/discovered — i.e. recover each session's
+// own cwd from its transcript, so the console can list conversations belonging
+// to folders it is not currently sitting in. opencode is out because its
+// sessions live in an indexed DB keyed by directory, with no transcript to
+// recover a cwd from. Advertised per-agent in the client config rather than
+// re-derived client-side: both the web sidebar and the iOS console used to
+// hardcode `kind === "claude"`, which is why codex conversations from other
+// folders were invisible in each of them.
+const DISCOVERABLE_PROVIDERS = new Set<HistoryProvider>(["claude", "codex"]);
+export function supportsHistoryDiscovery(cmd: string): boolean {
+  const provider = historyProviderFor(cmd);
+  return provider !== null && DISCOVERABLE_PROVIDERS.has(provider);
+}
 // Initial guess used only until the agent reports its real capability at
 // initialize (see Gateway.sessionLoad). Older codex-acp couldn't resume over ACP;
 // current builds report loadSession:true, and the handshake then overrides this.
@@ -525,7 +538,7 @@ type ViewBlock = {
   mimeType?: string; data?: string; uri?: string;
 };
 type HistorySessionItem = { sessionId: string; title: string | null; updatedAt: string };
-type DiscoveredHistorySessionItem = HistorySessionItem & { cwd: string; source: "claude-cli" };
+type DiscoveredHistorySessionItem = HistorySessionItem & { cwd: string; source: "claude-cli" | "codex-cli" };
 type HistoryMessagesResult = { messages: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }>; total: number; truncated: boolean };
 
 // Flatten a tool_result's content (string | block array) to text, capped so a
@@ -1039,6 +1052,44 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
     sessionId: s.id,
     title: custom[s.id] ?? s.index?.thread_name ?? (await firstCodexUserText(s.file)),
     updatedAt: s.index?.updated_at ?? s.updatedAt,
+  })));
+}
+
+// Codex counterpart to discoverClaudeHistory: every rollout on disk, whatever
+// folder it belongs to. listCodexSessionFiles already recovers each session's
+// cwd from its rollout head — listCodexHistory only filters that down to one
+// cwd — so discovery is the same walk minus the sameCwd cut, plus the FS_ROOT
+// guard that normal history browsing gets from validating ?cwd=.
+//
+// Titles are derived AFTER the limit cut, deliberately: firstCodexUserText
+// streams a rollout until it finds a real (non-synthetic) user message, and
+// paying that for every session on disk instead of the <=limit that survive is
+// the difference between a listing and reading into a gigabyte of transcripts.
+export async function discoverCodexHistory(opts?: { fsRoot?: string; limit?: number }): Promise<DiscoveredHistorySessionItem[]> {
+  const fsRoot = opts?.fsRoot ?? FS_ROOT;
+  const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
+  const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
+
+  const within: Array<CodexSessionFile & { index?: CodexIndexEntry }> = [];
+  for (const s of sessions) {
+    const cwd = resolveWithinRootBase(s.cwd, fsRoot);
+    if (!cwd) continue;
+    within.push({ ...s, cwd, index: index.get(s.id) });
+  }
+  const top = within
+    .sort((a, b) => dateValue(b.index?.updated_at || b.updatedAt) - dateValue(a.index?.updated_at || a.updatedAt))
+    .slice(0, limit);
+
+  // One readTitles per distinct surviving folder rather than per session.
+  const customByCwd = new Map<string, Record<string, string>>();
+  for (const cwd of new Set(top.map((s) => s.cwd))) customByCwd.set(cwd, await readTitles(cwd));
+
+  return Promise.all(top.map(async (s) => ({
+    sessionId: s.id,
+    title: customByCwd.get(s.cwd)?.[s.id] ?? s.index?.thread_name ?? (await firstCodexUserText(s.file)),
+    updatedAt: s.index?.updated_at ?? s.updatedAt,
+    cwd: s.cwd,
+    source: "codex-cli" as const,
   })));
 }
 
@@ -2764,6 +2815,7 @@ const agentDetails = Object.entries(cfg.agents).map(([name, p]) => ({
   cwd: p.cwd,
   kind: historyProviderFor(p.cmd), // which CLI backs this agent — drives the resume command syntax
   history: supportsAgentHistory(p.cmd),
+  discover: supportsHistoryDiscovery(p.cmd), // can /history/discovered list this agent's other folders?
   sessionLoad: supportsAgentSessionLoad(p.cmd), // initial guess; refined once the agent reports at initialize
   skin: agentSkinFor(p.cmd),
 }));
@@ -3121,20 +3173,22 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
   }
-  // Discover Claude Code sessions that exist under ~/.claude/projects even when
-  // the gateway has never opened their cwd. The encoded project dir name is
-  // lossy, so this recovers the real cwd from each transcript and then applies
-  // the same FS_ROOT guard as normal history browsing.
+  // Discover sessions that exist in an agent's own store even when the gateway
+  // has never opened their cwd — Claude Code's ~/.claude/projects (whose encoded
+  // dir name is lossy, so the real cwd is recovered from each transcript) and
+  // Codex's CODEX_HOME rollouts (whose head line records the cwd outright).
+  // Either way the recovered cwd then gets the same FS_ROOT guard as normal
+  // history browsing. Providers outside DISCOVERABLE_PROVIDERS answer empty.
   if (consoleEnabled && pathname === "/history/discovered") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
     const prof = cfg.agents[q.get("agent") ?? cfg.defaultAgent];
     const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "30", 10) || 30, 1), 200);
-    if (historyProviderFor(prof?.cmd ?? "") !== "claude") {
+    if (!supportsHistoryDiscovery(prof?.cmd ?? "")) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ sessions: [] }));
       return;
     }
-    discoverClaudeHistory({ limit })
+    (historyProviderFor(prof?.cmd ?? "") === "codex" ? discoverCodexHistory({ limit }) : discoverClaudeHistory({ limit }))
       .then((sessions) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ sessions }));
