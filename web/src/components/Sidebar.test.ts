@@ -100,41 +100,42 @@ describe("Sidebar recent conversations", () => {
     await act(async () => { tabBtn!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
   }
 
-  test("shows the latest five sessions in a Recent section", async () => {
-    await seedRecentSessions([
+  // 16 recents: one past RECENT_LIMIT, so the collapsed cut and "See more" are
+  // both exercised. Only the newest and the one that falls off are named.
+  function sixteenRecents() {
+    return [
       { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "Cross folder work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-busy", title: "Fix session scoped busy state", lastActiveAt: "2026-06-10T03:00:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-perms", title: "Pending permission notifications", lastActiveAt: "2026-06-09T04:00:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-text", title: "Text size preference menu", lastActiveAt: "2026-06-08T04:00:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-share", title: "Share link deep-link testing", lastActiveAt: "2026-06-07T04:00:00.000Z" },
+      ...Array.from({ length: 14 }, (_, i) => ({
+        agentName: "claude",
+        cwd: "/repo",
+        sessionId: `s-${i}`,
+        title: `Filler conversation ${i}`,
+        lastActiveAt: `2026-06-10T03:${String(58 - i).padStart(2, "0")}:00.000Z`,
+      })),
       { agentName: "claude", cwd: "/repo", sessionId: "s-folder", title: "Folder browser polish", lastActiveAt: "2026-06-06T04:00:00.000Z" },
-    ]);
+    ];
+  }
+
+  test("shows the latest RECENT_LIMIT sessions in a Recent section", async () => {
+    await seedRecentSessions(sixteenRecents());
     await renderSidebar();
 
     const recent = container.querySelector(".recent-section");
     expect(recent).not.toBeNull();
     const rows = recent!.querySelectorAll(".sess-item");
-    expect(rows).toHaveLength(5);
+    expect(rows).toHaveLength(15);
     expect(recent!.textContent).toContain("Cross folder work");
     expect(recent!.textContent).toContain("other-repo");
-    expect(recent!.textContent).toContain("Share link deep-link testing");
     expect(recent!.textContent).not.toContain("Folder browser polish");
   });
 
   test("reveals the rest of the recents when See more is clicked", async () => {
-    await seedRecentSessions([
-      { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "Cross folder work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-busy", title: "Fix session scoped busy state", lastActiveAt: "2026-06-10T03:00:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-perms", title: "Pending permission notifications", lastActiveAt: "2026-06-09T04:00:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-text", title: "Text size preference menu", lastActiveAt: "2026-06-08T04:00:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-share", title: "Share link deep-link testing", lastActiveAt: "2026-06-07T04:00:00.000Z" },
-      { agentName: "claude", cwd: "/repo", sessionId: "s-folder", title: "Folder browser polish", lastActiveAt: "2026-06-06T04:00:00.000Z" },
-    ]);
+    await seedRecentSessions(sixteenRecents());
     await renderSidebar();
 
     const recent = container.querySelector(".recent-section");
     expect(recent).not.toBeNull();
-    expect(recent!.querySelectorAll(".sess-item")).toHaveLength(5);
+    expect(recent!.querySelectorAll(".sess-item")).toHaveLength(15);
     expect(recent!.textContent).not.toContain("Folder browser polish");
 
     const seeMore = recent!.querySelector<HTMLButtonElement>(".see-more");
@@ -143,7 +144,7 @@ describe("Sidebar recent conversations", () => {
       seeMore!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(recent!.querySelectorAll(".sess-item")).toHaveLength(6);
+    expect(recent!.querySelectorAll(".sess-item")).toHaveLength(16);
     expect(recent!.textContent).toContain("Folder browser polish");
     expect(recent!.textContent).toContain("Show less");
   });

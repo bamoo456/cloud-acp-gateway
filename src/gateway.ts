@@ -252,11 +252,18 @@ export function supportsHistoryDiscovery(cmd: string): boolean {
   const provider = historyProviderFor(cmd);
   return provider !== null && DISCOVERABLE_PROVIDERS.has(provider);
 }
-// Initial guess used only until the agent reports its real capability at
-// initialize (see Gateway.sessionLoad). Older codex-acp couldn't resume over ACP;
-// current builds report loadSession:true, and the handshake then overrides this.
-export function supportsAgentSessionLoad(cmd: string): boolean {
-  return !path.basename(cmd).includes("codex-acp");
+// Optimistic default used only until the agent reports its real capability at
+// initialize (see Gateway.sessionLoad). This used to sniff for codex-acp and
+// guess `false`, from the era when it couldn't resume over ACP — but
+// `observedSessionLoad` is in-memory, so every gateway restart reverted codex to
+// that stale guess, and the web sidebar's Recent tab hard-drops any agent
+// advertising `sessionLoad: false` (`recentReopenable`). Codex conversations
+// therefore vanished from Recent after each restart and could not come back:
+// only opening a codex session heals the guess, and Recent is exactly the list
+// that wouldn't offer one. Guessing true inverts that into a transient the
+// handshake corrects downward within one connection.
+export function supportsAgentSessionLoad(_cmd: string): boolean {
+  return true;
 }
 export function agentSkinFor(cmd: string): "codex" | "opencode" | undefined {
   const base = path.basename(cmd);
