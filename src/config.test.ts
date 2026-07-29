@@ -49,7 +49,11 @@ test("history browsing is supported for Claude and Codex ACP agents", () => {
   assert.equal(supportsAgentHistory("/opt/acp-gateway/node_modules/.bin/codex-acp"), true);
   assert.equal(supportsAgentHistory("/usr/bin/npx"), false);
   assert.equal(supportsAgentSessionLoad("/opt/acp-gateway/node_modules/.bin/claude-agent-acp"), true);
-  assert.equal(supportsAgentSessionLoad("/opt/acp-gateway/node_modules/.bin/codex-acp"), false);
+  // codex-acp used to be guessed false. observedSessionLoad is in-memory, so every
+  // restart reverted codex to that stale guess, and the sidebar's Recent tab
+  // hard-drops any agent advertising sessionLoad:false — hiding every codex row.
+  // The guess is optimistic now; initialize corrects it downward if it's wrong.
+  assert.equal(supportsAgentSessionLoad("/opt/acp-gateway/node_modules/.bin/codex-acp"), true);
 });
 
 test("history and session/load are supported for opencode (`opencode acp`)", () => {
