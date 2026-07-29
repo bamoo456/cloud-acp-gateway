@@ -8,7 +8,12 @@ import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
 
-const RECENT_LIMIT = 5;
+// How many rows a collapsed list shows before "See more". Recent is a
+// cross-folder recency timeline now (server recents + discovered CLI sessions),
+// so five rows is a keyhole: one busy agent's folder fills them all and every
+// other agent falls off the bottom, which reads as "my codex conversations are
+// gone" rather than "they're behind See more".
+const RECENT_LIMIT = 15;
 const CONVERSATION_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
 // A history row tagged with the agent it was fetched from, so the unified list can
 // show the owning agent's mark and reopen it under that agent.
@@ -26,6 +31,13 @@ function matchesQuery(it: HistorySession, q: string) {
 // so every Recent row stays reopenable across an agents.json / capability change.
 function recentReopenable(agent?: AgentRef) {
   return !!agent && agent.history !== false && agent.sessionLoad !== false;
+}
+// Whether /history/discovered can list this agent's conversations from folders
+// we aren't in. The gateway advertises it; the kind check is only the fallback
+// for gateways predating that field, and stays claude-only on purpose — those
+// gateways answer empty for codex anyway.
+function discoverable(agent: AgentRef) {
+  return agent.discover ?? (agent.kind === "claude" || (!agent.kind && agent.name === "claude"));
 }
 function sessionTitle(id: string, title?: string | null) {
   return title && title !== "Untitled" ? title : id.slice(0, 8);
@@ -49,7 +61,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // "Current" fallback (in-memory sessions for agents that can't load history).
   const histAgentNames = s.cfg.agents.filter((a) => a.history !== false).map((a) => a.name);
   const discoverAgentNames = s.cfg.agents
-    .filter((a) => a.history !== false && (a.kind === "claude" || (!a.kind && a.name === "claude")))
+    .filter((a) => a.history !== false && discoverable(a))
     .map((a) => a.name);
   const anyHistSupported = histAgentNames.length > 0;
   const agentRef = agentByName.get(s.agentName);
