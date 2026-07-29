@@ -8,7 +8,12 @@ import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
 
-const RECENT_LIMIT = 5;
+// How many rows a collapsed list shows before "See more". Recent is a
+// cross-folder recency timeline now (server recents + discovered CLI sessions),
+// so five rows is a keyhole: one busy agent's folder fills them all and every
+// other agent falls off the bottom, which reads as "my codex conversations are
+// gone" rather than "they're behind See more".
+const RECENT_LIMIT = 15;
 const CONVERSATION_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
 // A history row tagged with the agent it was fetched from, so the unified list can
 // show the owning agent's mark and reopen it under that agent.
