@@ -583,6 +583,21 @@ export function sliceMessages(
   };
 }
 
+// Query-string half of the paging contract. A range is all-or-nothing: if either
+// bound is missing or unparseable the request degrades to the plain tail page,
+// which is always a safe answer, rather than inventing a bound.
+export function historyPageParams(q: URLSearchParams): { limit: number; from?: number; to?: number } {
+  const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "120", 10) || 120, 1), MAX_HISTORY_PAGE);
+  const rawFrom = q.get("from");
+  const rawTo = q.get("to");
+  if (rawFrom === null || rawTo === null) return { limit };
+  const from = parseInt(rawFrom, 10);
+  const to = parseInt(rawTo, 10);
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return { limit };
+  const lo = Math.max(from, 0);
+  return { limit, from: lo, to: Math.min(Math.max(to, lo), lo + MAX_HISTORY_PAGE) };
+}
+
 // Paging re-reads the same transcript once per page, so hold the parsed result
 // against the file's stat. mtime+size changes on every append, so a running
 // conversation can never be served a stale tail. Small LRU: the working set is
@@ -3636,9 +3651,9 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     // Allow underscores: opencode session ids look like `ses_…` (claude/codex use
     // UUIDs). Still no slashes or dots, so this can't escape the session store.
     const sid = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
-    const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "120", 10) || 120, 1), 2000);
+    const { limit, from, to } = historyPageParams(q);
     if (!cwd || !sid) { res.writeHead(400); res.end(); return; }
-    readAgentHistoryMessages(prof?.cmd ?? "", cwd, sid, limit)
+    readAgentHistoryMessages(prof?.cmd ?? "", cwd, sid, limit, { from, to })
       .then((r) => {
         if (!r) { res.writeHead(404); res.end(); return; }
         res.writeHead(200, { "content-type": "application/json" });
