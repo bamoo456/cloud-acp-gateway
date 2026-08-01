@@ -4,7 +4,7 @@ export interface HistorySession { sessionId: string; title: string | null; updat
 export interface DiscoveredHistorySession extends HistorySession { cwd: string; source: "claude-cli"; }
 export interface ViewBlock { type: "text" | "thought" | "tool" | "image"; text?: string; name?: string; toolCallId?: string; status?: string; output?: string; mimeType?: string; data?: string; uri?: string; }
 export interface ViewMessage { role: "user" | "assistant"; blocks: ViewBlock[]; }
-export interface MessagesResult { messages: ViewMessage[]; total: number; truncated: boolean; }
+export interface MessagesResult { messages: ViewMessage[]; total: number; start: number; truncated: boolean; }
 export interface DirEntry { name: string; git: boolean; }
 export interface FsResult { root: string; path: string; parent: string | null; dirs: DirEntry[]; }
 
@@ -36,11 +36,25 @@ export async function getDiscoveredHistory(agent: string, limit = 30): Promise<D
   return (r && r.sessions) || [];
 }
 
-export async function getMessages(agent: string, cwd: string, session: string, limit = 120): Promise<MessagesResult> {
-  const url = base() + "/history/messages?agent=" + encodeURIComponent(agent) +
-    "&cwd=" + encodeURIComponent(cwd) + "&session=" + encodeURIComponent(session) + "&limit=" + limit;
+// `page` picks one of two modes. Default: the last `limit` messages. With
+// `from`/`to`: that absolute half-open range, which is how scrolling up walks
+// backwards without repeating or skipping messages while the agent is still
+// appending. `start` is the returned page's first index; a gateway too old to
+// send it is read as 0, which just means "no paging available".
+export async function getMessages(
+  agent: string,
+  cwd: string,
+  session: string,
+  page: { limit?: number; from?: number; to?: number } = {},
+): Promise<MessagesResult> {
+  const params = new URLSearchParams({ agent, cwd, session, limit: String(page.limit ?? 50) });
+  if (page.from !== undefined && page.to !== undefined) {
+    params.set("from", String(page.from));
+    params.set("to", String(page.to));
+  }
+  const url = base() + "/history/messages?" + params.toString();
   const r = await readJson(await fetch(url), "Conversation history isn't available for this session yet.");
-  return { messages: r.messages || [], total: r.total || 0, truncated: !!r.truncated };
+  return { messages: r.messages || [], total: r.total || 0, start: r.start || 0, truncated: !!r.truncated };
 }
 
 export async function renameSession(agent: string, cwd: string, session: string, title: string): Promise<void> {

@@ -25,6 +25,7 @@ export function makeSession(
     modelId: null, mode: null,
     curAssistantId: null, curThoughtId: null,
     toolItemId: {}, planItemId: null, seq: 0,
+    historyStart: 0, loadingOlder: false,
   };
 }
 

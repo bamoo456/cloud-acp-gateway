@@ -111,7 +111,7 @@ describe("ActionMenu config options", () => {
       curAssistantId: null,
       curThoughtId: null,
       toolItemId: {},
-      planItemId: null,
+      planItemId: null, historyStart: 0, loadingOlder: false,
     },
   });
 
