@@ -288,3 +288,84 @@ describe("Thread empty state agent icon", () => {
     expect(container.querySelector(".robot")).toBeNull();
   });
 });
+
+describe("Thread history paging", () => {
+  let root: Root | null = null;
+
+  beforeEach(() => {
+    vi.resetModules();
+    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "wsPath": "/acp",
+      "token": "test-token",
+      "defaultAgent": "claude",
+      "agents": [{ "name": "claude", "cwd": "/repo" }],
+      "fsRoot": "/"
+    }</script>`;
+  });
+
+  afterEach(() => {
+    if (root) {
+      act(() => root?.unmount());
+      root = null;
+    }
+    vi.unstubAllGlobals();
+  });
+
+  function mountWith(historyStart: number, loadOlderMessages: () => Promise<void>) {
+    const main = document.createElement("main");
+    document.body.appendChild(main);
+    Object.defineProperty(main, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(main, "clientHeight", { configurable: true, value: 500 });
+    const session = {
+      id: "s", title: "S", createdAt: 0, agentName: "claude", cwd: "/repo", lastActiveAt: 0,
+      items: [
+        { id: "s:1", kind: "user", text: "a" },
+        { id: "s:2", kind: "assistant", text: "b" },
+      ],
+      hasContent: true, working: false, curAssistantId: null, curThoughtId: null,
+      toolItemId: {}, planItemId: null, seq: 2, historyStart, loadingOlder: false,
+    } as unknown as Session;
+    return { main, session, loadOlderMessages };
+  }
+
+  test("scrolling to the top fetches an older page once the local window is exhausted", async () => {
+    const { Thread } = await import("./Thread.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const loadOlderMessages = vi.fn(() => Promise.resolve());
+    useStore.setState({ loadOlderMessages } as never);
+
+    const { main, session } = mountWith(40, loadOlderMessages);
+    await act(async () => {
+      root = createRoot(main);
+      root.render(React.createElement(Thread, { session, agentReady: true }));
+    });
+
+    await act(async () => {
+      main.scrollTop = 10;
+      main.dispatchEvent(new Event("scroll"));
+    });
+
+    expect(loadOlderMessages).toHaveBeenCalledWith("s");
+  });
+
+  test("a thread already at the beginning of its transcript never fetches", async () => {
+    const { Thread } = await import("./Thread.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const loadOlderMessages = vi.fn(() => Promise.resolve());
+    useStore.setState({ loadOlderMessages } as never);
+
+    const { main, session } = mountWith(0, loadOlderMessages);
+    await act(async () => {
+      root = createRoot(main);
+      root.render(React.createElement(Thread, { session, agentReady: true }));
+    });
+
+    await act(async () => {
+      main.scrollTop = 10;
+      main.dispatchEvent(new Event("scroll"));
+    });
+
+    expect(loadOlderMessages).not.toHaveBeenCalled();
+  });
+});
