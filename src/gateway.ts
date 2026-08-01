@@ -546,7 +546,37 @@ type ViewBlock = {
 };
 type HistorySessionItem = { sessionId: string; title: string | null; updatedAt: string };
 type DiscoveredHistorySessionItem = HistorySessionItem & { cwd: string; source: "claude-cli" | "codex-cli" };
-type HistoryMessagesResult = { messages: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }>; total: number; truncated: boolean };
+type ViewMessage = { role: "user" | "assistant"; blocks: ViewBlock[] };
+type HistoryMessagesResult = { messages: ViewMessage[]; total: number; start: number; truncated: boolean };
+
+// One page of a transcript. Two modes: `limit` alone gives the tail (what every
+// caller wanted before paging existed), while `from`/`to` gives an absolute
+// half-open range. Absolute indices are what make paging safe on a running
+// conversation — transcripts are append-only, so an index already assigned never
+// moves, whereas an offset counted from the tail shifts as messages arrive.
+// `start` is the returned page's first index; `start > 0` is how a client knows
+// older messages exist.
+export const MAX_HISTORY_PAGE = 2000;
+
+export function sliceMessages(
+  msgs: ViewMessage[],
+  opts: { limit?: number; from?: number; to?: number },
+): HistoryMessagesResult {
+  const total = msgs.length;
+  if (opts.from !== undefined || opts.to !== undefined) {
+    const lo = Math.min(Math.max(opts.from ?? 0, 0), total);
+    const hi = Math.min(Math.max(opts.to ?? total, lo), Math.min(lo + MAX_HISTORY_PAGE, total));
+    return { messages: msgs.slice(lo, hi), total, start: lo, truncated: lo > 0 };
+  }
+  const limit = opts.limit ?? 0;
+  const truncated = limit > 0 && total > limit;
+  return {
+    messages: truncated ? msgs.slice(-limit) : msgs,
+    total,
+    start: truncated ? total - limit : 0,
+    truncated,
+  };
+}
 
 // Flatten a tool_result's content (string | block array) to text, capped so a
 // huge tool output (e.g. a big file read) doesn't bloat the history payload.
@@ -884,9 +914,7 @@ export async function readClaudeHistoryMessages(file: string, sessionId: string,
     if (!blocks.length) continue; // skip tool-result-only / empty turns
     msgs.push({ role, blocks });
   }
-  const total = msgs.length;
-  const truncated = limit > 0 && total > limit;
-  return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
+  return sliceMessages(msgs, { limit });
 }
 
 type CodexIndexEntry = { id: string; thread_name?: string; updated_at?: string };
@@ -1151,9 +1179,7 @@ async function readCodexHistoryMessages(file: string, limit: number): Promise<Hi
       if (text) msgs.push({ role: "assistant", blocks: [{ type: "thought", text }] });
     }
   }
-  const total = msgs.length;
-  const truncated = limit > 0 && total > limit;
-  return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
+  return sliceMessages(msgs, { limit });
 }
 
 // Locate a Codex rollout by session id alone. Unlike findCodexSessionFile, this
@@ -1390,9 +1416,7 @@ async function readOpenCodeHistoryMessages(sessionId: string, limit: number): Pr
     }
     return out;
   }, [] as Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }>);
-  const total = msgs.length;
-  const truncated = limit > 0 && total > limit;
-  return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
+  return sliceMessages(msgs, { limit });
 }
 
 // Delete an opencode conversation. Unlike claude/codex there is no file to

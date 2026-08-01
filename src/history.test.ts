@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages } from "./gateway.ts";
 import { Db } from "./db.ts";
 
 // The Claude history paths cache derived transcript metadata in the shared prefs
@@ -734,4 +734,75 @@ test("deletion finds the right provider without being told the agent", async () 
       assert.deepEqual(rows.map((r) => r.sessionId), ["ses_untouched"], "the opencode row survives");
     });
   });
+});
+
+test("sliceMessages without a range returns the last `limit` messages and their start index", () => {
+  const msgs = Array.from({ length: 10 }, (_, i) => ({
+    role: "user" as const, blocks: [{ type: "text" as const, text: "m" + i }],
+  }));
+
+  const r = sliceMessages(msgs, { limit: 3 });
+
+  assert.equal(r.total, 10);
+  assert.equal(r.start, 7, "start is the index of the first returned message");
+  assert.equal(r.truncated, true);
+  assert.deepEqual(r.messages.map((m) => m.blocks[0].text), ["m7", "m8", "m9"]);
+});
+
+test("sliceMessages without a range returns everything when the conversation is shorter than the limit", () => {
+  const msgs = [{ role: "user" as const, blocks: [{ type: "text" as const, text: "only" }] }];
+
+  const r = sliceMessages(msgs, { limit: 50 });
+
+  assert.equal(r.total, 1);
+  assert.equal(r.start, 0, "start 0 means the beginning of the conversation is included");
+  assert.equal(r.truncated, false);
+  assert.equal(r.messages.length, 1);
+});
+
+test("sliceMessages serves an absolute half-open range", () => {
+  const msgs = Array.from({ length: 10 }, (_, i) => ({
+    role: "user" as const, blocks: [{ type: "text" as const, text: "m" + i }],
+  }));
+
+  const r = sliceMessages(msgs, { from: 2, to: 5 });
+
+  assert.deepEqual(r.messages.map((m) => m.blocks[0].text), ["m2", "m3", "m4"], "`to` is exclusive");
+  assert.equal(r.start, 2);
+  assert.equal(r.total, 10);
+  assert.equal(r.truncated, true, "messages older than index 2 exist");
+});
+
+test("sliceMessages clamps an out-of-bounds range instead of throwing", () => {
+  const msgs = Array.from({ length: 4 }, (_, i) => ({
+    role: "user" as const, blocks: [{ type: "text" as const, text: "m" + i }],
+  }));
+
+  const low = sliceMessages(msgs, { from: -5, to: 2 });
+  assert.deepEqual(low.messages.map((m) => m.blocks[0].text), ["m0", "m1"]);
+  assert.equal(low.start, 0);
+  assert.equal(low.truncated, false, "clamped to the beginning, so nothing older remains");
+
+  const high = sliceMessages(msgs, { from: 3, to: 99 });
+  assert.deepEqual(high.messages.map((m) => m.blocks[0].text), ["m3"]);
+  assert.equal(high.start, 3);
+
+  const past = sliceMessages(msgs, { from: 10, to: 20 });
+  assert.deepEqual(past.messages, [], "a range entirely past the end is empty, not an error");
+  assert.equal(past.start, 4);
+
+  const inverted = sliceMessages(msgs, { from: 3, to: 1 });
+  assert.deepEqual(inverted.messages, [], "to < from yields an empty page rather than a reversed slice");
+  assert.equal(inverted.start, 3);
+});
+
+test("sliceMessages caps a range at the 2000-message page limit", () => {
+  const msgs = Array.from({ length: 2500 }, (_, i) => ({
+    role: "user" as const, blocks: [{ type: "text" as const, text: "m" + i }],
+  }));
+
+  const r = sliceMessages(msgs, { from: 0, to: 2500 });
+
+  assert.equal(r.messages.length, 2000, "an oversized range is capped, not rejected");
+  assert.equal(r.start, 0);
 });
