@@ -887,9 +887,9 @@ const INTERRUPT_MARKERS = new Set([
   "[Request interrupted by user for tool use]",
 ]);
 
-export async function readClaudeHistoryMessages(file: string, sessionId: string, limit: number): Promise<HistoryMessagesResult> {
+async function parseClaudeHistoryMessages(file: string, sessionId: string): Promise<ViewMessage[]> {
   const rl = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-  const msgs: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }> = [];
+  const msgs: ViewMessage[] = [];
   const toolById = new Map<string, ViewBlock>(); // pair tool_result output/status onto its tool_use block
   for await (const line of rl) {
     const t = line.trim();
@@ -914,7 +914,11 @@ export async function readClaudeHistoryMessages(file: string, sessionId: string,
     if (!blocks.length) continue; // skip tool-result-only / empty turns
     msgs.push({ role, blocks });
   }
-  return sliceMessages(msgs, { limit });
+  return msgs;
+}
+
+export async function readClaudeHistoryMessages(file: string, sessionId: string, limit: number): Promise<HistoryMessagesResult> {
+  return sliceMessages(await parseClaudeHistoryMessages(file, sessionId), { limit });
 }
 
 type CodexIndexEntry = { id: string; thread_name?: string; updated_at?: string };
@@ -1146,9 +1150,9 @@ async function deleteCodexSession(sessionId: string, opts?: DeleteHistoryOpts): 
   return true;
 }
 
-async function readCodexHistoryMessages(file: string, limit: number): Promise<HistoryMessagesResult> {
+async function parseCodexHistoryMessages(file: string): Promise<ViewMessage[]> {
   const rl = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-  const msgs: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }> = [];
+  const msgs: ViewMessage[] = [];
   const toolById = new Map<string, ViewBlock>();
   for await (const line of rl) {
     const t = line.trim();
@@ -1179,7 +1183,7 @@ async function readCodexHistoryMessages(file: string, limit: number): Promise<Hi
       if (text) msgs.push({ role: "assistant", blocks: [{ type: "thought", text }] });
     }
   }
-  return sliceMessages(msgs, { limit });
+  return msgs;
 }
 
 // Locate a Codex rollout by session id alone. Unlike findCodexSessionFile, this
@@ -1395,9 +1399,9 @@ function openCodePartBlock(part: OpenCodePart): ViewBlock | null {
   }
 }
 
-async function readOpenCodeHistoryMessages(sessionId: string, limit: number): Promise<HistoryMessagesResult> {
-  const msgs = withOpenCodeDb((db) => {
-    const out: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }> = [];
+function parseOpenCodeHistoryMessages(sessionId: string): ViewMessage[] {
+  return withOpenCodeDb((db) => {
+    const out: ViewMessage[] = [];
     const messages = db.prepare(
       "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id",
     ).all(sessionId) as Array<{ id: string; data: string }>;
@@ -1415,8 +1419,7 @@ async function readOpenCodeHistoryMessages(sessionId: string, limit: number): Pr
       if (blocks.length) out.push({ role, blocks });
     }
     return out;
-  }, [] as Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }>);
-  return sliceMessages(msgs, { limit });
+  }, [] as ViewMessage[]);
 }
 
 // Delete an opencode conversation. Unlike claude/codex there is no file to
@@ -1446,7 +1449,14 @@ export async function listAgentHistory(cmd: string, cwd: string, limit: number, 
   return [];
 }
 
-export async function readAgentHistoryMessages(cmd: string, cwd: string, sessionId: string, limit: number, opts?: { projectsRoot?: string }): Promise<HistoryMessagesResult | null> {
+export async function readAgentHistoryMessages(
+  cmd: string,
+  cwd: string,
+  sessionId: string,
+  limit: number,
+  opts?: { projectsRoot?: string; from?: number; to?: number },
+): Promise<HistoryMessagesResult | null> {
+  const page = { limit, from: opts?.from, to: opts?.to };
   const provider = historyProviderFor(cmd);
   if (provider === "claude") {
     // Resolve via the computed path first, then by session id anywhere under
@@ -1455,12 +1465,12 @@ export async function readAgentHistoryMessages(cmd: string, cwd: string, session
     const base = opts?.projectsRoot ?? claudeProjectsRoot();
     const file = await findClaudeSessionFile(cwd, sessionId, base);
     if (!file || !file.startsWith(base + path.sep)) return null;
-    return readClaudeHistoryMessages(file, sessionId, limit);
+    return sliceMessages(await parseClaudeHistoryMessages(file, sessionId), page);
   }
   if (provider === "codex") {
     const found = await findCodexSessionFile(cwd, sessionId);
     if (!found) return null;
-    return readCodexHistoryMessages(found.file, limit);
+    return sliceMessages(await parseCodexHistoryMessages(found.file), page);
   }
   if (provider === "opencode") {
     // Scope to the requesting cwd: the id is globally unique, but confirm the
@@ -1468,7 +1478,7 @@ export async function readAgentHistoryMessages(cmd: string, cwd: string, session
     const sessions = listOpenCodeSessions();
     const found = sessions.find((s) => s.id === sessionId && typeof s.directory === "string" && sameCwd(s.directory, cwd));
     if (!found) return null;
-    return readOpenCodeHistoryMessages(sessionId, limit);
+    return sliceMessages(parseOpenCodeHistoryMessages(sessionId), page);
   }
   return null;
 }
