@@ -835,3 +835,23 @@ test("readAgentHistoryMessages serves an absolute range for a claude transcript"
   assert.equal(head?.start, 0);
   assert.equal(head?.truncated, false, "reaching index 0 reports nothing older");
 });
+
+test("repeated page fetches reuse the parsed transcript until the file changes", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const sid = "55555555-aaaa-bbbb-cccc-000000000005";
+  const line = (i: number) => ({
+    type: "user", cwd: "/repo", sessionId: sid, message: { role: "user", content: "m" + i },
+  });
+  const file = writeClaudeProjectTranscript(projectsRoot, "-repo", sid, [line(0), line(1)], 3000);
+
+  const first = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 10, { projectsRoot });
+  assert.equal(first?.total, 2);
+
+  // Rewrite with a different length AND a new mtime — the cache key must notice.
+  const when = new Date(9000);
+  fs.writeFileSync(file, [line(0), line(1), line(2)].map((l) => JSON.stringify(l)).join("\n") + "\n");
+  fs.utimesSync(file, when, when);
+
+  const second = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 10, { projectsRoot });
+  assert.equal(second?.total, 3, "a changed transcript is re-parsed, never served from a stale cache");
+});

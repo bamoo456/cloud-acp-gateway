@@ -578,6 +578,33 @@ export function sliceMessages(
   };
 }
 
+// Paging re-reads the same transcript once per page, so hold the parsed result
+// against the file's stat. mtime+size changes on every append, so a running
+// conversation can never be served a stale tail. Small LRU: the working set is
+// "the conversations someone is scrolling through right now".
+const HISTORY_PARSE_CACHE_MAX = 8;
+const historyParseCache = new Map<string, { mtimeMs: number; size: number; msgs: ViewMessage[] }>();
+
+async function cachedParse(file: string, parse: () => Promise<ViewMessage[]>): Promise<ViewMessage[]> {
+  let stat: fs.Stats;
+  try { stat = await fs.promises.stat(file); } catch { return parse(); }
+  const hit = historyParseCache.get(file);
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+    historyParseCache.delete(file);          // re-insert to move it to the LRU tail
+    historyParseCache.set(file, hit);
+    return hit.msgs;
+  }
+  const msgs = await parse();
+  historyParseCache.delete(file);
+  historyParseCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, msgs });
+  while (historyParseCache.size > HISTORY_PARSE_CACHE_MAX) {
+    const oldest = historyParseCache.keys().next().value;
+    if (oldest === undefined) break;
+    historyParseCache.delete(oldest);
+  }
+  return msgs;
+}
+
 // Flatten a tool_result's content (string | block array) to text, capped so a
 // huge tool output (e.g. a big file read) doesn't bloat the history payload.
 function toolResultText(content: unknown): string {
@@ -1465,12 +1492,12 @@ export async function readAgentHistoryMessages(
     const base = opts?.projectsRoot ?? claudeProjectsRoot();
     const file = await findClaudeSessionFile(cwd, sessionId, base);
     if (!file || !file.startsWith(base + path.sep)) return null;
-    return sliceMessages(await parseClaudeHistoryMessages(file, sessionId), page);
+    return sliceMessages(await cachedParse(file, () => parseClaudeHistoryMessages(file, sessionId)), page);
   }
   if (provider === "codex") {
     const found = await findCodexSessionFile(cwd, sessionId);
     if (!found) return null;
-    return sliceMessages(await parseCodexHistoryMessages(found.file), page);
+    return sliceMessages(await cachedParse(found.file, () => parseCodexHistoryMessages(found.file)), page);
   }
   if (provider === "opencode") {
     // Scope to the requesting cwd: the id is globally unique, but confirm the
