@@ -1746,12 +1746,104 @@ export const SESSION_IDLE_TTL_MS = Math.max(10_000, Number(process.env.ACPG_SESS
 // a phantom bolt badge, and /history/session refuses to delete the conversation
 // with 409 "conversation is running" for the whole window.
 export const TASK_TTL_MS = SESSION_IDLE_TTL_MS + 60_000;
-// Gateway-originated requests (the reaping session/close and the transparent
-// session/load) carry a fake origin conn id so their agent response/replay routes
-// to no real connection and is harmlessly dropped. Two distinct ids so logs can
-// tell which path a stray frame came from.
+// Gateway-originated requests (the reaping session/close, the transparent
+// session/load, and the control re-apply below) carry a fake origin conn id so
+// their agent response/replay routes to no real connection and is harmlessly
+// dropped. Distinct ids so logs can tell which path a stray frame came from.
 const CLOSE_SENTINEL = "__gw_close__";
 const REVIVE_SENTINEL = "__gw_revive__";
+const CONTROL_SENTINEL = "__gw_control__";
+
+// --- session controls across a rebuilt session ------------------------------
+// claude-agent-acp keeps a session's mode/model/effort/agent in the adapter's
+// memory only — the transcript is written to disk, these are not. So a session
+// that left memory (reaped above, LRU-evicted, adapter restarted, or its
+// session-defining params changed) comes back from `session/load` at its
+// DEFAULTS, silently discarding what the user chose. No client can repair that on
+// its own: a revive's load response routes to a sentinel and is dropped, so the
+// client never even sees it, and several clients each re-applying their own
+// last-known values would fight each other. The gateway therefore remembers the
+// values it saw a client set and puts them back after a load, before anything
+// else reaches the rebuilt session.
+//
+// Held in memory only: a gateway restart takes the agent process — and every
+// session with it — so remembered values would have nothing to apply to.
+//
+// How long to wait for the adapter to acknowledge one re-applied control. A
+// re-apply holds that session's parked frames, and a prompt held forever is worse
+// than a prompt that runs in the wrong mode, so the wait is bounded and the frames
+// go through either way. Read per call so tests can shorten it.
+const controlAckTimeoutMs = (): number =>
+  Math.max(50, Number(process.env.ACPG_CONTROL_ACK_TIMEOUT_MS) || 5_000);
+
+// The two ways a client sets a session control. The adapter models mode as a
+// config option too, so `session/set_mode` is recorded under the same `mode` id
+// and both paths stay comparable.
+function controlOf(method: string, params: unknown): { configId: string; value: string } | null {
+  const p = (params ?? {}) as { configId?: unknown; value?: unknown; modeId?: unknown };
+  if (method === "session/set_mode" && typeof p.modeId === "string") {
+    return { configId: "mode", value: p.modeId };
+  }
+  if (method === "session/set_config_option" && typeof p.configId === "string" && typeof p.value === "string") {
+    return { configId: p.configId, value: p.value };
+  }
+  return null;
+}
+
+// What a session/load (or session/set_config_option) result says this session's
+// controls currently are, and which values it will accept. `null` when the result
+// carries no control information at all (an agent with neither concept, or a bare
+// `{ sessionId }`) — nothing to compare against means nothing to re-apply.
+function controlSnapshot(result: unknown): {
+  values: Map<string, string>;
+  allowed: Map<string, Set<string>>;
+  // Ids the result described ONLY as a mode, which must go back via
+  // session/set_mode — session/set_config_option would be an unknown method there.
+  viaSetMode: Set<string>;
+} | null {
+  const r = (result ?? {}) as { configOptions?: unknown; modes?: { currentModeId?: unknown; availableModes?: unknown } };
+  const values = new Map<string, string>();
+  const allowed = new Map<string, Set<string>>();
+  const viaSetMode = new Set<string>();
+  let sawAny = false;
+  // `modes` first so that an agent reporting both has its configOptions win — and
+  // the mode go back the way the client set it.
+  if (r.modes && typeof r.modes === "object") {
+    sawAny = true;
+    if (typeof r.modes.currentModeId === "string") values.set("mode", r.modes.currentModeId);
+    if (Array.isArray(r.modes.availableModes)) {
+      allowed.set("mode", new Set(r.modes.availableModes
+        .map((m) => (m as { id?: unknown }).id)
+        .filter((id): id is string => typeof id === "string")));
+    }
+    viaSetMode.add("mode");
+  }
+  if (Array.isArray(r.configOptions)) {
+    sawAny = true;
+    for (const raw of r.configOptions) {
+      const o = raw as { id?: unknown; currentValue?: unknown; options?: unknown };
+      if (typeof o.id !== "string") continue;
+      if (typeof o.currentValue === "string") values.set(o.id, o.currentValue);
+      if (Array.isArray(o.options)) {
+        // Options may be grouped (a group carries its own `options` array).
+        const flat = o.options.flatMap((c) => {
+          const g = c as { options?: unknown };
+          return Array.isArray(g.options) ? g.options : [c];
+        });
+        allowed.set(o.id, new Set(flat
+          .map((c) => (c as { value?: unknown }).value)
+          .filter((v): v is string => typeof v === "string")));
+      }
+      viaSetMode.delete(o.id);
+    }
+  }
+  return sawAny ? { values, allowed, viaSetMode } : null;
+}
+
+// Re-apply order. Switching model rebuilds the effort options and can clamp mode
+// back to default (the adapter's own reconciliation), so it goes first and the
+// rest is applied on top of the settled list instead of against it.
+const controlRank = (configId: string): number => (configId === "model" ? 0 : configId === "mode" ? 1 : 2);
 
 // One running agent + its ledger + the set of connections attached to it.
 // Routes agent↔client frames: notifications broadcast to all conns; responses
@@ -1834,6 +1926,22 @@ class Channel {
   // Client frames parked behind an in-flight transparent re-load (sid → frames +
   // originating conn), flushed in order once the load response returns.
   private reviveQueue = new Map<string, Array<{ connId: string; line: Buffer }>>();
+  // sessionId -> the controls a client last successfully applied (config option id
+  // -> value; `mode` covers session/set_mode too). Put back after a load that
+  // shows the session came back at its defaults — see the section above. NOT
+  // cleared when the agent exits: surviving the restart is the point.
+  private sessionControls = new Map<string, Map<string, string>>();
+  // gateway req id -> the control a client is setting, so its response can be
+  // attributed to a session and option (session/set_mode answers with `{}`).
+  private controlReq = new Map<number, { sid: string; configId: string; value: string }>();
+  // gateway req id -> waiter for a control the GATEWAY re-applied. Those responses
+  // route to CONTROL_SENTINEL and are dropped, so this is how the re-apply learns
+  // they landed.
+  private controlAck = new Map<number, (f: Frame) => void>();
+  // Sessions whose controls are being re-applied right now. Client frames for them
+  // park like a reaped session's do, so nothing reaches the session between the
+  // load and the values it is supposed to run with.
+  private controlGate = new Set<string>();
 
   constructor(
     public name: string,
@@ -1906,6 +2014,14 @@ class Channel {
     this.liveSessions.clear();
     this.reaped.clear();
     this.reviveQueue.clear();
+    // In-flight control bookkeeping refers to requests this process will never
+    // answer. `sessionControls` deliberately stays: the respawned agent rebuilds
+    // its sessions at their defaults, which is exactly when it is needed. A gated
+    // session's parked frames went with reviveQueue above, so release the gate too
+    // or later frames for it would park with nothing to flush them.
+    this.controlReq.clear();
+    this.controlAck.clear();
+    this.controlGate.clear();
     // The respawned process is fresh and uninitialized: drop the cached handshake
     // so the next client `initialize` is forwarded to re-handshake it. Any client
     // parked waiting on the (now-dead) first initialize had its in-flight request
@@ -2122,6 +2238,24 @@ class Channel {
           this.store?.cancelInboxForSession(this.name, endedSid, new Date().toISOString());
         }
       }
+      // A control the gateway re-applied: hand it to the waiter that is holding
+      // this session's parked frames. Keyed by gateway id for the same reason as
+      // the prompt above, and resolved before the origin lookup because its origin
+      // is a sentinel with nothing to route to.
+      const ack = this.controlAck.get(Number(f.id));
+      if (ack) {
+        this.controlAck.delete(Number(f.id));
+        this.idmux.inbound(Number(f.id)); // consume the entry we registered
+        ack(f);
+        return;
+      }
+      // A control the client set and the adapter accepted: remember it so a later
+      // load can put it back.
+      const ctl = this.controlReq.get(Number(f.id));
+      if (ctl) {
+        this.controlReq.delete(Number(f.id));
+        if (f.error === undefined) this.rememberControls(ctl, f.result);
+      }
       const origin = this.idmux.inbound(Number(f.id));
       if (!origin) return;
       // The agent's `initialize` response carries its true capabilities — surface
@@ -2171,19 +2305,16 @@ class Channel {
         for (const p of this.pendingPerms.values()) {
           if (p.sid === loaded) this.sendTo(origin.connId, p.seq, p.frame);
         }
-        // A transparent re-load (we reaped the session, then a client touched it)
-        // just finished re-establishing it in the adapter — flush the client frames
-        // that were parked behind it, in arrival order, now that prompts won't hit
-        // "Session not found". Conns that dropped meanwhile are skipped.
-        const queued = this.reviveQueue.get(loaded);
-        if (queued) {
-          this.reviveQueue.delete(loaded);
-          for (const item of queued) {
-            const c = this.conns.get(item.connId);
-            const qf = c && parse(item.line);
-            if (c && qf) this.forwardClientRequest(c, qf, item.line);
-          }
-        }
+        // This load may have rebuilt the session from disk, which resets every
+        // control to its default — the result is the only place that says what it
+        // came back as. Put the client's choices back first: a prompt parked behind
+        // a revive is about to run, and it must not run in a mode the user turned
+        // off. The flush is deferred to the re-apply, which always performs it.
+        // A re-apply already running for this session owns the queue (and will
+        // flush it) — a second one racing it would fight over the same values.
+        const diff = this.controlGate.has(loaded) ? [] : this.controlDiff(loaded, f.result);
+        if (diff.length) void this.reapplyControls(loaded, diff);
+        else if (!this.controlGate.has(loaded)) this.flushRevive(loaded);
       }
       return;
     }
@@ -2281,6 +2412,13 @@ class Channel {
         return;
       }
       const sid = sessionIdOf(f);
+      // The session's controls are being put back after a load. Park behind that
+      // for the same reason the revive parks: whatever this frame is, it should
+      // meet the session the user configured, not the defaults it was rebuilt at.
+      if (sid && this.controlGate.has(sid) && method !== "session/load") {
+        this.parkFrame(conn, sid, line);
+        return;
+      }
       // A client touched a session we reaped to reclaim its CLI: transparently
       // re-load it in the adapter before forwarding, so the client never sees the
       // adapter's "Session not found". A session/load already re-establishes it
@@ -2376,6 +2514,11 @@ class Channel {
       this.promptReq.set(gatewayId, sid);
       this.promptsInFlight.set(sid, (this.promptsInFlight.get(sid) ?? 0) + 1);
     }
+    // Remember what this client is setting, to be confirmed (and canonicalized)
+    // by the response — the value the adapter settled on is what a rebuilt session
+    // has to be brought back to.
+    const ctl = controlOf(method, f.params);
+    if (ctl && sid) this.controlReq.set(gatewayId, { sid, ...ctl });
     const out = Buffer.from(JSON.stringify({ ...f, id: gatewayId }));
     // Gate this session's replay to the loader until the load response returns.
     if (method === "session/load" && sid) {
@@ -2398,10 +2541,7 @@ class Channel {
   // the same session queue behind the single in-flight load.
   private reviveThenForward(conn: Conn, sid: string, cwd: string | null, line: Buffer): void {
     const loadCwd = cwd ?? this.reaped.get(sid)?.cwd ?? "";
-    const q = this.reviveQueue.get(sid) ?? [];
-    q.push({ connId: conn.id, line });
-    this.reviveQueue.set(sid, q);
-    this.subs.subscribe(conn.id, sid);
+    const q = this.parkFrame(conn, sid, line);
     if (q.length > 1) return; // a re-load is already in flight for this session
     this.touchSession(sid, loadCwd || undefined); // re-tracks it (and clears `reaped`)
     const gid = this.idmux.outbound(REVIVE_SENTINEL, `revive:${sid}`, "session/load", sid, loadCwd || undefined);
@@ -2410,6 +2550,135 @@ class Channel {
     const out = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: gid, method: "session/load", params: { sessionId: sid, cwd: loadCwd, mcpServers: [] } }));
     if (this.isCodex) { void this.loadCodexWithRepair(sid, out); return; }
     this.agent.send(out);
+  }
+
+  // Hold a client frame until this session is ready for it (an in-flight re-load,
+  // or a control re-apply). Returns the queue so a caller can tell whether it is
+  // the one that has to start the work.
+  private parkFrame(conn: Conn, sid: string, line: Buffer): Array<{ connId: string; line: Buffer }> {
+    const q = this.reviveQueue.get(sid) ?? [];
+    q.push({ connId: conn.id, line });
+    this.reviveQueue.set(sid, q);
+    this.subs.subscribe(conn.id, sid);
+    return q;
+  }
+
+  // Let this session's parked frames through, in arrival order, now that the
+  // adapter will accept them (the session is re-established and its controls are
+  // back). Conns that dropped meanwhile are skipped.
+  private flushRevive(sid: string): void {
+    const queued = this.reviveQueue.get(sid);
+    if (!queued) return;
+    this.reviveQueue.delete(sid);
+    for (const item of queued) {
+      const c = this.conns.get(item.connId);
+      const qf = c && parse(item.line);
+      if (c && qf) this.forwardClientRequest(c, qf, item.line);
+    }
+  }
+
+  // Record a control a client just set, from the adapter's own answer where it has
+  // one: the response carries the full option list, so an alias it resolved
+  // ("opus" → a model id) is stored as the id, and a value it clamped is stored as
+  // clamped. Re-applying what the client asked for instead would mean fighting the
+  // adapter's reconciliation on every single load.
+  private rememberControls(ctl: { sid: string; configId: string; value: string }, result: unknown): void {
+    const snapshot = controlSnapshot(result);
+    const tracked = this.sessionControls.get(ctl.sid) ?? new Map<string, string>();
+    tracked.set(ctl.configId, snapshot?.values.get(ctl.configId) ?? ctl.value);
+    // Setting `model` can clamp `mode` back to default in the same response, so
+    // refresh everything else already tracked from that same snapshot.
+    if (snapshot) {
+      for (const id of tracked.keys()) {
+        const v = snapshot.values.get(id);
+        if (v !== undefined) tracked.set(id, v);
+      }
+    }
+    // Bound it (LRU, like rememberReaped) so a long-lived gateway doesn't keep one
+    // entry per session ever configured. Deliberately larger than
+    // MAX_LIVE_SESSIONS: these have to outlive the reaping that loses them.
+    this.sessionControls.delete(ctl.sid);
+    this.sessionControls.set(ctl.sid, tracked);
+    while (this.sessionControls.size > 64) {
+      const k = this.sessionControls.keys().next().value as string | undefined;
+      if (k === undefined) break;
+      this.sessionControls.delete(k);
+    }
+  }
+
+  // What this load result would silently change about the session's controls, in
+  // the order the values have to go back. Values the result no longer offers are
+  // dropped rather than pushed: a session rebuilt by a newer adapter (or with a
+  // different model) can legitimately have stopped supporting them, and a rejected
+  // re-apply would just log noise on every load.
+  private controlDiff(sid: string, result: unknown): Array<{ configId: string; value: string; viaSetMode: boolean }> {
+    const tracked = this.sessionControls.get(sid);
+    if (!tracked?.size) return [];
+    const snapshot = controlSnapshot(result);
+    if (!snapshot) return [];
+    const out: Array<{ configId: string; value: string; viaSetMode: boolean }> = [];
+    for (const [configId, value] of tracked) {
+      if (snapshot.values.get(configId) === value) continue; // already what we want
+      if (!snapshot.values.has(configId)) continue; // the option itself is gone
+      const allowed = snapshot.allowed.get(configId);
+      if (allowed && !allowed.has(value)) continue; // the value is no longer offered
+      out.push({ configId, value, viaSetMode: snapshot.viaSetMode.has(configId) });
+    }
+    return out.sort((a, b) => controlRank(a.configId) - controlRank(b.configId));
+  }
+
+  // Put the session's controls back, one at a time (each depends on the list the
+  // previous one left behind), then tell the clients. Always releases the session's
+  // parked frames, however this goes: the values are worth a round trip each, but
+  // not the user's prompt.
+  private async reapplyControls(sid: string, diff: Array<{ configId: string; value: string; viaSetMode: boolean }>): Promise<void> {
+    this.controlGate.add(sid);
+    let applied: unknown;
+    try {
+      for (const c of diff) {
+        const res = await this.sendControl(sid, c);
+        // No answer, or a refusal: stop here rather than push the rest at an
+        // adapter that has already disagreed with us once.
+        if (!res || res.error !== undefined) break;
+        applied = res.result ?? applied;
+      }
+      if (applied !== undefined) this.broadcastConfigOptions(sid, applied);
+    } finally {
+      this.controlGate.delete(sid);
+      this.flushRevive(sid);
+    }
+  }
+
+  // Issue one control change as the gateway (not as any client) and wait for the
+  // adapter's answer. Resolves null if it never comes — see controlAckTimeoutMs.
+  private sendControl(sid: string, c: { configId: string; value: string; viaSetMode: boolean }): Promise<Frame | null> {
+    const method = c.viaSetMode ? "session/set_mode" : "session/set_config_option";
+    const params = c.viaSetMode
+      ? { sessionId: sid, modeId: c.value }
+      : { sessionId: sid, configId: c.configId, value: c.value };
+    const gid = this.idmux.outbound(CONTROL_SENTINEL, `control:${sid}:${c.configId}`, method, sid);
+    return new Promise<Frame | null>((resolve) => {
+      const timer = setTimeout(() => { this.controlAck.delete(gid); resolve(null); }, controlAckTimeoutMs());
+      this.controlAck.set(gid, (f) => { clearTimeout(timer); resolve(f); });
+      this.agent.send(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: gid, method, params })));
+    });
+  }
+
+  // Tell every client what the re-applied controls now are. Necessary because the
+  // adapter answers session/set_config_option with the full option list but emits
+  // no notification for it, and this response went to CONTROL_SENTINEL — so
+  // without synthesizing the notification the clients would keep rendering the
+  // defaults the load reported (or, worse, the values they never lost).
+  private broadcastConfigOptions(sid: string, result: unknown): void {
+    const configOptions = (result as { configOptions?: unknown } | null)?.configOptions;
+    if (!Array.isArray(configOptions)) return;
+    const frame = Buffer.from(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: sid, update: { sessionUpdate: "config_option_update", configOptions } },
+    }));
+    const { seq } = this.ledger.append(frame, sid);
+    this.broadcast(seq, frame);
   }
 
   // Answer an outstanding permission from the server side (the /inbox endpoint),
