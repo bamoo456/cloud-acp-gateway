@@ -170,4 +170,11 @@ export interface Session {
   toolItemId: Record<string, string>; // toolCallId -> ThreadItem.id
   planItemId: string | null;
   seq: number; // monotonic id source for this session's items
+  // Transcript index that items[0] corresponds to. 0 = the beginning of the
+  // conversation is loaded and there is nothing older to fetch. Only the two
+  // paths that read /history/messages ever set this above 0; every other path
+  // (new session, adopt, resync's full replay) inherits the makeSession default,
+  // which is correct because their items always cover the whole transcript.
+  historyStart: number;
+  loadingOlder: boolean; // an older-page fetch is in flight
 }

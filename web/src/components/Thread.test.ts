@@ -61,7 +61,7 @@ describe("Thread empty state agent icon", () => {
     const session: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: false,
-      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1, historyStart: 0, loadingOlder: false,
       items: [{ id: "m1", kind: "assistant", text: "hello" }],
     };
 
@@ -114,7 +114,7 @@ describe("Thread empty state agent icon", () => {
     const session: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: false,
-      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1, historyStart: 0, loadingOlder: false,
       items: [{ id: "m1", kind: "assistant", text: "hello" }],
     };
 
@@ -161,7 +161,7 @@ describe("Thread empty state agent icon", () => {
     const base: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: false,
-      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1, historyStart: 0, loadingOlder: false,
       items: [{ id: "m1", kind: "assistant", text: "hello" }],
     };
 
@@ -219,7 +219,7 @@ describe("Thread empty state agent icon", () => {
     const base: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: true,
-      curAssistantId: null, curThoughtId: null, toolItemId: { c1: "t1" }, planItemId: null, seq: 1,
+      curAssistantId: null, curThoughtId: null, toolItemId: { c1: "t1" }, planItemId: null, seq: 1, historyStart: 0, loadingOlder: false,
       items: [
         { id: "m1", kind: "assistant", text: "hello" },
         { id: "t1", kind: "tool", toolCallId: "c1", title: "Read", toolKind: "read", status: "pending", locations: [], content: [] },

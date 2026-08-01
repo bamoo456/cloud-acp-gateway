@@ -145,3 +145,10 @@ describe("session helpers", () => {
     expect(asst.images).toEqual([{ mimeType: "image/jpeg", data: "BBBB", uri: undefined }]);
   });
 });
+
+test("a fresh session starts at the beginning of its transcript", () => {
+  const s = makeSession("s1", 0, { agentName: "claude", cwd: "/repo" });
+
+  expect(s.historyStart).toBe(0);
+  expect(s.loadingOlder).toBe(false);
+});
