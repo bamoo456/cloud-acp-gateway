@@ -1784,4 +1784,108 @@ describe("store notification routing", () => {
 
     expect(useStore.getState().sessions["short-session"].historyStart).toBe(0);
   });
+  test("loadOlderMessages prepends the previous page and walks the cursor back", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "newest" }] }],
+        total: 120, start: 100, truncated: true,
+      }),
+    }));
+    await useStore.getState().openHistorySession({ sessionId: "s", title: "S" });
+    await flush();
+
+    setHistoryFetch((url) => {
+      expect(url).toContain("from=50");
+      expect(url).toContain("to=100");
+      return Promise.resolve({
+        json: () => Promise.resolve({
+          messages: [{ role: "user", blocks: [{ type: "text", text: "older" }] }],
+          total: 120, start: 50, truncated: true,
+        }),
+      });
+    });
+
+    await useStore.getState().loadOlderMessages("s");
+    await flush();
+
+    const s = useStore.getState().sessions["s"];
+    expect(s.historyStart).toBe(50);
+    expect(s.items[0]).toMatchObject({ kind: "user", text: "older" });
+    expect(s.items.map((i) => i.id)).toEqual([...new Set(s.items.map((i) => i.id))]);
+    expect(s.loadingOlder).toBe(false);
+  });
+
+  test("loadOlderMessages stops at the beginning of the conversation", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "tail" }] }],
+        total: 30, start: 20, truncated: true,
+      }),
+    }));
+    await useStore.getState().openHistorySession({ sessionId: "s", title: "S" });
+    await flush();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "head" }] }],
+        total: 30, start: 0, truncated: false,
+      }),
+    }));
+    await useStore.getState().loadOlderMessages("s");
+    await flush();
+    expect(useStore.getState().sessions["s"].historyStart).toBe(0);
+
+    const before = historyCalls.length;
+    await useStore.getState().loadOlderMessages("s");
+    await flush();
+    expect(historyCalls.length).toBe(before);
+  });
+
+  test("loadOlderMessages ignores a second call while one is in flight", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({ messages: [], total: 100, start: 50, truncated: true }),
+    }));
+    await useStore.getState().openHistorySession({ sessionId: "s", title: "S" });
+    await flush();
+
+    let release: (v: unknown) => void = () => {};
+    const gate = new Promise((r) => { release = r; });
+    setHistoryFetch(() => gate.then(() => ({
+      json: () => Promise.resolve({ messages: [], total: 100, start: 0, truncated: false }),
+    })));
+
+    const before = historyCalls.length;
+    const first = useStore.getState().loadOlderMessages("s");
+    const second = useStore.getState().loadOlderMessages("s");
+    expect(historyCalls.length).toBe(before + 1);
+
+    release(undefined);
+    await first; await second; await flush();
+    expect(useStore.getState().sessions["s"].loadingOlder).toBe(false);
+  });
+
+  test("a failed older-page fetch keeps the cursor so the user can retry", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({ messages: [], total: 100, start: 50, truncated: true }),
+    }));
+    await useStore.getState().openHistorySession({ sessionId: "s", title: "S" });
+    await flush();
+
+    setHistoryFetch(() => Promise.reject(new Error("offline")));
+    await useStore.getState().loadOlderMessages("s");
+    await flush();
+
+    const s = useStore.getState().sessions["s"];
+    expect(s.historyStart).toBe(50);
+    expect(s.loadingOlder).toBe(false);
+    expect(useStore.getState().tip).toContain("earlier messages");
+  });
 });
