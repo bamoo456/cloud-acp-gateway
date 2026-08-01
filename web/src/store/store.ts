@@ -305,10 +305,10 @@ export const useStore = create<State>((set, get) => {
     sess = { ...sess, viewOnly: true };
     set((st) => ({ sessions: { ...st.sessions, [id]: sess }, activeId: id, cwd, tip: "Loading conversation…" }));
     try {
-      const r = await getMessages(get().agentName, cwd, id);
+      const r = await getMessages(get().agentName, cwd, id, { limit: 50 });
       set((st) => {
         let cur = makeSession(id, st.sessions[id].createdAt, { agentName: get().agentName, cwd });
-        cur = { ...cur, title: st.sessions[id].title, viewOnly: true };
+        cur = { ...cur, title: st.sessions[id].title, viewOnly: true, historyStart: r.start };
         cur = applyHistoryMessages(cur, r.messages);
         const seq = cur.seq + 1;
         cur = { ...cur, seq, curAssistantId: null, curThoughtId: null,
@@ -612,9 +612,10 @@ export const useStore = create<State>((set, get) => {
     try {
       patch(id, (s) => ({ ...s, suppressReplay: true })); // drop the agent's load-replay; render from the history API instead
       const lr = (await acp.request("session/load", { sessionId: id, cwd: get().cwd || "", mcpServers: [] })) as NewSessionResult;
-      const r = await getMessages(get().agentName, get().cwd, id);
+      const r = await getMessages(get().agentName, get().cwd, id, { limit: 50 });
       set((st) => {
-        const cur = applyHistoryMessages(makeSession(id, st.sessions[id]?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd }), r.messages);
+        const base = makeSession(id, st.sessions[id]?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd });
+        const cur = applyHistoryMessages({ ...base, historyStart: r.start }, r.messages);
         const { session, models, modes, configOptions } = applyModelsModes(cur, lr);
         const ready = appendPendingPermissions({ ...session, suppressReplay: false, viewOnly: false }, st.pendingPermissions);
         return {
