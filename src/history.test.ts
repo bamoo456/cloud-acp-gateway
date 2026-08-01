@@ -806,3 +806,32 @@ test("sliceMessages caps a range at the 2000-message page limit", () => {
   assert.equal(r.messages.length, 2000, "an oversized range is capped, not rejected");
   assert.equal(r.start, 0);
 });
+
+test("readAgentHistoryMessages serves an absolute range for a claude transcript", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const sid = "44444444-aaaa-bbbb-cccc-000000000004";
+  const lines = Array.from({ length: 6 }, (_, i) => ({
+    type: "user",
+    cwd: "/repo",
+    sessionId: sid,
+    message: { role: "user", content: "m" + i },
+  }));
+  writeClaudeProjectTranscript(projectsRoot, "-repo", sid, lines, 3000);
+
+  const tail = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 2, { projectsRoot });
+  assert.equal(tail?.total, 6);
+  assert.equal(tail?.start, 4, "the default tail page starts at total - limit");
+
+  const older = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 2, { projectsRoot, from: 1, to: 4 });
+  assert.equal(older?.start, 1);
+  assert.equal(older?.total, 6);
+  assert.deepEqual(
+    older?.messages.map((m) => m.blocks[0].text),
+    ["m1", "m2", "m3"],
+    "the range wins over limit when both are supplied",
+  );
+
+  const head = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 2, { projectsRoot, from: 0, to: 1 });
+  assert.equal(head?.start, 0);
+  assert.equal(head?.truncated, false, "reaching index 0 reports nothing older");
+});
