@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams } from "./gateway.ts";
 import { Db } from "./db.ts";
 
 // The Claude history paths cache derived transcript metadata in the shared prefs
@@ -854,4 +854,23 @@ test("repeated page fetches reuse the parsed transcript until the file changes",
 
   const second = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 10, { projectsRoot });
   assert.equal(second?.total, 3, "a changed transcript is re-parsed, never served from a stale cache");
+});
+
+test("history page params: from/to are optional, integer-only, and range-capped", () => {
+  assert.deepEqual(historyPageParams(new URLSearchParams("")), { limit: 120 });
+  assert.deepEqual(historyPageParams(new URLSearchParams("limit=50")), { limit: 50 });
+  assert.deepEqual(
+    historyPageParams(new URLSearchParams("limit=50&from=10&to=60")),
+    { limit: 50, from: 10, to: 60 },
+  );
+  assert.deepEqual(
+    historyPageParams(new URLSearchParams("from=abc&to=60")),
+    { limit: 120 },
+    "a non-numeric bound drops the whole range rather than guessing a bound",
+  );
+  assert.deepEqual(
+    historyPageParams(new URLSearchParams("from=-5&to=99999")),
+    { limit: 120, from: 0, to: 2000 },
+    "bounds are floored at 0 and the range length capped at MAX_HISTORY_PAGE",
+  );
 });
