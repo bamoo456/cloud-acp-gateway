@@ -1752,4 +1752,36 @@ describe("store notification routing", () => {
     expect(st.recentSessions.map((r) => r.sessionId)).toEqual(["home-session"]);
     expect(st.tip).toContain("still running");
   });
+  test("opening a saved conversation loads 50 messages and remembers where they start", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "recent work" }] }],
+        total: 300, start: 250, truncated: true,
+      }),
+    }));
+
+    await useStore.getState().openHistorySession({ sessionId: "old-session", title: "Old" });
+    await flush();
+
+    expect(historyCalls.at(-1)).toContain("limit=50");
+    expect(useStore.getState().sessions["old-session"].historyStart).toBe(250);
+  });
+
+  test("a conversation shorter than one page reports nothing older to load", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "all of it" }] }],
+        total: 1, start: 0, truncated: false,
+      }),
+    }));
+
+    await useStore.getState().openHistorySession({ sessionId: "short-session", title: "Short" });
+    await flush();
+
+    expect(useStore.getState().sessions["short-session"].historyStart).toBe(0);
+  });
 });
