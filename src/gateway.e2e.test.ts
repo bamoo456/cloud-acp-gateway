@@ -1046,12 +1046,23 @@ test("/history/search answers with the search envelope", async () => {
 // designed to FAIL if the query-string parameter were honoured, not just to
 // exercise the parameter and check for 200 — see the fixture comments for why.
 
-// Codex is the fast, hermetic lever for fsRoot: codexHome() re-reads
-// process.env.CODEX_HOME on every call (unlike CLAUDE_DIR, a module-scope
-// const fixed at import — see the projectsRoot test below for why that
-// matters), so pointing it at a throwaway fixture keeps this test out of the
-// real ~/.codex corpus. ?agent=codex additionally excludes the claude
-// provider, so stage A never touches the real ~/.claude/projects either.
+// What makes the three hermetic, and why none of it can live in this file:
+//   - agents: `npm test` sets ACPG_AGENTS_FILE=agents.test.json, which defines
+//     exactly `claude` and `codex`. cfg.agents is built at import, so a test
+//     cannot set this itself — and without it, ?agent=codex resolves to nothing
+//     on a host whose own agents.json lacks that key, which would make the two
+//     NOT-FOUND assertions below pass for the wrong reason.
+//   - stores: `npm test` also points CLAUDE_CONFIG_DIR and CODEX_HOME at
+//     throwaway dirs. CLAUDE_DIR is a module-scope const fixed at import, so the
+//     shell is the only reach; codexHome() re-reads its env per call, so a test
+//     may additionally swap CODEX_HOME for a fixture of its own.
+// The fixture cwds still live under the real homedir: FS_ROOT defaults there and
+// a candidate outside it is dropped before its file is ever opened, which is the
+// property half of these tests exist to prove.
+
+// Codex is the fast lever for fsRoot: CODEX_HOME re-read per call means this
+// test can point stage A at a rollout it wrote itself. ?agent=codex additionally
+// excludes the claude provider, so stage A never walks a claude store at all.
 test("/history/search ignores a ?fsRoot= override: a codex fixture outside the real FS_ROOT stays excluded", async () => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-fsroot-"));
   // A cwd outside the real FS_ROOT (which defaults to the real homedir) — same
@@ -1089,17 +1100,58 @@ test("/history/search ignores a ?fsRoot= override: a codex fixture outside the r
   }
 });
 
-// projectsRoot has no equivalent lever: claudeProjectsRoot() reads CLAUDE_DIR,
-// a module-scope const fixed at import (gateway.ts), and this file's static
-// `import { handleRequest } from "./gateway.ts"` is hoisted ahead of any
-// process.env mutation a test could make — so this test necessarily walks the
-// real ~/.claude/projects corpus (no way to swap it out from here). Restricted
-// to ?agent=claude (excludes codex) with a needle guaranteed absent from real
-// history, this took ~2.7s measured locally with a cold ACPG_LEDGER_DIR —
-// slower than the codex-lever test above, but not the multi-corpus ~4s the
-// unrestricted envelope test pays. See the report for the measurement and the
-// alternative considered (and rejected as unfalsifiable) — restricting to
-// ?agent=codex here, which would never invoke the projectsRoot codepath at all.
+// The claude store the gateway really reads, for the pair of tests below. It is
+// the throwaway CLAUDE_CONFIG_DIR `npm test` created: CLAUDE_DIR is fixed at
+// import, so this is the only reach — and refusing to run without it is what
+// stops these fixtures from being written into a developer's real ~/.claude.
+function fixtureClaudeProjectsRoot(): string {
+  const dir = process.env.CLAUDE_CONFIG_DIR;
+  assert.ok(dir, "CLAUDE_CONFIG_DIR must point at a throwaway claude store — run this suite via `npm test`");
+  assert.notEqual(path.resolve(dir), path.join(os.homedir(), ".claude"), "refusing to write fixtures into the real ~/.claude");
+  const root = path.join(dir, "projects");
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+// One claude transcript, in the claude JSONL shape stage C parses.
+function writeClaudeFixture(projectsRoot: string, project: string, sessionId: string, cwd: string, text: string) {
+  const dir = path.join(projectsRoot, project);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`),
+    JSON.stringify({ type: "user", cwd, sessionId, message: { role: "user", content: text } }) + "\n");
+}
+
+// The positive control for the claude arm — the sibling the ?projectsRoot= test
+// below had none of. Without it, "not found" there would pass just as happily
+// against a claude provider that never ran, or a fixture shape stage C cannot
+// parse. Asserting the SAME fixture shape IS found from the real projects root
+// is what makes the next test's silence mean something.
+test("/history/search finds a claude fixture sitting in the projects root it actually reads", async () => {
+  const fixtureCwd = fs.mkdtempSync(path.join(os.homedir(), ".acpg-search-test-"));
+  const needle = "clzfoundneedle" + Date.now();
+  writeClaudeFixture(fixtureClaudeProjectsRoot(), "-real-project", "SESSION-FOUND", fixtureCwd, needle);
+
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed(`/history/search?q=${needle}&all=1&agent=claude`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(
+      (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "SESSION-FOUND"),
+      true,
+      "the claude provider must be configured and reading CLAUDE_DIR/projects, or the ?projectsRoot= test below proves nothing",
+    );
+  } finally {
+    await close();
+    fs.rmSync(path.join(fixtureClaudeProjectsRoot(), "-real-project"), { recursive: true, force: true });
+    fs.rmSync(fixtureCwd, { recursive: true, force: true });
+  }
+});
+
+// The negative half of the pair: the SAME fixture shape the test above proves is
+// findable, this time reachable only through ?projectsRoot=. Its absence from
+// the results can therefore mean one thing only — the query string did not move
+// stage A off the projects root the gateway resolves for itself.
 test("/history/search ignores a ?projectsRoot= override: a claude fixture under a fake root is not found", async () => {
   const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-projroot-"));
   // Must resolve within the real FS_ROOT (defaults to the real homedir) so that,
@@ -1107,10 +1159,7 @@ test("/history/search ignores a ?projectsRoot= override: a claude fixture under 
   // otherwise "not found" would prove nothing.
   const fixtureCwd = fs.mkdtempSync(path.join(os.homedir(), ".acpg-search-test-"));
   const needle = "clzprojrootneedle" + Date.now();
-  const projDir = path.join(fakeRoot, "-fake-project");
-  fs.mkdirSync(projDir, { recursive: true });
-  fs.writeFileSync(path.join(projDir, "SESSION-EVIL.jsonl"),
-    JSON.stringify({ type: "user", cwd: fixtureCwd, sessionId: "SESSION-EVIL", message: { role: "user", content: needle } }) + "\n");
+  writeClaudeFixture(fakeRoot, "-fake-project", "SESSION-EVIL", fixtureCwd, needle);
 
   const { authed, close } = await startHttpServer();
   try {
@@ -1120,7 +1169,7 @@ test("/history/search ignores a ?projectsRoot= override: a claude fixture under 
     assert.equal(
       (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "SESSION-EVIL"),
       false,
-      "a query-string projectsRoot must never redirect stage A away from the real ~/.claude/projects",
+      "a query-string projectsRoot must never redirect stage A away from the projects root the gateway resolved for itself",
     );
   } finally {
     await close();
