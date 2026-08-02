@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
-import { getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, putLockConfig } from "./api.ts";
+import { getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, putLockConfig, searchSessions } from "./api.ts";
 
 function mockFetch(json: unknown) {
   globalThis.fetch = vi.fn().mockResolvedValue({ json: () => Promise.resolve(json) } as Response);
@@ -120,5 +120,34 @@ describe("api", () => {
       expect.stringContaining("/prefs/lock"),
       { method: "DELETE", keepalive: true },
     );
+  });
+
+  test("searchSessions builds the query string and maps the envelope", async () => {
+    mockFetch({
+      results: [{ sessionId: "s1", source: "claude-cli", agentName: "claude", cwd: "/repo",
+                  title: "T", updatedAt: "2026-08-01T00:00:00.000Z", hitCount: 2,
+                  hits: [{ index: 7, role: "user", snippet: "…needle…", offsets: [[1, 7]] }] }],
+      truncated: true, cursor: "abc", skipped: ["opencode"],
+      scanned: { files: 3, bytes: 10, ms: 4 },
+    });
+
+    const r = await searchSessions("liquid glass", { all: true, agent: "claude", role: "user", cursor: "abc", limit: 20 });
+
+    const url = lastFetchUrl();
+    expect(url).toContain("/history/search?q=liquid%20glass");
+    expect(url).toContain("&all=1");
+    expect(url).toContain("&agent=claude");
+    expect(url).toContain("&role=user");
+    expect(url).toContain("&cursor=abc");
+    expect(url).toContain("&limit=20");
+    expect(r.results[0].hits[0].index).toBe(7);
+    expect(r.truncated).toBe(true);
+  });
+
+  test("searchSessions omits absent filters and degrades to an empty envelope", async () => {
+    mockFetch({});
+    const r = await searchSessions("needle");
+    expect(r.results).toEqual([]);
+    expect(r.cursor).toBeNull();
   });
 });

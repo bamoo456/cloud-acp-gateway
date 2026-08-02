@@ -259,3 +259,40 @@ export async function answerInbox(agentName: string, reqId: string, optionId: st
     return false;
   }
 }
+
+export interface SearchHit { index: number; role: "user" | "assistant"; snippet: string; offsets: Array<[number, number]>; }
+export interface SearchResultSession {
+  sessionId: string; source: "claude-cli" | "codex-cli"; agentName: string;
+  cwd: string; title: string | null; updatedAt: string; hitCount: number; hits: SearchHit[];
+}
+export interface SearchResponse {
+  results: SearchResultSession[]; truncated: boolean; cursor: string | null;
+  skipped: string[]; scanned: { files: number; bytes: number; ms: number };
+}
+export interface SearchOptions {
+  since?: string; until?: string; all?: boolean;
+  agent?: string; cwd?: string; role?: "user" | "assistant";
+  limit?: number; cursor?: string;
+}
+
+// Content search across conversations. `since`/`until` are date bounds — NOT the
+// `from`/`to` message indices getMessages pages by.
+export async function searchSessions(q: string, opts: SearchOptions = {}): Promise<SearchResponse> {
+  let url = base() + "/history/search?q=" + encodeURIComponent(q);
+  if (opts.since) url += "&since=" + encodeURIComponent(opts.since);
+  if (opts.until) url += "&until=" + encodeURIComponent(opts.until);
+  if (opts.all) url += "&all=1";
+  if (opts.agent) url += "&agent=" + encodeURIComponent(opts.agent);
+  if (opts.cwd) url += "&cwd=" + encodeURIComponent(opts.cwd);
+  if (opts.role) url += "&role=" + encodeURIComponent(opts.role);
+  if (opts.limit) url += "&limit=" + opts.limit;
+  if (opts.cursor) url += "&cursor=" + encodeURIComponent(opts.cursor);
+  const r = await readJson(await fetch(url), "Search isn't available.");
+  return {
+    results: (r && r.results) || [],
+    truncated: !!(r && r.truncated),
+    cursor: (r && r.cursor) || null,
+    skipped: (r && r.skipped) || [],
+    scanned: (r && r.scanned) || { files: 0, bytes: 0, ms: 0 },
+  };
+}
