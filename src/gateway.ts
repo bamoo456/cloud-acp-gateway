@@ -542,7 +542,7 @@ function db(): Db {
 // `tool_result` is internal — used to pair a tool's output/status back onto its
 // `tool_use` block (they live on different messages), then stripped before the
 // view is sent. The client-facing blocks are only text/thought/tool.
-type ViewBlock = {
+export type ViewBlock = {
   type: "text" | "thought" | "tool" | "tool_result" | "image";
   text?: string; name?: string;
   toolCallId?: string; status?: "completed" | "failed"; output?: string;
@@ -551,7 +551,7 @@ type ViewBlock = {
 };
 type HistorySessionItem = { sessionId: string; title: string | null; updatedAt: string };
 type DiscoveredHistorySessionItem = HistorySessionItem & { cwd: string; source: "claude-cli" | "codex-cli" };
-type ViewMessage = { role: "user" | "assistant"; blocks: ViewBlock[] };
+export type ViewMessage = { role: "user" | "assistant"; blocks: ViewBlock[] };
 type HistoryMessagesResult = { messages: ViewMessage[]; total: number; start: number; truncated: boolean };
 
 // One page of a transcript. Two modes: `limit` alone gives the tail (what every
