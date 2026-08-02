@@ -1,4 +1,5 @@
 import type { SearchOptions } from "../lib/api.ts";
+import { IconChevronRight } from "../lib/icons.tsx";
 
 export type FilterState = {
   window: "14d" | "30d" | "all" | "custom";
@@ -53,7 +54,7 @@ export function SearchFilters(props: { value: FilterState; agents: string[]; onC
   const set = (patch: Partial<FilterState>) => onChange({ ...v, ...patch });
   return (
     <details className="search-filters">
-      <summary>進階</summary>
+      <summary><span className="chev"><IconChevronRight /></span>進階</summary>
       <div className="search-filter-row">
         {(["14d", "30d", "all", "custom"] as const).map((w) => (
           <button key={w} className={"chip" + (v.window === w ? " active" : "")} onClick={() => set({ window: w })}>
