@@ -7,6 +7,7 @@ import http from "node:http";
 import { makeTestServer, Gateway, TASK_TTL_MS, handleRequest, type Conn } from "./gateway.ts";
 import { Db } from "./db.ts";
 import { sse, post, sseStatus, USER, TOKEN, parseFrame, type Evt } from "./sse-testclient.ts";
+import { searchQueryParams } from "./search-core.ts";
 
 // Parsed message type
 type Msg = Record<string, unknown>;
@@ -1035,4 +1036,119 @@ test("/history/search answers with the search envelope", async () => {
   } finally {
     await close();
   }
+});
+
+// The three tests below lock in the security properties the route is solely
+// responsible for (search-core.ts and searchTranscripts have no way to enforce
+// them — see the route's own comments in gateway.ts). Without these, a future
+// edit could add e.g. `fsRoot: q.get("fsRoot") ?? undefined` to the options
+// object passed to searchTranscripts and nothing would fail: SearchScope's
+// fields are all optional, so it would compile cleanly. Each assertion is
+// designed to FAIL if the query-string parameter were honoured, not just to
+// exercise the parameter and check for 200 — see the fixture comments for why.
+
+// Codex is the fast, hermetic lever for fsRoot: codexHome() re-reads
+// process.env.CODEX_HOME on every call (unlike CLAUDE_DIR, a module-scope
+// const fixed at import — see the projectsRoot test below for why that
+// matters), so pointing it at a throwaway fixture keeps this test out of the
+// real ~/.codex corpus. ?agent=codex additionally excludes the claude
+// provider, so stage A never touches the real ~/.claude/projects either.
+test("/history/search ignores a ?fsRoot= override: a codex fixture outside the real FS_ROOT stays excluded", async () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-fsroot-"));
+  // A cwd outside the real FS_ROOT (which defaults to the real homedir) — same
+  // shape as history.test.ts's own "outside" fixtures.
+  const outCwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-outcwd-"));
+  const needle = "cdxfsrootneedle" + Date.now();
+  const rolloutDir = path.join(codexHome, "sessions", "2026", "07", "20");
+  fs.mkdirSync(rolloutDir, { recursive: true });
+  fs.writeFileSync(path.join(rolloutDir, "rollout-EVIL.jsonl"), [
+    { type: "session_meta", payload: { id: "CDX-EVIL", cwd: outCwd, timestamp: "2026-07-20T10:00:00.000Z" } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: needle }] } },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const prevCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  const { authed, close } = await startHttpServer();
+  try {
+    // ?fsRoot= names the fixture's OWN out-of-bounds cwd as the root. If the
+    // route ever threaded this into searchCandidates's fsRoot option, the
+    // fixture would sit exactly ON its root and pass the guard trivially —
+    // this is what makes "not found" a real proof, not a vacuous one.
+    const res = await authed(`/history/search?q=${needle}&all=1&agent=codex&fsRoot=${encodeURIComponent(outCwd)}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(
+      (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "CDX-EVIL"),
+      false,
+      "a query-string fsRoot must never widen the real FS_ROOT guard",
+    );
+  } finally {
+    await close();
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prevCodexHome;
+    fs.rmSync(codexHome, { recursive: true, force: true });
+    fs.rmSync(outCwd, { recursive: true, force: true });
+  }
+});
+
+// projectsRoot has no equivalent lever: claudeProjectsRoot() reads CLAUDE_DIR,
+// a module-scope const fixed at import (gateway.ts), and this file's static
+// `import { handleRequest } from "./gateway.ts"` is hoisted ahead of any
+// process.env mutation a test could make — so this test necessarily walks the
+// real ~/.claude/projects corpus (no way to swap it out from here). Restricted
+// to ?agent=claude (excludes codex) with a needle guaranteed absent from real
+// history, this took ~2.7s measured locally with a cold ACPG_LEDGER_DIR —
+// slower than the codex-lever test above, but not the multi-corpus ~4s the
+// unrestricted envelope test pays. See the report for the measurement and the
+// alternative considered (and rejected as unfalsifiable) — restricting to
+// ?agent=codex here, which would never invoke the projectsRoot codepath at all.
+test("/history/search ignores a ?projectsRoot= override: a claude fixture under a fake root is not found", async () => {
+  const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-projroot-"));
+  // Must resolve within the real FS_ROOT (defaults to the real homedir) so that,
+  // if projectsRoot WERE honoured, nothing else would still filter it out —
+  // otherwise "not found" would prove nothing.
+  const fixtureCwd = fs.mkdtempSync(path.join(os.homedir(), ".acpg-search-test-"));
+  const needle = "clzprojrootneedle" + Date.now();
+  const projDir = path.join(fakeRoot, "-fake-project");
+  fs.mkdirSync(projDir, { recursive: true });
+  fs.writeFileSync(path.join(projDir, "SESSION-EVIL.jsonl"),
+    JSON.stringify({ type: "user", cwd: fixtureCwd, sessionId: "SESSION-EVIL", message: { role: "user", content: needle } }) + "\n");
+
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed(`/history/search?q=${needle}&all=1&agent=claude&projectsRoot=${encodeURIComponent(fakeRoot)}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(
+      (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "SESSION-EVIL"),
+      false,
+      "a query-string projectsRoot must never redirect stage A away from the real ~/.claude/projects",
+    );
+  } finally {
+    await close();
+    fs.rmSync(fakeRoot, { recursive: true, force: true });
+    fs.rmSync(fixtureCwd, { recursive: true, force: true });
+  }
+});
+
+// budgetMs has no fixture-based proof that stays fast and non-flaky: forcing
+// stage B to run long enough to observe a budget difference means either many
+// fixture files or slow-enough I/O, and the margin between "budget applied"
+// and "budget ignored" would then depend on this machine's disk/JSON-parse
+// speed — exactly the slow-or-flaky tradeoff the search plan's own budget
+// design (SEARCH_BUDGET_MS, a server constant) exists to avoid taking on. This
+// narrower test pins the one thing that IS deterministic: searchQueryParams,
+// which the route's only other query-derived value (q, since/until/all,
+// agent, role, limit, cursor) all pass through, never surfaces a budgetMs
+// field for the route to accidentally forward. It does NOT prove the route
+// itself stays budgetMs-free if a future edit added
+// `budgetMs: Number(q.get("budgetMs"))` directly to the options literal
+// bypassing searchQueryParams entirely — that gap is real; see the report.
+test("/history/search's query parsing never surfaces a budgetMs field to forward", () => {
+  const params = searchQueryParams(new URLSearchParams("q=needle&budgetMs=60000"), Date.now());
+  assert.ok(params, "a valid query must still parse");
+  assert.equal(
+    (params as unknown as Record<string, unknown>).budgetMs,
+    undefined,
+    "SearchQuery must never carry a budgetMs field through from the query string",
+  );
 });
