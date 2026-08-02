@@ -4,6 +4,7 @@ import { parseQuery } from "./search-core.ts";
 import { buildSnippet, SNIPPET_RADIUS } from "./search-core.ts";
 import { findHits, MAX_HITS_PER_SESSION } from "./search-core.ts";
 import { encodeCursor, decodeCursor, afterCursor } from "./search-core.ts";
+import { searchQueryParams, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, DEFAULT_SINCE_DAYS } from "./search-core.ts";
 import type { ViewMessage } from "./gateway.ts";
 
 test("parseQuery lowercases and splits on whitespace", () => {
@@ -102,4 +103,47 @@ test("afterCursor breaks recency ties on sessionId so resume neither repeats nor
   assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-a" }), true);  // tie, sorts after
   assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-b" }), false); // the cursor itself
   assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-c" }), false); // tie, sorts before
+});
+
+const NOW = Date.parse("2026-08-02T00:00:00.000Z");
+const params = (qs: string) => searchQueryParams(new URLSearchParams(qs), NOW);
+
+test("searchQueryParams defaults to a 14-day window", () => {
+  const p = params("q=liquid");
+  assert.equal(p?.sinceMs, NOW - DEFAULT_SINCE_DAYS * 86400000);
+  assert.equal(p?.untilMs, null);
+  assert.equal(p?.limit, DEFAULT_SEARCH_LIMIT);
+  assert.equal(p?.agents, null);
+  assert.equal(p?.role, null);
+});
+
+test("searchQueryParams drops the window on all=1", () => {
+  assert.equal(params("q=liquid&all=1")?.sinceMs, null);
+});
+
+test("searchQueryParams accepts ISO and epoch-ms instants", () => {
+  assert.equal(params("q=liquid&since=2026-07-01T00:00:00Z")?.sinceMs, Date.parse("2026-07-01T00:00:00Z"));
+  assert.equal(params("q=liquid&until=1754037920000")?.untilMs, 1754037920000);
+});
+
+test("searchQueryParams ignores an unparseable instant rather than inventing one", () => {
+  assert.equal(params("q=liquid&until=yesterday")?.untilMs, null);
+});
+
+test("searchQueryParams clamps the limit and collects repeated agents", () => {
+  assert.equal(params("q=liquid&limit=9999")?.limit, MAX_SEARCH_LIMIT);
+  assert.equal(params("q=liquid&limit=0")?.limit, 1);
+  assert.deepEqual(params("q=liquid&agent=claude&agent=codex")?.agents, ["claude", "codex"]);
+});
+
+test("searchQueryParams rejects a too-short query", () => {
+  assert.equal(params("q=a"), null);
+  assert.equal(params(""), null);
+});
+
+test("searchQueryParams ignores an unusable role and decodes the cursor", () => {
+  assert.equal(params("q=liquid&role=robot")?.role, null);
+  assert.equal(params("q=liquid&role=user")?.role, "user");
+  assert.deepEqual(params("q=liquid&cursor=" + encodeCursor({ recencyMs: 5, sessionId: "s1" }))?.cursor,
+    { recencyMs: 5, sessionId: "s1" });
 });
