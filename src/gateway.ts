@@ -843,9 +843,25 @@ function byClaudeRecency(a: ClaudeRecency, b: ClaudeRecency): number {
 }
 
 // One transcript as the search and discovery paths both see it: located, with
-// the cwd it records and its REAL last activity. `mtime` rides along only as
-// byClaudeRecency's tiebreak — never as a rank of its own (see the comment on
-// byClaudeRecency; phantom touches came through exactly that seam).
+// the cwd it records and its REAL last activity.
+//
+// `mtime` does NOT mean the same thing on both producers, and only the claude
+// arm holds the invariant byClaudeRecency describes:
+//   - claudeTranscriptCandidates: a tiebreak WITHIN a recencyAt rank, never a
+//     rank of its own — that is the seam the phantom touches came through.
+//   - codexTranscriptCandidates: `recencyAt` is session_index.jsonl's
+//     `updated_at` and nothing else, and most rollouts have no index entry at
+//     all (measured on one real corpus: 459 of 567, 81%). For those, mtime is
+//     the last-resort rank AND — new with /history/search — the sole since/until
+//     bound, so a bulk touch of ~/.codex would both reorder them and move them
+//     in and out of a date filter, exactly as one did to ~/.claude. That is the
+//     seam to close if it ever happens.
+// The tempting swap is not the fix: all 567 of those rollouts do carry a head
+// timestamp, but it is the session's START time, so substituting it wholesale
+// would rank a conversation that ran for hours by when it began. Closing this
+// properly means each rollout's LAST timestamped line — the codex equivalent of
+// what claudeTranscriptMeta already derives — which stage A deliberately does
+// not pay for on every session on disk.
 type TranscriptCandidate = {
   sessionId: string; file: string; cwd: string | null; title: string | null;
   recencyAt: string | null; mtime: number; source: "claude-cli" | "codex-cli";
