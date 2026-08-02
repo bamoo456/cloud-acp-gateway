@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeTestServer, Gateway, TASK_TTL_MS, type Conn } from "./gateway.ts";
+import http from "node:http";
+import { makeTestServer, Gateway, TASK_TTL_MS, handleRequest, type Conn } from "./gateway.ts";
 import { Db } from "./db.ts";
 import { sse, post, sseStatus, USER, TOKEN, parseFrame, type Evt } from "./sse-testclient.ts";
 
@@ -12,6 +13,27 @@ type Msg = Record<string, unknown>;
 
 const authHeader = (user: string, pass: string) =>
   "Basic " + Buffer.from(`${user}:${pass}`, "utf8").toString("base64");
+
+// makeTestServer() above wires only the SSE+POST transport (handleSseRpc), not
+// the Basic-auth'd HTTP surface (/history*, /fs, ...) — that lives in
+// handleRequest, which the real entrypoint only attaches to a listening server
+// when ACPG_NO_LISTEN is unset. Tests always set ACPG_NO_LISTEN=1, so exercising
+// that surface means wiring handleRequest to our own ephemeral server here.
+// Auth is the gateway's real Basic credentials (ACPG_AUTH_USER/ACPG_AUTH_TOKEN),
+// not the SSE transport's "u"/"t" test constant above.
+function startHttpServer(): Promise<{ base: string; authed: (p: string) => Promise<Response>; close: () => Promise<void> }> {
+  const srv = http.createServer(handleRequest);
+  return new Promise((resolve) => {
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address() as import("node:net").AddressInfo;
+      const base = `http://127.0.0.1:${port}`;
+      const authed = (p: string) => fetch(base + p, {
+        headers: { authorization: authHeader(process.env.ACPG_AUTH_USER ?? "", process.env.ACPG_AUTH_TOKEN ?? "") },
+      });
+      resolve({ base, authed, close: () => new Promise((r) => srv.close(() => r())) });
+    });
+  });
+}
 
 // Await the next agent->client frame whose parsed body matches pred.
 function nextFrame(c: { next: (p: (e: Evt) => boolean) => Promise<Evt> }, pred: (o: Msg) => boolean): Promise<Msg> {
@@ -966,6 +988,51 @@ test("a cursor below the retained ledger floor asks for reload without replaying
     c?.close();
     if (prev === undefined) delete process.env.ACPG_LEDGER_MAX_FRAMES;
     else process.env.ACPG_LEDGER_MAX_FRAMES = prev;
+    await close();
+  }
+});
+
+test("/history/search requires auth", async () => {
+  const { base, close } = await startHttpServer();
+  try {
+    const res = await fetch(base + "/history/search?q=needle");
+    assert.equal(res.status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test("/history/search rejects a query shorter than two characters", async () => {
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed("/history/search?q=a");
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test("/history/search rejects a cwd outside FS_ROOT", async () => {
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed("/history/search?q=needle&cwd=" + encodeURIComponent("/definitely/not/under/root"));
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test("/history/search answers with the search envelope", async () => {
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed("/history/search?q=needle&all=1");
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(Array.isArray(body.results));
+    assert.equal(typeof body.truncated, "boolean");
+    assert.ok(Array.isArray(body.skipped));
+    assert.equal(typeof body.scanned.ms, "number");
+  } finally {
     await close();
   }
 });
