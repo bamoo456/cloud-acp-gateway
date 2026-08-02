@@ -1113,3 +1113,38 @@ test("a query with no usable probe scans every candidate instead of none", async
     { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
   assert.deepEqual(r.results.map((x) => x.sessionId), ["s-quoted"]);
 });
+
+// Codex is one of exactly two searchable providers, but every fixture above is
+// Claude — so parseForSearch's codex branch and the firstCodexUserText title
+// fallback would otherwise ship untested.
+test("search extracts a codex hit and titles it from the rollout's first user text", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codexhome-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+
+  // No session_index.jsonl at all, so there is no thread_name to take the title
+  // from — it has to come from firstCodexUserText streaming the rollout.
+  const file = writeCodexRollout(home, "S", { id: "CDX-S", cwd, timestamp: "2026-07-20T10:00:00.000Z" }, "codex opener");
+  // A tool call and its output sit between the two text messages. function_call
+  // pushes a message of its own while function_call_output folds into it, so the
+  // matching text lands at index 2 — the hit's index is only right if it counts
+  // every ViewMessage, which is what makes it a usable deep link into
+  // /history/messages. The tool output deliberately does not contain the term.
+  fs.appendFileSync(file, [
+    { type: "response_item", payload: { type: "function_call", call_id: "c1", name: "shell" } },
+    { type: "response_item", payload: { type: "function_call_output", call_id: "c1", output: "nothing relevant here" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "The zzyzxmarker landed in the rollout" }] } },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const r = await withCodexHome(home, () => searchTranscripts([{ name: "codex", cmd: CODEX_CMD }],
+    searchParams("q=zzyzxmarker&all=1"), { fsRoot, store: memStore() }));
+
+  assert.equal(r.results.length, 1);
+  assert.equal(r.results[0].source, "codex-cli");
+  assert.equal(r.results[0].sessionId, "CDX-S");
+  assert.equal(r.results[0].hits[0].index, 2);
+  assert.equal(r.results[0].hits[0].role, "assistant");
+  assert.ok(r.results[0].hits[0].snippet.includes("zzyzxmarker"));
+  assert.equal(r.results[0].title, "codex opener", "no thread_name, so the title falls back to firstCodexUserText");
+});
