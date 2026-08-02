@@ -4,6 +4,9 @@ import { getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, put
 function mockFetch(json: unknown) {
   globalThis.fetch = vi.fn().mockResolvedValue({ json: () => Promise.resolve(json) } as Response);
 }
+function lastFetchUrl(): string {
+  return String((globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.at(-1)?.[0]);
+}
 function mockResponse(response: Partial<Response>) {
   globalThis.fetch = vi.fn().mockResolvedValue(response as Response);
 }
@@ -42,6 +45,37 @@ describe("api", () => {
     const url = (globalThis.fetch as any).mock.calls[0][0] as string;
     expect(url).toContain("/history/messages?agent=claude");
     expect(url).toContain("session=sid");
+  });
+
+  test("getMessages requests a tail page by default and reports where it starts", async () => {
+    mockFetch({
+      messages: [{ role: "user", blocks: [{ type: "text", text: "hi" }] }],
+      total: 51, start: 50, truncated: true,
+    });
+
+    const r = await getMessages("claude", "/repo", "s1");
+
+    expect(lastFetchUrl()).toContain("limit=50");
+    expect(lastFetchUrl()).not.toContain("from=");
+    expect(r.start).toBe(50);
+    expect(r.total).toBe(51);
+  });
+
+  test("getMessages requests an absolute range when given one", async () => {
+    mockFetch({ messages: [], total: 51, start: 10, truncated: true });
+
+    await getMessages("claude", "/repo", "s1", { from: 10, to: 60 });
+
+    expect(lastFetchUrl()).toContain("from=10");
+    expect(lastFetchUrl()).toContain("to=60");
+  });
+
+  test("getMessages treats a gateway without paging support as fully loaded", async () => {
+    mockFetch({ messages: [{ role: "user", blocks: [{ type: "text", text: "hi" }] }], total: 1, truncated: false });
+
+    const r = await getMessages("claude", "/repo", "s1");
+
+    expect(r.start).toBe(0);
   });
 
   test("getMessages reports unavailable history instead of parsing an empty error body", async () => {

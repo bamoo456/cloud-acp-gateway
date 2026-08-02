@@ -546,7 +546,79 @@ type ViewBlock = {
 };
 type HistorySessionItem = { sessionId: string; title: string | null; updatedAt: string };
 type DiscoveredHistorySessionItem = HistorySessionItem & { cwd: string; source: "claude-cli" | "codex-cli" };
-type HistoryMessagesResult = { messages: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }>; total: number; truncated: boolean };
+type ViewMessage = { role: "user" | "assistant"; blocks: ViewBlock[] };
+type HistoryMessagesResult = { messages: ViewMessage[]; total: number; start: number; truncated: boolean };
+
+// One page of a transcript. Two modes: `limit` alone gives the tail (what every
+// caller wanted before paging existed), while `from`/`to` gives an absolute
+// half-open range. Absolute indices are what make paging safe on a running
+// conversation — transcripts are append-only, so an index already assigned never
+// moves, whereas an offset counted from the tail shifts as messages arrive.
+// `start` is the returned page's first index; `start > 0` is how a client knows
+// older messages exist.
+export const MAX_HISTORY_PAGE = 2000;
+
+export function sliceMessages(
+  msgs: ViewMessage[],
+  opts: { limit?: number; from?: number; to?: number },
+): HistoryMessagesResult {
+  const total = msgs.length;
+  if (opts.from !== undefined || opts.to !== undefined) {
+    const lo = Math.min(Math.max(opts.from ?? 0, 0), total);
+    const hi = Math.min(Math.max(opts.to ?? total, lo), Math.min(lo + MAX_HISTORY_PAGE, total));
+    return { messages: msgs.slice(lo, hi), total, start: lo, truncated: lo > 0 };
+  }
+  const limit = opts.limit ?? 0;
+  const truncated = limit > 0 && total > limit;
+  return {
+    messages: truncated ? msgs.slice(-limit) : msgs,
+    total,
+    start: truncated ? total - limit : 0,
+    truncated,
+  };
+}
+
+// Query-string half of the paging contract. A range is all-or-nothing: if either
+// bound is missing or unparseable the request degrades to the plain tail page,
+// which is always a safe answer, rather than inventing a bound.
+export function historyPageParams(q: URLSearchParams): { limit: number; from?: number; to?: number } {
+  const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "120", 10) || 120, 1), MAX_HISTORY_PAGE);
+  const rawFrom = q.get("from");
+  const rawTo = q.get("to");
+  if (rawFrom === null || rawTo === null) return { limit };
+  const from = parseInt(rawFrom, 10);
+  const to = parseInt(rawTo, 10);
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return { limit };
+  const lo = Math.max(from, 0);
+  return { limit, from: lo, to: Math.min(Math.max(to, lo), lo + MAX_HISTORY_PAGE) };
+}
+
+// Paging re-reads the same transcript once per page, so hold the parsed result
+// against the file's stat. mtime+size changes on every append, so a running
+// conversation can never be served a stale tail. Small LRU: the working set is
+// "the conversations someone is scrolling through right now".
+const HISTORY_PARSE_CACHE_MAX = 8;
+const historyParseCache = new Map<string, { mtimeMs: number; size: number; msgs: ViewMessage[] }>();
+
+async function cachedParse(file: string, parse: () => Promise<ViewMessage[]>): Promise<ViewMessage[]> {
+  let stat: fs.Stats;
+  try { stat = await fs.promises.stat(file); } catch { return parse(); }
+  const hit = historyParseCache.get(file);
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+    historyParseCache.delete(file);          // re-insert to move it to the LRU tail
+    historyParseCache.set(file, hit);
+    return hit.msgs;
+  }
+  const msgs = await parse();
+  historyParseCache.delete(file);
+  historyParseCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, msgs });
+  while (historyParseCache.size > HISTORY_PARSE_CACHE_MAX) {
+    const oldest = historyParseCache.keys().next().value;
+    if (oldest === undefined) break;
+    historyParseCache.delete(oldest);
+  }
+  return msgs;
+}
 
 // Flatten a tool_result's content (string | block array) to text, capped so a
 // huge tool output (e.g. a big file read) doesn't bloat the history payload.
@@ -857,9 +929,9 @@ const INTERRUPT_MARKERS = new Set([
   "[Request interrupted by user for tool use]",
 ]);
 
-export async function readClaudeHistoryMessages(file: string, sessionId: string, limit: number): Promise<HistoryMessagesResult> {
+async function parseClaudeHistoryMessages(file: string, sessionId: string): Promise<ViewMessage[]> {
   const rl = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-  const msgs: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }> = [];
+  const msgs: ViewMessage[] = [];
   const toolById = new Map<string, ViewBlock>(); // pair tool_result output/status onto its tool_use block
   for await (const line of rl) {
     const t = line.trim();
@@ -884,9 +956,11 @@ export async function readClaudeHistoryMessages(file: string, sessionId: string,
     if (!blocks.length) continue; // skip tool-result-only / empty turns
     msgs.push({ role, blocks });
   }
-  const total = msgs.length;
-  const truncated = limit > 0 && total > limit;
-  return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
+  return msgs;
+}
+
+export async function readClaudeHistoryMessages(file: string, sessionId: string, limit: number): Promise<HistoryMessagesResult> {
+  return sliceMessages(await parseClaudeHistoryMessages(file, sessionId), { limit });
 }
 
 type CodexIndexEntry = { id: string; thread_name?: string; updated_at?: string };
@@ -1118,9 +1192,9 @@ async function deleteCodexSession(sessionId: string, opts?: DeleteHistoryOpts): 
   return true;
 }
 
-async function readCodexHistoryMessages(file: string, limit: number): Promise<HistoryMessagesResult> {
+async function parseCodexHistoryMessages(file: string): Promise<ViewMessage[]> {
   const rl = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-  const msgs: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }> = [];
+  const msgs: ViewMessage[] = [];
   const toolById = new Map<string, ViewBlock>();
   for await (const line of rl) {
     const t = line.trim();
@@ -1151,9 +1225,7 @@ async function readCodexHistoryMessages(file: string, limit: number): Promise<Hi
       if (text) msgs.push({ role: "assistant", blocks: [{ type: "thought", text }] });
     }
   }
-  const total = msgs.length;
-  const truncated = limit > 0 && total > limit;
-  return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
+  return msgs;
 }
 
 // Locate a Codex rollout by session id alone. Unlike findCodexSessionFile, this
@@ -1369,9 +1441,9 @@ function openCodePartBlock(part: OpenCodePart): ViewBlock | null {
   }
 }
 
-async function readOpenCodeHistoryMessages(sessionId: string, limit: number): Promise<HistoryMessagesResult> {
-  const msgs = withOpenCodeDb((db) => {
-    const out: Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }> = [];
+function parseOpenCodeHistoryMessages(sessionId: string): ViewMessage[] {
+  return withOpenCodeDb((db) => {
+    const out: ViewMessage[] = [];
     const messages = db.prepare(
       "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id",
     ).all(sessionId) as Array<{ id: string; data: string }>;
@@ -1389,10 +1461,7 @@ async function readOpenCodeHistoryMessages(sessionId: string, limit: number): Pr
       if (blocks.length) out.push({ role, blocks });
     }
     return out;
-  }, [] as Array<{ role: "user" | "assistant"; blocks: ViewBlock[] }>);
-  const total = msgs.length;
-  const truncated = limit > 0 && total > limit;
-  return { messages: truncated ? msgs.slice(-limit) : msgs, total, truncated };
+  }, [] as ViewMessage[]);
 }
 
 // Delete an opencode conversation. Unlike claude/codex there is no file to
@@ -1422,7 +1491,14 @@ export async function listAgentHistory(cmd: string, cwd: string, limit: number, 
   return [];
 }
 
-export async function readAgentHistoryMessages(cmd: string, cwd: string, sessionId: string, limit: number, opts?: { projectsRoot?: string }): Promise<HistoryMessagesResult | null> {
+export async function readAgentHistoryMessages(
+  cmd: string,
+  cwd: string,
+  sessionId: string,
+  limit: number,
+  opts?: { projectsRoot?: string; from?: number; to?: number },
+): Promise<HistoryMessagesResult | null> {
+  const page = { limit, from: opts?.from, to: opts?.to };
   const provider = historyProviderFor(cmd);
   if (provider === "claude") {
     // Resolve via the computed path first, then by session id anywhere under
@@ -1431,12 +1507,12 @@ export async function readAgentHistoryMessages(cmd: string, cwd: string, session
     const base = opts?.projectsRoot ?? claudeProjectsRoot();
     const file = await findClaudeSessionFile(cwd, sessionId, base);
     if (!file || !file.startsWith(base + path.sep)) return null;
-    return readClaudeHistoryMessages(file, sessionId, limit);
+    return sliceMessages(await cachedParse(file, () => parseClaudeHistoryMessages(file, sessionId)), page);
   }
   if (provider === "codex") {
     const found = await findCodexSessionFile(cwd, sessionId);
     if (!found) return null;
-    return readCodexHistoryMessages(found.file, limit);
+    return sliceMessages(await cachedParse(found.file, () => parseCodexHistoryMessages(found.file)), page);
   }
   if (provider === "opencode") {
     // Scope to the requesting cwd: the id is globally unique, but confirm the
@@ -1444,7 +1520,7 @@ export async function readAgentHistoryMessages(cmd: string, cwd: string, session
     const sessions = listOpenCodeSessions();
     const found = sessions.find((s) => s.id === sessionId && typeof s.directory === "string" && sameCwd(s.directory, cwd));
     if (!found) return null;
-    return readOpenCodeHistoryMessages(sessionId, limit);
+    return sliceMessages(parseOpenCodeHistoryMessages(sessionId), page);
   }
   return null;
 }
@@ -3562,9 +3638,9 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     // Allow underscores: opencode session ids look like `ses_…` (claude/codex use
     // UUIDs). Still no slashes or dots, so this can't escape the session store.
     const sid = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
-    const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "120", 10) || 120, 1), 2000);
+    const { limit, from, to } = historyPageParams(q);
     if (!cwd || !sid) { res.writeHead(400); res.end(); return; }
-    readAgentHistoryMessages(prof?.cmd ?? "", cwd, sid, limit)
+    readAgentHistoryMessages(prof?.cmd ?? "", cwd, sid, limit, { from, to })
       .then((r) => {
         if (!r) { res.writeHead(404); res.end(); return; }
         res.writeHead(200, { "content-type": "application/json" });

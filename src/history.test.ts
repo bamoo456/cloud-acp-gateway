@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams } from "./gateway.ts";
 import { Db } from "./db.ts";
 
 // The Claude history paths cache derived transcript metadata in the shared prefs
@@ -734,4 +734,143 @@ test("deletion finds the right provider without being told the agent", async () 
       assert.deepEqual(rows.map((r) => r.sessionId), ["ses_untouched"], "the opencode row survives");
     });
   });
+});
+
+test("sliceMessages without a range returns the last `limit` messages and their start index", () => {
+  const msgs = Array.from({ length: 10 }, (_, i) => ({
+    role: "user" as const, blocks: [{ type: "text" as const, text: "m" + i }],
+  }));
+
+  const r = sliceMessages(msgs, { limit: 3 });
+
+  assert.equal(r.total, 10);
+  assert.equal(r.start, 7, "start is the index of the first returned message");
+  assert.equal(r.truncated, true);
+  assert.deepEqual(r.messages.map((m) => m.blocks[0].text), ["m7", "m8", "m9"]);
+});
+
+test("sliceMessages without a range returns everything when the conversation is shorter than the limit", () => {
+  const msgs = [{ role: "user" as const, blocks: [{ type: "text" as const, text: "only" }] }];
+
+  const r = sliceMessages(msgs, { limit: 50 });
+
+  assert.equal(r.total, 1);
+  assert.equal(r.start, 0, "start 0 means the beginning of the conversation is included");
+  assert.equal(r.truncated, false);
+  assert.equal(r.messages.length, 1);
+});
+
+test("sliceMessages serves an absolute half-open range", () => {
+  const msgs = Array.from({ length: 10 }, (_, i) => ({
+    role: "user" as const, blocks: [{ type: "text" as const, text: "m" + i }],
+  }));
+
+  const r = sliceMessages(msgs, { from: 2, to: 5 });
+
+  assert.deepEqual(r.messages.map((m) => m.blocks[0].text), ["m2", "m3", "m4"], "`to` is exclusive");
+  assert.equal(r.start, 2);
+  assert.equal(r.total, 10);
+  assert.equal(r.truncated, true, "messages older than index 2 exist");
+});
+
+test("sliceMessages clamps an out-of-bounds range instead of throwing", () => {
+  const msgs = Array.from({ length: 4 }, (_, i) => ({
+    role: "user" as const, blocks: [{ type: "text" as const, text: "m" + i }],
+  }));
+
+  const low = sliceMessages(msgs, { from: -5, to: 2 });
+  assert.deepEqual(low.messages.map((m) => m.blocks[0].text), ["m0", "m1"]);
+  assert.equal(low.start, 0);
+  assert.equal(low.truncated, false, "clamped to the beginning, so nothing older remains");
+
+  const high = sliceMessages(msgs, { from: 3, to: 99 });
+  assert.deepEqual(high.messages.map((m) => m.blocks[0].text), ["m3"]);
+  assert.equal(high.start, 3);
+
+  const past = sliceMessages(msgs, { from: 10, to: 20 });
+  assert.deepEqual(past.messages, [], "a range entirely past the end is empty, not an error");
+  assert.equal(past.start, 4);
+
+  const inverted = sliceMessages(msgs, { from: 3, to: 1 });
+  assert.deepEqual(inverted.messages, [], "to < from yields an empty page rather than a reversed slice");
+  assert.equal(inverted.start, 3);
+});
+
+test("sliceMessages caps a range at the 2000-message page limit", () => {
+  const msgs = Array.from({ length: 2500 }, (_, i) => ({
+    role: "user" as const, blocks: [{ type: "text" as const, text: "m" + i }],
+  }));
+
+  const r = sliceMessages(msgs, { from: 0, to: 2500 });
+
+  assert.equal(r.messages.length, 2000, "an oversized range is capped, not rejected");
+  assert.equal(r.start, 0);
+});
+
+test("readAgentHistoryMessages serves an absolute range for a claude transcript", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const sid = "44444444-aaaa-bbbb-cccc-000000000004";
+  const lines = Array.from({ length: 6 }, (_, i) => ({
+    type: "user",
+    cwd: "/repo",
+    sessionId: sid,
+    message: { role: "user", content: "m" + i },
+  }));
+  writeClaudeProjectTranscript(projectsRoot, "-repo", sid, lines, 3000);
+
+  const tail = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 2, { projectsRoot });
+  assert.equal(tail?.total, 6);
+  assert.equal(tail?.start, 4, "the default tail page starts at total - limit");
+
+  const older = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 2, { projectsRoot, from: 1, to: 4 });
+  assert.equal(older?.start, 1);
+  assert.equal(older?.total, 6);
+  assert.deepEqual(
+    older?.messages.map((m) => m.blocks[0].text),
+    ["m1", "m2", "m3"],
+    "the range wins over limit when both are supplied",
+  );
+
+  const head = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 2, { projectsRoot, from: 0, to: 1 });
+  assert.equal(head?.start, 0);
+  assert.equal(head?.truncated, false, "reaching index 0 reports nothing older");
+});
+
+test("repeated page fetches reuse the parsed transcript until the file changes", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const sid = "55555555-aaaa-bbbb-cccc-000000000005";
+  const line = (i: number) => ({
+    type: "user", cwd: "/repo", sessionId: sid, message: { role: "user", content: "m" + i },
+  });
+  const file = writeClaudeProjectTranscript(projectsRoot, "-repo", sid, [line(0), line(1)], 3000);
+
+  const first = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 10, { projectsRoot });
+  assert.equal(first?.total, 2);
+
+  // Rewrite with a different length AND a new mtime — the cache key must notice.
+  const when = new Date(9000);
+  fs.writeFileSync(file, [line(0), line(1), line(2)].map((l) => JSON.stringify(l)).join("\n") + "\n");
+  fs.utimesSync(file, when, when);
+
+  const second = await readAgentHistoryMessages(CLAUDE_CMD, "/repo", sid, 10, { projectsRoot });
+  assert.equal(second?.total, 3, "a changed transcript is re-parsed, never served from a stale cache");
+});
+
+test("history page params: from/to are optional, integer-only, and range-capped", () => {
+  assert.deepEqual(historyPageParams(new URLSearchParams("")), { limit: 120 });
+  assert.deepEqual(historyPageParams(new URLSearchParams("limit=50")), { limit: 50 });
+  assert.deepEqual(
+    historyPageParams(new URLSearchParams("limit=50&from=10&to=60")),
+    { limit: 50, from: 10, to: 60 },
+  );
+  assert.deepEqual(
+    historyPageParams(new URLSearchParams("from=abc&to=60")),
+    { limit: 120 },
+    "a non-numeric bound drops the whole range rather than guessing a bound",
+  );
+  assert.deepEqual(
+    historyPageParams(new URLSearchParams("from=-5&to=99999")),
+    { limit: 120, from: 0, to: 2000 },
+    "bounds are floored at 0 and the range length capped at MAX_HISTORY_PAGE",
+  );
 });

@@ -84,6 +84,15 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
   // so they can return to the live tail in one tap instead of a long manual scroll.
   const [showJump, setShowJump] = useState(false);
 
+  const loadOlderMessages = useStore((s) => s.loadOlderMessages);
+  // Read inside the once-bound scroll handler, so these must be refs, not state.
+  const pagingRef = useRef({ id: null as string | null, historyStart: 0, loadingOlder: false });
+  pagingRef.current = {
+    id: session?.id ?? null,
+    historyStart: session?.historyStart ?? 0,
+    loadingOlder: !!session?.loadingOlder,
+  };
+
   const sid = session?.id ?? null;
   // Reset the window when switching conversations.
   useEffect(() => { setVisible(INITIAL_VISIBLE); }, [sid]);
@@ -97,14 +106,35 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
     const onScroll = () => {
       atBottom.current = m.scrollHeight - m.scrollTop - m.clientHeight < 80;
       setShowJump(!atBottom.current);
-      if (m.scrollTop < NEAR_TOP_PX && hiddenRef.current > 0 && anchorHeight.current === 0) {
-        anchorHeight.current = m.scrollHeight; // remember height so we can hold the viewport steady
-        setVisible((v) => v + REVEAL_STEP);
+      if (m.scrollTop >= NEAR_TOP_PX) return;
+      if (hiddenRef.current > 0) {
+        if (anchorHeight.current === 0) {
+          anchorHeight.current = m.scrollHeight; // remember height so we can hold the viewport steady
+          setVisible((v) => v + REVEAL_STEP);
+        }
+        return;
+      }
+      // Nothing left to reveal locally — pull the previous page from the gateway.
+      const p = pagingRef.current;
+      if (p.id && p.historyStart > 0 && !p.loadingOlder) {
+        anchorHeight.current = m.scrollHeight;
+        void loadOlderMessages(p.id);
       }
     };
     m.addEventListener("scroll", onScroll, { passive: true });
     return () => m.removeEventListener("scroll", onScroll);
   }, []);
+
+  // A fetched page lands at the head of `items`, but the window is measured from
+  // the tail — so grow it by the page size, otherwise the page just fetched would
+  // be hidden again the moment it arrives.
+  const itemCount = session?.items.length ?? 0;
+  const prevCount = useRef(itemCount);
+  useLayoutEffect(() => {
+    const grew = itemCount - prevCount.current;
+    prevCount.current = itemCount;
+    if (grew > 0 && anchorHeight.current) setVisible((v) => v + grew);
+  }, [itemCount]);
 
   // After a reveal prepends older messages, keep the viewport on the same content by
   // adding the height they introduced. Must be instant (not the CSS smooth scroll),
@@ -117,7 +147,7 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
     m.scrollTop += m.scrollHeight - anchorHeight.current;
     m.style.scrollBehavior = prev;
     anchorHeight.current = 0;
-  }, [visible]);
+  }, [visible, itemCount]);
 
   // Follow new content to the bottom only when the user is already pinned there, so
   // scrolling up to read (or revealing earlier messages) is never yanked back down.
@@ -224,6 +254,12 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
       )}
       {hidden > 0 && (
         <div className="earlier-hint">↑ Scroll up for {hidden} earlier message{hidden === 1 ? "" : "s"}</div>
+      )}
+      {/* Local window exhausted but the transcript continues past what we fetched. */}
+      {hidden === 0 && (session?.historyStart ?? 0) > 0 && (
+        <div className="earlier-hint">
+          {session?.loadingOlder ? "Loading earlier messages…" : "↑ Scroll up to load earlier messages"}
+        </div>
       )}
       {shown.map((it) => {
         switch (it.kind) {

@@ -89,6 +89,7 @@ interface State {
   newSession: () => Promise<void>;
   openHistorySession: (s: { sessionId: string; title: string | null; agentName?: string; cwd?: string }) => Promise<void>;
   openRecentSession: (s: RecentSession) => Promise<void>;
+  loadOlderMessages: (id: string) => Promise<void>;
   sendPrompt: (text: string, images?: MessageImage[], files?: MessageFile[]) => Promise<void>;
   setModel: (id: string) => void;
   setMode: (id: string) => void;
@@ -305,10 +306,10 @@ export const useStore = create<State>((set, get) => {
     sess = { ...sess, viewOnly: true };
     set((st) => ({ sessions: { ...st.sessions, [id]: sess }, activeId: id, cwd, tip: "Loading conversation…" }));
     try {
-      const r = await getMessages(get().agentName, cwd, id);
+      const r = await getMessages(get().agentName, cwd, id, { limit: 50 });
       set((st) => {
         let cur = makeSession(id, st.sessions[id].createdAt, { agentName: get().agentName, cwd });
-        cur = { ...cur, title: st.sessions[id].title, viewOnly: true };
+        cur = { ...cur, title: st.sessions[id].title, viewOnly: true, historyStart: r.start };
         cur = applyHistoryMessages(cur, r.messages);
         const seq = cur.seq + 1;
         cur = { ...cur, seq, curAssistantId: null, curThoughtId: null,
@@ -612,9 +613,10 @@ export const useStore = create<State>((set, get) => {
     try {
       patch(id, (s) => ({ ...s, suppressReplay: true })); // drop the agent's load-replay; render from the history API instead
       const lr = (await acp.request("session/load", { sessionId: id, cwd: get().cwd || "", mcpServers: [] })) as NewSessionResult;
-      const r = await getMessages(get().agentName, get().cwd, id);
+      const r = await getMessages(get().agentName, get().cwd, id, { limit: 50 });
       set((st) => {
-        const cur = applyHistoryMessages(makeSession(id, st.sessions[id]?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd }), r.messages);
+        const base = makeSession(id, st.sessions[id]?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd });
+        const cur = applyHistoryMessages({ ...base, historyStart: r.start }, r.messages);
         const { session, models, modes, configOptions } = applyModelsModes(cur, lr);
         const ready = appendPendingPermissions({ ...session, suppressReplay: false, viewOnly: false }, st.pendingPermissions);
         return {
@@ -1011,6 +1013,38 @@ export const useStore = create<State>((set, get) => {
       }
       if (cwd !== get().cwd) { sessionInit = null; set({ cwd }); } // cold: adopt that folder, NO wipe
       await openSavedSession({ sessionId: s.sessionId, title: s.title }, cwd);
+    },
+
+    // Fetch the page immediately before what's loaded and prepend it. Absolute
+    // indices mean this is safe while the agent is still appending: the range
+    // below `historyStart` can never shift. The page is rendered through a
+    // throwaway session whose id namespace differs from the real one, so the
+    // generated `id + ":" + seq` item ids cannot collide with what's on screen.
+    async loadOlderMessages(id) {
+      const s = get().sessions[id];
+      if (!s || s.loadingOlder || s.historyStart <= 0) return;
+      const from = Math.max(0, s.historyStart - 50);
+      const to = s.historyStart;
+      patch(id, (cur) => ({ ...cur, loadingOlder: true }));
+      try {
+        const r = await getMessages(s.agentName || get().agentName, s.cwd || get().cwd, id, { from, to });
+        const page = applyHistoryMessages(
+          makeSession(id + "#p" + from, s.createdAt, { agentName: s.agentName, cwd: s.cwd }),
+          r.messages,
+        );
+        patch(id, (cur) => ({
+          ...cur,
+          items: [...page.items, ...cur.items],
+          hasContent: cur.hasContent || page.hasContent,
+          historyStart: r.start,
+          loadingOlder: false,
+        }));
+      } catch (e) {
+        // Deliberately leaves historyStart alone: moving it to 0 would claim the
+        // conversation's beginning was reached when the fetch simply failed.
+        patch(id, (cur) => ({ ...cur, loadingOlder: false }));
+        set({ tip: "Couldn't load earlier messages: " + msg(e) });
+      }
     },
 
     async openRecentSession(s) {
