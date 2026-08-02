@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams, searchCandidates } from "./gateway.ts";
+import { searchQueryParams } from "./search-core.ts";
 import { Db } from "./db.ts";
 
 // The Claude history paths cache derived transcript metadata in the shared prefs
@@ -873,4 +874,78 @@ test("history page params: from/to are optional, integer-only, and range-capped"
     { limit: 120, from: 0, to: 2000 },
     "bounds are floored at 0 and the range length capped at MAX_HISTORY_PAGE",
   );
+});
+
+const NOW = Date.parse("2026-08-02T00:00:00.000Z");
+const searchParams = (qs: string) => searchQueryParams(new URLSearchParams(qs), NOW)!;
+// A root that contains the fixture cwds without meaningfully restricting them.
+// Not "/": resolveWithinRootBase compares against `root + path.sep`, so the
+// filesystem root denies everything (see the report's concerns).
+const permissiveRoot = () => os.tmpdir();
+
+// A transcript whose recorded activity is OLD but whose mtime was pushed forward
+// — the bulk-touch shape measured in the spec (1464 files sharing one mtime).
+function writeSkewedTranscript(projectsRoot: string, sessionId: string, cwd: string, activityAt: string, mtimeMs: number, text: string) {
+  return writeClaudeProjectTranscript(projectsRoot, "proj", sessionId, [
+    { type: "user", cwd, sessionId, timestamp: activityAt, message: { role: "user", content: text } },
+  ], mtimeMs);
+}
+
+test("search bounds by real activity, never by mtime (I1)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  // Real activity 2026-07-01, mtime faked to 2026-08-01.
+  writeSkewedTranscript(root, "s-skewed", cwd, "2026-07-01T00:00:00.000Z", Date.parse("2026-08-01T00:00:00.000Z"), "needle in an old turn");
+
+  const scope = { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() };
+  const agents = [{ name: "claude", cmd: CLAUDE_CMD }];
+
+  // `until` that only its MTIME violates must not drop it.
+  const kept = await searchCandidates(agents, searchParams("q=needle&all=1&until=2026-07-05T00:00:00Z"), scope);
+  assert.deepEqual(kept.candidates.map((c) => c.sessionId), ["s-skewed"]);
+
+  // `since` its MTIME would satisfy must still drop it.
+  const dropped = await searchCandidates(agents, searchParams("q=needle&since=2026-07-20T00:00:00Z"), scope);
+  assert.deepEqual(dropped.candidates.map((c) => c.sessionId), []);
+});
+
+test("search drops sessions outside FS_ROOT and sessions with no recoverable cwd (I2)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const allowed = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-in-"));
+  const denied = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-out-"));
+  const when = Date.parse("2026-08-01T00:00:00.000Z");
+  writeSkewedTranscript(root, "s-in", allowed, "2026-08-01T00:00:00.000Z", when, "needle inside");
+  writeSkewedTranscript(root, "s-out", denied, "2026-08-01T00:00:00.000Z", when, "needle outside");
+  // No cwd recorded anywhere in the transcript.
+  writeClaudeProjectTranscript(root, "proj", "s-nocwd", [
+    { type: "user", sessionId: "s-nocwd", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "needle nowhere" } },
+  ], when);
+
+  const r = await searchCandidates([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&all=1"),
+    { projectsRoot: root, fsRoot: allowed, store: memStore() });
+  assert.deepEqual(r.candidates.map((c) => c.sessionId), ["s-in"]);
+});
+
+test("search reports opencode as skipped rather than searching it", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const r = await searchCandidates(
+    [{ name: "claude", cmd: CLAUDE_CMD }, { name: "oc", cmd: OPENCODE_CMD }],
+    searchParams("q=needle&all=1"), { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.deepEqual(r.skipped, ["opencode"]);
+});
+
+test("search orders by real activity with sessionId breaking ties", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  const stale = Date.parse("2026-08-01T00:00:00.000Z");
+  writeSkewedTranscript(root, "s-old", cwd, "2026-07-01T00:00:00.000Z", stale, "needle old");
+  writeSkewedTranscript(root, "s-new", cwd, "2026-07-30T00:00:00.000Z", stale, "needle new");
+  writeSkewedTranscript(root, "s-tie-a", cwd, "2026-07-30T00:00:00.000Z", stale, "needle tie");
+
+  const r = await searchCandidates([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  // Order is (recency desc, sessionId desc): the two 07-30 sessions first, and
+  // within that tie "s-tie-a" outranks "s-new" because ids sort descending. All
+  // three share one mtime, so any mtime-based ranking would scramble this.
+  assert.deepEqual(r.candidates.map((c) => c.sessionId), ["s-tie-a", "s-new", "s-old"]);
 });
