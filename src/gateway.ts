@@ -838,19 +838,24 @@ function byClaudeRecency(a: ClaudeRecency, b: ClaudeRecency): number {
   return b.mtime - a.mtime;
 }
 
-export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRoot?: string; limit?: number; store?: Db }): Promise<DiscoveredHistorySessionItem[]> {
-  const projectsRoot = opts?.projectsRoot ?? path.join(CLAUDE_DIR, "projects");
-  const fsRoot = opts?.fsRoot ?? FS_ROOT;
-  const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
-  const store = transcriptStore(opts?.store);
+// One transcript as the search and discovery paths both see it: located, with
+// the cwd it records and its REAL last activity. `mtime` rides along only as
+// byClaudeRecency's tiebreak — never as a rank of its own (see the comment on
+// byClaudeRecency; phantom touches came through exactly that seam).
+type TranscriptCandidate = {
+  sessionId: string; file: string; cwd: string | null; title: string | null;
+  recencyAt: string | null; mtime: number; source: "claude-cli" | "codex-cli";
+};
+
+async function claudeTranscriptCandidates(projectsRoot: string, store: Db | null): Promise<TranscriptCandidate[]> {
   let projects: fs.Dirent[];
   try { projects = await fs.promises.readdir(projectsRoot, { withFileTypes: true }); } catch { return []; }
 
   const files: Array<{ sessionId: string; file: string; size: number; mtime: number }> = [];
   for (const project of projects) {
     if (!project.isDirectory()) continue;
-    let entries: fs.Dirent[];
     const dir = path.join(projectsRoot, project.name);
+    let entries: fs.Dirent[];
     try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.startsWith("agent-")) continue;
@@ -858,21 +863,33 @@ export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRo
       try {
         const st = await fs.promises.stat(file);
         files.push({ sessionId: entry.name.replace(/\.jsonl$/, ""), file, size: st.size, mtime: Math.round(st.mtimeMs) });
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
     }
   }
+
+  const messaged = lastMessageAts(store);
+  const out: TranscriptCandidate[] = [];
+  for (const f of files) {
+    const meta = await claudeTranscriptMeta(f.sessionId, f.file, f.size, f.mtime, store);
+    out.push({
+      sessionId: f.sessionId, file: f.file, cwd: meta.cwd, title: meta.title,
+      recencyAt: laterIso(meta.lastActivityAt, messaged.get(f.sessionId) ?? null),
+      mtime: f.mtime, source: "claude-cli",
+    });
+  }
+  return out;
+}
+
+export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRoot?: string; limit?: number; store?: Db }): Promise<DiscoveredHistorySessionItem[]> {
+  const projectsRoot = opts?.projectsRoot ?? path.join(CLAUDE_DIR, "projects");
+  const fsRoot = opts?.fsRoot ?? FS_ROOT;
+  const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
+  const store = transcriptStore(opts?.store);
 
   // Resolve every candidate's activity BEFORE ranking: the sort and the limit cut
   // have to agree on one value, or a phantom-touched transcript still evicts a
   // genuinely-recent session. Cheap in steady state — unchanged files are cached.
-  const messaged = lastMessageAts(store);
-  const metas: Array<typeof files[number] & ClaudeTranscriptMeta & ClaudeRecency> = [];
-  for (const f of files) {
-    const meta = await claudeTranscriptMeta(f.sessionId, f.file, f.size, f.mtime, store);
-    metas.push({ ...f, ...meta, recencyAt: laterIso(meta.lastActivityAt, messaged.get(f.sessionId) ?? null) });
-  }
+  const metas = await claudeTranscriptCandidates(projectsRoot, store);
   metas.sort(byClaudeRecency);
 
   const out: DiscoveredHistorySessionItem[] = [];
@@ -1141,6 +1158,21 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
   })));
 }
 
+// Codex's own recency lives in session_index.jsonl. CodexSessionFile.updatedAt
+// is mtime-derived, so it is the fallback only — same rule as I1. `thread_name`
+// comes from the same index read, so it is free; what is NOT derived here is the
+// firstCodexUserText fallback, which streams a rollout. Paying that per session
+// on disk is the difference between a listing and reading a gigabyte.
+async function codexTranscriptCandidates(): Promise<TranscriptCandidate[]> {
+  const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
+  return sessions.map((s) => ({
+    sessionId: s.id, file: s.file, cwd: s.cwd,
+    title: index.get(s.id)?.thread_name ?? null,
+    recencyAt: index.get(s.id)?.updated_at ?? null,
+    mtime: dateValue(s.updatedAt), source: "codex-cli" as const,
+  }));
+}
+
 // Codex counterpart to discoverClaudeHistory: every rollout on disk, whatever
 // folder it belongs to. listCodexSessionFiles already recovers each session's
 // cwd from its rollout head — listCodexHistory only filters that down to one
@@ -1154,27 +1186,27 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
 export async function discoverCodexHistory(opts?: { fsRoot?: string; limit?: number }): Promise<DiscoveredHistorySessionItem[]> {
   const fsRoot = opts?.fsRoot ?? FS_ROOT;
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
-  const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
 
-  const within: Array<CodexSessionFile & { index?: CodexIndexEntry }> = [];
-  for (const s of sessions) {
-    const cwd = resolveWithinRootBase(s.cwd, fsRoot);
+  const candidates = await codexTranscriptCandidates();
+  const within: TranscriptCandidate[] = [];
+  for (const c of candidates) {
+    const cwd = c.cwd ? resolveWithinRootBase(c.cwd, fsRoot) : null;
     if (!cwd) continue;
-    within.push({ ...s, cwd, index: index.get(s.id) });
+    within.push({ ...c, cwd });
   }
   const top = within
-    .sort((a, b) => dateValue(b.index?.updated_at || b.updatedAt) - dateValue(a.index?.updated_at || a.updatedAt))
+    .sort((a, b) => (dateValue(b.recencyAt ?? undefined) || b.mtime) - (dateValue(a.recencyAt ?? undefined) || a.mtime))
     .slice(0, limit);
 
   // One readTitles per distinct surviving folder rather than per session.
   const customByCwd = new Map<string, Record<string, string>>();
-  for (const cwd of new Set(top.map((s) => s.cwd))) customByCwd.set(cwd, await readTitles(cwd));
+  for (const cwd of new Set(top.map((s) => s.cwd as string))) customByCwd.set(cwd, await readTitles(cwd));
 
   return Promise.all(top.map(async (s) => ({
-    sessionId: s.id,
-    title: customByCwd.get(s.cwd)?.[s.id] ?? s.index?.thread_name ?? (await firstCodexUserText(s.file)),
-    updatedAt: s.index?.updated_at ?? s.updatedAt,
-    cwd: s.cwd,
+    sessionId: s.sessionId,
+    title: customByCwd.get(s.cwd as string)?.[s.sessionId] ?? s.title ?? (await firstCodexUserText(s.file)),
+    updatedAt: s.recencyAt ?? new Date(s.mtime).toISOString(),
+    cwd: s.cwd as string,
     source: "codex-cli" as const,
   })));
 }
