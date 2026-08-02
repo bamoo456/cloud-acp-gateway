@@ -42,7 +42,7 @@ import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.
 import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { buildClientConfig } from "./client-config.ts";
-import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, type SearchHit, type SearchQuery } from "./search-core.ts";
+import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
 const ROOT = path.join(__dirname, "..");
 
@@ -3516,7 +3516,7 @@ export function handleSseRpc(
   return true;
 }
 
-function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+export function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
   const pathname = (req.url ?? "/").split("?")[0];
 
   // SSE downstream + POST upstream transport. Authenticates like the WS upgrade
@@ -3764,6 +3764,32 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       .then((sessions) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ sessions }));
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Content search across past conversations, spanning every folder and every
+  // searchable agent. Unlike /history and /history/discovered this returns
+  // message TEXT, so the FS_ROOT guard inside searchCandidates is a real leak
+  // boundary rather than a listing nicety — see I2 in the design doc.
+  if (consoleEnabled && pathname === "/history/search") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const params = searchQueryParams(q, Date.now());
+    if (!params) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "query must be at least 2 characters" }));
+      return;
+    }
+    // An explicitly-supplied cwd that fails the root check is a client error, not
+    // a silently-widened search.
+    const rawCwd = q.get("cwd");
+    const cwd = rawCwd ? resolveWithinRoot(rawCwd) : null;
+    if (rawCwd && !cwd) { res.writeHead(400); res.end(); return; }
+    const agents = Object.entries(cfg.agents).map(([name, a]) => ({ name, cmd: a.cmd }));
+    searchTranscripts(agents, params, { cwd })
+      .then((r) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(r));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
