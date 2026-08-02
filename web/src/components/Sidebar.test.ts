@@ -865,6 +865,129 @@ describe("Sidebar recent conversations", () => {
     expect(folderOnly().checked).toBe(false);
   });
 
+  // A truncated response is the only way the resume cursor is ever reachable, so
+  // both escape buttons need coverage: without it, swapping or deleting either
+  // handler passes the whole suite.
+  const truncatedPage = (over: Record<string, unknown> = {}) => ({
+    results: [{
+      sessionId: "hit-1", source: "claude-cli", agentName: "claude", cwd: "/repo",
+      title: "Liquid glass timeline", updatedAt: "2026-06-10T03:00:00.000Z", hitCount: 1,
+      hits: [{ index: 42, role: "user", snippet: "make it liquid", offsets: [[8, 14]] }],
+    }],
+    truncated: true, cursor: "cursor-1", skipped: [], scanned: { files: 1, bytes: 1, ms: 1 },
+    ...over,
+  });
+  const clickWindowChip = async (label: string) => {
+    const chip = Array.from(container.querySelectorAll<HTMLButtonElement>(".search-filters .chip"))
+      .find((b) => b.textContent === label)!;
+    expect(chip).toBeDefined();
+    await act(async () => { chip.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+  };
+  const clickSearchMore = async () => {
+    const more = container.querySelector<HTMLButtonElement>(".search-more");
+    expect(more).not.toBeNull();
+    await act(async () => { more!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); await flush(); });
+    return more!;
+  };
+
+  test("a truncated default search offers to widen the window to everything", async () => {
+    searchSessions.mockResolvedValue(truncatedPage());
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+
+    expect(container.querySelector(".search-more")!.textContent).toBe("搜尋全部");
+    await clickSearchMore();
+
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { all: true });
+  });
+
+  // Truncation inside the widest possible window can only be escaped by resuming
+  // from the cursor — there is nothing left to widen to.
+  test("a truncated all-window search resumes from the cursor instead of re-running", async () => {
+    searchSessions.mockResolvedValue(truncatedPage());
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+    await clickWindowChip("全部");
+
+    expect(container.querySelector(".search-more")!.textContent).toBe("繼續搜更早");
+    searchSessions.mockResolvedValue(truncatedPage({
+      results: [{
+        sessionId: "hit-2", source: "claude-cli", agentName: "claude", cwd: "/repo",
+        title: "Older liquid work", updatedAt: "2026-05-01T00:00:00.000Z", hitCount: 1,
+        hits: [{ index: 7, role: "user", snippet: "still liquid", offsets: [[6, 12]] }],
+      }],
+      truncated: false, cursor: null,
+    }));
+    await clickSearchMore();
+
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { all: true, cursor: "cursor-1" });
+    // The resumed page appends; it does not replace what was already on screen.
+    expect(container.textContent).toContain("Liquid glass timeline");
+    expect(container.textContent).toContain("Older liquid work");
+  });
+
+  test("a resumed page that lands after the query was erased is discarded", async () => {
+    searchSessions.mockResolvedValue(truncatedPage());
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+    await clickWindowChip("全部");
+
+    // Hold page 2 open, click 繼續搜更早, then erase the query underneath it.
+    let releasePage2!: (v: unknown) => void;
+    searchSessions.mockReturnValue(new Promise((r) => { releasePage2 = r; }));
+    const more = container.querySelector<HTMLButtonElement>(".search-more")!;
+    await act(async () => { more.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await typeInSearchBox("l");
+    expect(container.querySelector(".search-hit")).toBeNull();
+
+    await act(async () => {
+      releasePage2(truncatedPage({ truncated: false, cursor: null }));
+      await flush(); await flush(); await flush();
+    });
+
+    // The stale page must not resurrect results under a one-character query.
+    expect(container.querySelector(".search-hit")).toBeNull();
+    expect(container.textContent).not.toContain("Searching…");
+  });
+
+  test("a resumed page that lands after a newer query cannot overwrite it", async () => {
+    searchSessions.mockResolvedValue(truncatedPage());
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+    await clickWindowChip("全部");
+
+    let releasePage2!: (v: unknown) => void;
+    searchSessions.mockReturnValue(new Promise((r) => { releasePage2 = r; }));
+    const more = container.querySelector<HTMLButtonElement>(".search-more")!;
+    await act(async () => { more.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    // A new term resolves while page 2 is still scanning.
+    searchSessions.mockResolvedValue(truncatedPage({
+      results: [{
+        sessionId: "hit-3", source: "claude-cli", agentName: "claude", cwd: "/repo",
+        title: "Widget work", updatedAt: "2026-06-01T00:00:00.000Z", hitCount: 1,
+        hits: [{ index: 3, role: "user", snippet: "the widget", offsets: [[4, 10]] }],
+      }],
+      truncated: false, cursor: null,
+    }));
+    await typeInSearchBox("widget");
+    expect(container.textContent).toContain("Widget work");
+
+    await act(async () => {
+      releasePage2(truncatedPage({ truncated: false, cursor: null }));
+      await flush(); await flush(); await flush();
+    });
+
+    expect(container.textContent).toContain("Widget work");
+    expect(container.textContent).not.toContain("Liquid glass timeline");
+  });
+
   test("has no New chat button inside the panel", async () => {
     await renderSidebar();
     expect(container.querySelector(".list-new")).toBeNull();

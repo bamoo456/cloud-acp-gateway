@@ -39,9 +39,19 @@ export function rpcUrl(cfg: AppConfig, agentName: string, connId: string): strin
 // instead of starting its own. `cwd` is needed because sessions are stored
 // per-cwd (~/.claude/projects/<cwd>/<id>.jsonl); `agent` identifies which agent the
 // session belongs to, so a multi-agent link opens under the right connection.
-export function linkParams(search: string = location.search): { agent: string | null; session: string | null; cwd: string | null } {
+// `at` is the absolute message index a search hit pointed at, carried across an
+// agent switch so a cross-agent hit still opens AT the match instead of at the
+// tail. Index 0 is a real hit, so only a non-integer or negative value degrades to
+// null. shareUrl deliberately omits it: a shared link points at a conversation,
+// not at one reader's search hit inside it.
+export function linkParams(search: string = location.search): { agent: string | null; session: string | null; cwd: string | null; at: number | null } {
   const q = new URLSearchParams(search);
-  return { agent: q.get("agent"), session: q.get("session"), cwd: q.get("cwd") };
+  const raw = q.get("at");
+  const at = raw === null || raw === "" ? NaN : Number(raw);
+  return {
+    agent: q.get("agent"), session: q.get("session"), cwd: q.get("cwd"),
+    at: Number.isInteger(at) && at >= 0 ? at : null,
+  };
 }
 
 // Build a shareable deep-link to a session from the current page location.

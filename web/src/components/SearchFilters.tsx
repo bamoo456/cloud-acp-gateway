@@ -17,10 +17,18 @@ export const DEFAULT_FILTERS: FilterState = {
 };
 
 const DAY_MS = 86400000;
-const isoOrUndefined = (v: string): string | undefined => {
-  if (!v) return undefined;
-  const ms = Date.parse(v);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+// <input type="date"> yields yyyy-mm-dd, which Date.parse reads as UTC midnight —
+// but the user picked a day on THEIR calendar, so both bounds are built locally.
+// `until` runs to the END of its day because the server's upper bound is inclusive
+// (`recencyMs > untilMs` skips, src/gateway.ts:1279): bounding at the start of the
+// chosen day would return nothing from that day, which reads as a broken filter.
+const dayBound = (v: string, edge: "start" | "end"): string | undefined => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return undefined;
+  const d = edge === "start"
+    ? new Date(+m[1], +m[2] - 1, +m[3], 0, 0, 0, 0)
+    : new Date(+m[1], +m[2] - 1, +m[3], 23, 59, 59, 999);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : undefined;
 };
 
 export function filtersToOptions(f: FilterState, cwd: string, nowMs: number): SearchOptions {
@@ -29,8 +37,8 @@ export function filtersToOptions(f: FilterState, cwd: string, nowMs: number): Se
   if (f.window === "30d") o.since = new Date(nowMs - 30 * DAY_MS).toISOString();
   if (f.window === "all") o.all = true;
   if (f.window === "custom") {
-    const since = isoOrUndefined(f.since);
-    const until = isoOrUndefined(f.until);
+    const since = dayBound(f.since, "start");
+    const until = dayBound(f.until, "end");
     if (since) o.since = since; else o.all = true; // an open-ended custom start means "everything"
     if (until) o.until = until;
   }

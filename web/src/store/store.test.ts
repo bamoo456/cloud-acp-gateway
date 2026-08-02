@@ -813,6 +813,27 @@ describe("store notification routing", () => {
     expect(useStore.getState().joining).toBe(true);
     expect(location.search).toContain("agent=codex");
     expect(location.search).toContain("session=codex-conv");
+    // No hit index in play, so the link stays exactly as short as it was.
+    expect(location.search).not.toContain("at=");
+  });
+
+  // Search spans every configured agent by default, so about half the hits on a
+  // multi-agent setup take the reconnect path. Dropping the index there would open
+  // them at the tail with no sign the deep link was discarded.
+  test("a cross-agent search hit carries its message index through the deep link", async () => {
+    document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
+      token: "test-token",
+      defaultAgent: "claude",
+      agents: [{ name: "claude", cwd: "/old" }, { name: "codex", cwd: "/codex-project", history: true }],
+      fsRoot: "/",
+    });
+    const { useStore } = await bootstrapClaude();
+
+    await useStore.getState().openHistorySession({
+      sessionId: "codex-conv", title: "Codex conversation", agentName: "codex", cwd: "/old", atMessage: 200,
+    });
+
+    expect(location.search).toContain("at=200");
   });
 
   test("openHistorySession opens in place when the conversation belongs to the active agent", async () => {
@@ -1343,6 +1364,37 @@ describe("store notification routing", () => {
     const url = historyCalls[0];
     expect(url).toContain("/history/messages?agent=codex");
     expect(url).toContain("session=codex-archived");
+  });
+
+  // The receiving half of the cross-agent hand-off: the joined session must open on
+  // the page holding the hit, not on its tail.
+  test("a deep-link carrying ?at= joins the conversation at that message", async () => {
+    history.replaceState(null, "", "/?session=codex-archived&cwd=%2Fcodex-project&at=200");
+    document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
+      token: "test-token",
+      defaultAgent: "codex",
+      agents: [{ name: "codex", cwd: "/codex-project", history: true, sessionLoad: false }],
+      fsRoot: "/",
+    });
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "the matched message" }] }],
+        total: 300, start: 190, truncated: true,
+      }),
+    }));
+    const { useStore } = await import("./store.ts");
+
+    const ws = await bootstrapAndWaitForSse(useStore);
+    ws.open();
+    await flush();
+    const init = JSON.parse(ws.sent[0]);
+    ws.recv({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } });
+    await flush();
+
+    expect(useStore.getState().activeId).toBe("codex-archived");
+    const url = historyCalls[0];
+    expect(url).toContain("from=190");
+    expect(url).toContain("to=240");
   });
 
   test("honors a live loadSession capability to resume a Codex deep-link over ACP", async () => {
