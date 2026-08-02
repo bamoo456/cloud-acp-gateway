@@ -18,3 +18,7 @@ test-results
 playwright-report
 .playwright
 docs
+# Test-only agent definitions (`npm test` points ACPG_AGENTS_FILE here). The
+# image never runs the suite, and an agents.*.json sitting next to the real
+# agents.json in a production image is only ever a chance to load the wrong one.
+agents.test.json
