@@ -1,6 +1,8 @@
 // Pure search primitives: no filesystem, no gateway state. Everything here is
 // deterministic on its inputs so the I/O stages can be tested separately.
 
+import type { ViewMessage } from "./gateway.ts"; // type-only: erased, so no import cycle
+
 export const MIN_QUERY_LEN = 2;
 
 export type ParsedQuery = {
@@ -71,4 +73,47 @@ export function buildSnippet(text: string, terms: string[]): SnippetResult | nul
   }
   offsets.sort((a, b) => a[0] - b[0]);
   return { snippet, offsets };
+}
+
+export const MAX_HITS_PER_SESSION = 3;
+
+export type SearchHit = {
+  index: number; // index into the session's ViewMessage[] — the same absolute
+                 // index /history/messages pages by, so a hit deep-links directly
+  role: "user" | "assistant";
+  snippet: string;
+  offsets: Array<[number, number]>;
+};
+
+// Only `text` blocks are searchable: tool arguments and tool output dominate a
+// transcript by volume and would drown real hits (the same reason
+// toolResultText caps them for display).
+function searchableText(msg: ViewMessage): string {
+  return msg.blocks
+    .filter((b) => b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text as string)
+    .join("\n");
+}
+
+export function findHits(
+  msgs: ViewMessage[],
+  query: ParsedQuery,
+  opts?: { role?: "user" | "assistant"; max?: number },
+): { hits: SearchHit[]; hitCount: number } {
+  const max = opts?.max ?? MAX_HITS_PER_SESSION;
+  const hits: SearchHit[] = [];
+  let hitCount = 0;
+  for (let i = 0; i < msgs.length; i++) {
+    const msg = msgs[i];
+    if (opts?.role && msg.role !== opts.role) continue;
+    const text = searchableText(msg);
+    if (!text) continue;
+    const hay = text.toLowerCase();
+    if (!query.terms.every((t) => hay.includes(t))) continue;
+    hitCount++;
+    if (hits.length >= max) continue;
+    const snip = buildSnippet(text, query.terms);
+    if (snip) hits.push({ index: i, role: msg.role, snippet: snip.snippet, offsets: snip.offsets });
+  }
+  return { hits, hitCount };
 }
