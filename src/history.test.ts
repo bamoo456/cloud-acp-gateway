@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams, searchCandidates, searchTranscripts, historyParseCacheSize } from "./gateway.ts";
+import { searchQueryParams, encodeCursor } from "./search-core.ts";
 import { Db } from "./db.ts";
 
 // The Claude history paths cache derived transcript metadata in the shared prefs
@@ -873,4 +874,277 @@ test("history page params: from/to are optional, integer-only, and range-capped"
     { limit: 120, from: 0, to: 2000 },
     "bounds are floored at 0 and the range length capped at MAX_HISTORY_PAGE",
   );
+});
+
+const NOW = Date.parse("2026-08-02T00:00:00.000Z");
+const searchParams = (qs: string) => searchQueryParams(new URLSearchParams(qs), NOW)!;
+// A root that contains the fixture cwds without meaningfully restricting them.
+// Not "/": resolveWithinRootBase compares against `root + path.sep`, so the
+// filesystem root denies everything (see the report's concerns).
+const permissiveRoot = () => os.tmpdir();
+
+// A transcript whose recorded activity is OLD but whose mtime was pushed forward
+// — the bulk-touch shape measured in the spec (1464 files sharing one mtime).
+function writeSkewedTranscript(projectsRoot: string, sessionId: string, cwd: string, activityAt: string, mtimeMs: number, text: string) {
+  return writeClaudeProjectTranscript(projectsRoot, "proj", sessionId, [
+    { type: "user", cwd, sessionId, timestamp: activityAt, message: { role: "user", content: text } },
+  ], mtimeMs);
+}
+
+test("search bounds by real activity, never by mtime (I1)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  // Real activity 2026-07-01, mtime faked to 2026-08-01.
+  writeSkewedTranscript(root, "s-skewed", cwd, "2026-07-01T00:00:00.000Z", Date.parse("2026-08-01T00:00:00.000Z"), "needle in an old turn");
+
+  const scope = { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() };
+  const agents = [{ name: "claude", cmd: CLAUDE_CMD }];
+
+  // `until` that only its MTIME violates must not drop it.
+  const kept = await searchCandidates(agents, searchParams("q=needle&all=1&until=2026-07-05T00:00:00Z"), scope);
+  assert.deepEqual(kept.candidates.map((c) => c.sessionId), ["s-skewed"]);
+
+  // `since` its MTIME would satisfy must still drop it.
+  const dropped = await searchCandidates(agents, searchParams("q=needle&since=2026-07-20T00:00:00Z"), scope);
+  assert.deepEqual(dropped.candidates.map((c) => c.sessionId), []);
+});
+
+test("search drops sessions outside FS_ROOT and sessions with no recoverable cwd (I2)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const allowed = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-in-"));
+  const denied = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-out-"));
+  const when = Date.parse("2026-08-01T00:00:00.000Z");
+  writeSkewedTranscript(root, "s-in", allowed, "2026-08-01T00:00:00.000Z", when, "needle inside");
+  writeSkewedTranscript(root, "s-out", denied, "2026-08-01T00:00:00.000Z", when, "needle outside");
+  // No cwd recorded anywhere in the transcript.
+  writeClaudeProjectTranscript(root, "proj", "s-nocwd", [
+    { type: "user", sessionId: "s-nocwd", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "needle nowhere" } },
+  ], when);
+
+  const r = await searchCandidates([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&all=1"),
+    { projectsRoot: root, fsRoot: allowed, store: memStore() });
+  assert.deepEqual(r.candidates.map((c) => c.sessionId), ["s-in"]);
+});
+
+test("search reports opencode as skipped rather than searching it", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const r = await searchCandidates(
+    [{ name: "claude", cmd: CLAUDE_CMD }, { name: "oc", cmd: OPENCODE_CMD }],
+    searchParams("q=needle&all=1"), { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.deepEqual(r.skipped, ["opencode"]);
+});
+
+test("search orders by real activity with sessionId breaking ties", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  const stale = Date.parse("2026-08-01T00:00:00.000Z");
+  writeSkewedTranscript(root, "s-old", cwd, "2026-07-01T00:00:00.000Z", stale, "needle old");
+  writeSkewedTranscript(root, "s-new", cwd, "2026-07-30T00:00:00.000Z", stale, "needle new");
+  writeSkewedTranscript(root, "s-tie-a", cwd, "2026-07-30T00:00:00.000Z", stale, "needle tie");
+
+  const r = await searchCandidates([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  // Order is (recency desc, sessionId desc): the two 07-30 sessions first, and
+  // within that tie "s-tie-a" outranks "s-new" because ids sort descending. All
+  // three share one mtime, so any mtime-based ranking would scramble this.
+  assert.deepEqual(r.candidates.map((c) => c.sessionId), ["s-tie-a", "s-new", "s-old"]);
+});
+
+test("a cursor resumes the candidate order without repeating or skipping", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  const stale = Date.parse("2026-08-01T00:00:00.000Z");
+  writeSkewedTranscript(root, "s-old", cwd, "2026-07-01T00:00:00.000Z", stale, "needle old");
+  writeSkewedTranscript(root, "s-new", cwd, "2026-07-30T00:00:00.000Z", stale, "needle new");
+  writeSkewedTranscript(root, "s-tie-a", cwd, "2026-07-30T00:00:00.000Z", stale, "needle tie");
+
+  const agents = [{ name: "claude", cmd: CLAUDE_CMD }];
+  const scope = { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() };
+  const first = await searchCandidates(agents, searchParams("q=needle&all=1"), scope);
+  assert.deepEqual(first.candidates.map((c) => c.sessionId), ["s-tie-a", "s-new", "s-old"]);
+
+  // Resuming from the first row must yield exactly the rest, in the same order.
+  // "s-new" shares its recency with the cursor, so this pins the tie branch: a
+  // resume that only compared recency would drop it, and one that compared it
+  // the other way would hand back "s-tie-a" a second time.
+  const cursor = encodeCursor({ recencyMs: first.candidates[0].recencyMs, sessionId: first.candidates[0].sessionId });
+  const rest = await searchCandidates(agents, searchParams("q=needle&all=1&cursor=" + cursor), scope);
+  assert.deepEqual(rest.candidates.map((c) => c.sessionId), ["s-new", "s-old"]);
+
+  // And walking to the end terminates rather than looping on the last row.
+  const last = encodeCursor({ recencyMs: rest.candidates[1].recencyMs, sessionId: rest.candidates[1].sessionId });
+  const done = await searchCandidates(agents, searchParams("q=needle&all=1&cursor=" + last), scope);
+  assert.deepEqual(done.candidates.map((c) => c.sessionId), []);
+});
+
+test("search finds a phrase in a user message and reports its message index", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s1", [
+    { type: "user", cwd, sessionId: "s1", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "unrelated opener" } },
+    { type: "assistant", sessionId: "s1", message: { role: "assistant", content: [{ type: "text", text: "The Liquid Glass chrome is in place" }] } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=liquid glass&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.equal(r.results.length, 1);
+  assert.equal(r.results[0].hits[0].index, 1);
+  assert.equal(r.results[0].hits[0].role, "assistant");
+  assert.ok(r.results[0].hits[0].snippet.includes("Liquid Glass"));
+  // realpathSync: the FS_ROOT guard resolves symlinks before it compares, so the
+  // cwd that comes back is the real one — on macOS os.tmpdir() is /var/... ->
+  // /private/var/.... Same convention as the discovery tests above.
+  assert.equal(r.results[0].cwd, fs.realpathSync(cwd));
+});
+
+test("search ignores a term that appears only in tool output", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s1", [
+    { type: "user", cwd, sessionId: "s1", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "read the file" } },
+    { type: "assistant", sessionId: "s1", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: { file: "x" } }] } },
+    { type: "user", sessionId: "s1", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "zzyzxmarker inside tool output" }] } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=zzyzxmarker&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.deepEqual(r.results, []);
+  // The probe DID hit the file — the exclusion is stage C's job, not the probe's.
+  assert.equal(r.scanned.files, 1);
+});
+
+test("search finds a CJK phrase despite the latin1 probe", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s1", [
+    { type: "user", cwd, sessionId: "s1", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "把時間軸改成液態玻璃" } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=" + encodeURIComponent("液態玻璃") + "&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.equal(r.results.length, 1);
+});
+
+test("search truncates at the limit and resumes from the cursor without overlap", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  for (const [i, id] of ["s1", "s2", "s3"].entries()) {
+    writeClaudeProjectTranscript(root, "proj", id, [
+      { type: "user", cwd, sessionId: id, timestamp: `2026-08-0${i + 1}T00:00:00.000Z`, message: { role: "user", content: "needle here" } },
+    ], Date.parse(`2026-08-0${i + 1}T00:00:00.000Z`));
+  }
+  const scope = { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() };
+  const agents = [{ name: "claude", cmd: CLAUDE_CMD }];
+
+  const first = await searchTranscripts(agents, searchParams("q=needle&all=1&limit=2"), scope);
+  assert.equal(first.results.length, 2);
+  assert.equal(first.truncated, true);
+  assert.ok(first.cursor);
+
+  const next = await searchTranscripts(agents, searchParams(`q=needle&all=1&limit=2&cursor=${first.cursor}`), scope);
+  const seen = new Set(first.results.map((r) => r.sessionId));
+  assert.equal(next.results.length, 1);
+  assert.equal(seen.has(next.results[0].sessionId), false, "resume must not repeat a session");
+});
+
+test("a limit that exactly covers the matches is not reported as truncated", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  for (const [i, id] of ["s1", "s2"].entries()) {
+    writeClaudeProjectTranscript(root, "proj", id, [
+      { type: "user", cwd, sessionId: id, timestamp: `2026-08-0${i + 1}T00:00:00.000Z`, message: { role: "user", content: "needle here" } },
+    ], Date.parse(`2026-08-0${i + 1}T00:00:00.000Z`));
+  }
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&all=1&limit=2"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.equal(r.results.length, 2);
+  // Nothing was left unexamined, so there is nothing to resume — offering a
+  // "繼續搜更早" button here would lead to an empty second page.
+  assert.equal(r.truncated, false);
+  assert.equal(r.cursor, null);
+});
+
+test("a hit's index round-trips through /history/messages to the right message", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s1", [
+    { type: "user", cwd, sessionId: "s1", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "first" } },
+    { type: "user", sessionId: "s1", message: { role: "user", content: "second" } },
+    { type: "user", sessionId: "s1", message: { role: "user", content: "zzyzxmarker is here" } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=zzyzxmarker&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  const idx = r.results[0].hits[0].index;
+  const page = await readAgentHistoryMessages(CLAUDE_CMD, cwd, "s1", 1, { projectsRoot: root, from: idx, to: idx + 1 });
+  assert.equal(page?.messages.length, 1);
+  assert.ok(page!.messages[0].blocks.some((b) => b.type === "text" && b.text?.includes("zzyzxmarker")));
+});
+
+test("search does not disturb the live paging cache (I3)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s-open", [
+    { type: "user", cwd, sessionId: "s-open", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "needle one" } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  // Warm the paging cache the way an open conversation does.
+  await readAgentHistoryMessages(CLAUDE_CMD, cwd, "s-open", 50, { projectsRoot: root });
+  const before = historyParseCacheSize();
+  await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.equal(historyParseCacheSize(), before, "search must not add to or evict from historyParseCache");
+});
+
+test("a query with no usable probe scans every candidate instead of none", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  // A quoted term cannot appear literally in JSONL bytes, so parseQuery refuses
+  // it as a probe. A null probe means "no prefilter" — every candidate must reach
+  // stage C, not be skipped as if the probe had missed.
+  writeClaudeProjectTranscript(root, "proj", "s-quoted", [
+    { type: "user", cwd, sessionId: "s-quoted", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: 'she said "hello" back' } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const params = searchParams("q=" + encodeURIComponent('"hello"') + "&all=1");
+  assert.equal(params.query.probe, null, "fixture guard: this query must have no probe");
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], params,
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.deepEqual(r.results.map((x) => x.sessionId), ["s-quoted"]);
+});
+
+// Codex is one of exactly two searchable providers, but every fixture above is
+// Claude — so parseForSearch's codex branch and the firstCodexUserText title
+// fallback would otherwise ship untested.
+test("search extracts a codex hit and titles it from the rollout's first user text", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codexhome-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+
+  // No session_index.jsonl at all, so there is no thread_name to take the title
+  // from — it has to come from firstCodexUserText streaming the rollout.
+  const file = writeCodexRollout(home, "S", { id: "CDX-S", cwd, timestamp: "2026-07-20T10:00:00.000Z" }, "codex opener");
+  // A tool call and its output sit between the two text messages. function_call
+  // pushes a message of its own while function_call_output folds into it, so the
+  // matching text lands at index 2 — the hit's index is only right if it counts
+  // every ViewMessage, which is what makes it a usable deep link into
+  // /history/messages. The tool output deliberately does not contain the term.
+  fs.appendFileSync(file, [
+    { type: "response_item", payload: { type: "function_call", call_id: "c1", name: "shell" } },
+    { type: "response_item", payload: { type: "function_call_output", call_id: "c1", output: "nothing relevant here" } },
+    { type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "The zzyzxmarker landed in the rollout" }] } },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const r = await withCodexHome(home, () => searchTranscripts([{ name: "codex", cmd: CODEX_CMD }],
+    searchParams("q=zzyzxmarker&all=1"), { fsRoot, store: memStore() }));
+
+  assert.equal(r.results.length, 1);
+  assert.equal(r.results[0].source, "codex-cli");
+  assert.equal(r.results[0].sessionId, "CDX-S");
+  assert.equal(r.results[0].hits[0].index, 2);
+  assert.equal(r.results[0].hits[0].role, "assistant");
+  assert.ok(r.results[0].hits[0].snippet.includes("zzyzxmarker"));
+  assert.equal(r.results[0].title, "codex opener", "no thread_name, so the title falls back to firstCodexUserText");
 });

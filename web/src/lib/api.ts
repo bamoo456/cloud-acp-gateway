@@ -259,3 +259,50 @@ export async function answerInbox(agentName: string, reqId: string, optionId: st
     return false;
   }
 }
+
+export interface SearchHit { index: number; role: "user" | "assistant"; snippet: string; offsets: Array<[number, number]>; }
+export interface SearchResultSession {
+  sessionId: string; source: "claude-cli" | "codex-cli"; agentName: string;
+  cwd: string; title: string | null; updatedAt: string; hitCount: number; hits: SearchHit[];
+}
+export interface SearchResponse {
+  results: SearchResultSession[]; truncated: boolean; cursor: string | null;
+  skipped: string[]; scanned: { files: number; bytes: number; ms: number };
+}
+export interface SearchOptions {
+  since?: string; until?: string; all?: boolean;
+  agent?: string; cwd?: string; role?: "user" | "assistant";
+  limit?: number; cursor?: string;
+}
+
+// Content search across conversations. `since`/`until` are date bounds — NOT the
+// `from`/`to` message indices getMessages pages by.
+export async function searchSessions(q: string, opts: SearchOptions = {}): Promise<SearchResponse> {
+  let url = base() + "/history/search?q=" + encodeURIComponent(q);
+  if (opts.since) url += "&since=" + encodeURIComponent(opts.since);
+  if (opts.until) url += "&until=" + encodeURIComponent(opts.until);
+  if (opts.all) url += "&all=1";
+  if (opts.agent) url += "&agent=" + encodeURIComponent(opts.agent);
+  if (opts.cwd) url += "&cwd=" + encodeURIComponent(opts.cwd);
+  if (opts.role) url += "&role=" + encodeURIComponent(opts.role);
+  if (opts.limit) url += "&limit=" + opts.limit;
+  if (opts.cursor) url += "&cursor=" + encodeURIComponent(opts.cursor);
+  const r = await readJson(await fetch(url), "Search isn't available.");
+  const results: Array<Record<string, unknown>> = Array.isArray(r?.results) ? r.results : [];
+  const scannedRaw = r && typeof r.scanned === "object" && r.scanned !== null ? r.scanned : {};
+  return {
+    // A wrong-typed but truthy `hits` (or `results`/`skipped`) would otherwise pass a
+    // gateway's malformed payload straight into a typed slot and throw when Task 11
+    // iterates it — degrade those cases to the empty shape, same as every other
+    // best-effort read in this file.
+    results: results.map((s) => ({ ...s, hits: Array.isArray(s?.hits) ? s.hits : [] })) as SearchResultSession[],
+    truncated: !!(r && r.truncated),
+    cursor: (r && r.cursor) || null,
+    skipped: Array.isArray(r?.skipped) ? r.skipped : [],
+    scanned: {
+      files: typeof scannedRaw.files === "number" ? scannedRaw.files : 0,
+      bytes: typeof scannedRaw.bytes === "number" ? scannedRaw.bytes : 0,
+      ms: typeof scannedRaw.ms === "number" ? scannedRaw.ms : 0,
+    },
+  };
+}

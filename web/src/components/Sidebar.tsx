@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
-import { getHistory, getDiscoveredHistory, type HistorySession, type DiscoveredHistorySession, type RunningTask } from "../lib/api.ts";
+import { useEffect, useRef, useState } from "react";
+import { getHistory, getDiscoveredHistory, searchSessions, type HistorySession, type DiscoveredHistorySession, type RunningTask, type SearchResponse } from "../lib/api.ts";
 import type { RecentSession } from "../lib/recentSessions.ts";
 import { resolveRunningTask, runningView } from "../lib/runningTask.ts";
 import { useStore } from "../store/store.ts";
 import { AgentMark } from "./AgentPill.tsx";
+import { SearchResults } from "./SearchResults.tsx";
+import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
 import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
@@ -15,6 +17,11 @@ import type { AgentRef } from "../types.ts";
 // gone" rather than "they're behind See more".
 const RECENT_LIMIT = 15;
 const CONVERSATION_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
+// A content search reads transcripts off disk, so it waits for the typing to
+// settle; a one-character term would scan everything to match everything, so it
+// never leaves the client at all.
+const SEARCH_DEBOUNCE_MS = 300;
+const MIN_SEARCH_LEN = 2;
 // A history row tagged with the agent it was fetched from, so the unified list can
 // show the owning agent's mark and reopen it under that agent.
 type TaggedHistory = HistorySession & { agentName: string };
@@ -51,6 +58,18 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const [showMoreRecent, setShowMoreRecent] = useState(false);
   const [discovered, setDiscovered] = useState<TaggedDiscoveredHistory[] | null>(null);
   const [tab, setTab] = useState<"recent" | "conversations">("recent");
+  // In-memory only, by design: neither localStorage nor the cross-device `meta` KV
+  // that holds text_size/screen_lock. A sticky custom range that silently applies
+  // to the next search is worse than re-picking it.
+  const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
+  const [searchRes, setSearchRes] = useState<SearchResponse | null>(null);
+  const [searching, setSearching] = useState(false);
+  // Every content search — debounced or cursor-resumed — stamps a generation, and
+  // only a response whose stamp is still current is allowed to reach state. A
+  // resumed page can take seconds, so without this it could land after the query
+  // was erased (resurrecting results under an empty box), after a newer query
+  // resolved (overwriting it with the old term's pages), or after unmount.
+  const searchGen = useRef(0);
   // The gateway marks agents with no native history reader as history:false.
   // Missing flag (dev fallback, older gateway) = supported.
   const agentByName = new Map(s.cfg.agents.map((a) => [a.name, a] as const));
@@ -106,14 +125,45 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   }
   useEffect(() => { loadHistory(true); loadDiscovered(true); }, [open, s.cwd, histAgentsKey, discoverAgentsKey]);
   // The panel always opens on Recent so cross-folder switching is one tap away,
-  // collapsed back to the first few recents.
-  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); } }, [open]);
+  // collapsed back to the first few recents. The search filters reset with it:
+  // they're deliberately unpersisted, and the panel stays mounted while closed
+  // (desktop keeps it as a column), so nothing else would ever drop them.
+  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setFilters(DEFAULT_FILTERS); } }, [open]);
   // refresh the list in place (no loading flash) when something renames a session
   useEffect(() => {
     if (s.historyNonce === 0) return;
     loadHistory(false);
     loadDiscovered(false);
   }, [s.historyNonce]);
+
+  // Tier 2: the server content search. Tier 1 (the local title filter above it) stays
+  // instant and untouched — this only ADDS the matches a title filter cannot see.
+  useEffect(() => {
+    // Only this tab renders the results, and one search reads transcripts off
+    // disk — so a folder or filter change with Conversations hidden would spend
+    // a full scan on a term nobody can see. Deliberately NOT gated on `open`:
+    // above 860px the panel is a persistent column (CSS `display: flex
+    // !important`) whose toggle button is hidden, so `open` is false there for
+    // a panel the user is looking at, and an `open` gate would kill search on
+    // desktop entirely.
+    if (tab !== "conversations") return;
+    const term = q.trim();
+    const gen = ++searchGen.current;
+    // Clearing `searching` here too: without it, backspacing from a pending query
+    // down to one character strands the spinner with no request left to answer it.
+    if (term.length < MIN_SEARCH_LEN) { setSearchRes(null); setSearching(false); return; }
+    setSearching(true);
+    const t = setTimeout(() => {
+      searchSessions(term, filtersToOptions(filters, s.cwd, Date.now()))
+        .then((r) => { if (gen === searchGen.current) setSearchRes(r); })
+        .catch(() => { if (gen === searchGen.current) setSearchRes(null); })
+        .finally(() => { if (gen === searchGen.current) setSearching(false); });
+    }, SEARCH_DEBOUNCE_MS);
+    // Drops a queued query a later keystroke or filter change has outdated, and
+    // retires this generation so nothing already in flight — from here or from the
+    // cursor-resume below — can still write state, including after unmount.
+    return () => { clearTimeout(t); searchGen.current++; };
+  }, [q, filters, s.cwd, tab]);
 
   // Running indicator, reusing the polled runningTasks. Rows can belong to any
   // agent now, so match on agent + sessionId (a bare sessionId could collide
@@ -181,6 +231,11 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const queriedItems = allItems.filter((it) => matchesQuery(it, q));
   const visibleItems = showMore ? queriedItems : queriedItems.filter((it) => withinRecentWindow(it.updatedAt));
   const hasOlderItems = queriedItems.some((it) => !withinRecentWindow(it.updatedAt));
+  // "The user already asked for this range, so widening it would discard what they
+  // asked for" — and `all` is the widest range there is. Leaving `all` out makes the
+  // 搜尋全部 button re-run the identical query forever and the resume cursor dead code.
+  const rangeExplicit = filters.window === "custom" || filters.window === "all";
+  const hasServerHits = (searchRes?.results.length ?? 0) > 0;
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
     const active = !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
     return (
@@ -335,16 +390,41 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                 <div className="search">
                   <input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
                 </div>
+                <SearchFilters value={filters} agents={s.cfg.agents.map((a) => a.name)} onChange={setFilters} />
                 <div className="sess-list">
                   {err && <div className="panel-empty">Couldn't load conversations.</div>}
                   {!err && items === null && <div className="panel-empty">Loading…</div>}
-                  {!err && items !== null && visibleItems.length === 0 && <div className="panel-empty">No conversations in this folder yet.</div>}
+                  {/* The title filter's empty state would otherwise sit right on top of
+                      the server's content hits, the two contradicting each other on screen. */}
+                  {!err && items !== null && visibleItems.length === 0 && !hasServerHits && <div className="panel-empty">No conversations in this folder yet.</div>}
                   {visibleItems.map((it) => renderItem(it))}
                   {!err && items !== null && hasOlderItems && (
                     <button className="see-more" onClick={() => setShowMore((v) => !v)}>
                       {showMore ? "Show recent only" : "See more"}
                     </button>
                   )}
+                  <SearchResults
+                    response={searchRes}
+                    loading={searching}
+                    rangeExplicit={rangeExplicit}
+                    onOpen={(r, index) => {
+                      void s.openHistorySession({ sessionId: r.sessionId, title: r.title, agentName: r.agentName, cwd: r.cwd, atMessage: index });
+                      onClose();
+                    }}
+                    onSearchAll={() => setFilters({ ...filters, window: "all" })}
+                    onSearchOlder={() => {
+                      // `searching` doubles as the re-entrancy guard: one page at a
+                      // time, so a second click can't stack a duplicate scan.
+                      const shown = searchRes;
+                      if (!shown?.cursor || searching) return;
+                      const gen = ++searchGen.current;
+                      setSearching(true);
+                      searchSessions(q.trim(), { ...filtersToOptions(filters, s.cwd, Date.now()), cursor: shown.cursor })
+                        .then((more) => { if (gen === searchGen.current) setSearchRes({ ...more, results: [...shown.results, ...more.results] }); })
+                        .catch(() => { /* keep the page already on screen */ })
+                        .finally(() => { if (gen === searchGen.current) setSearching(false); });
+                    }}
+                  />
                 </div>
               </div>
             )}

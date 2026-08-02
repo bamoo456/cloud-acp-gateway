@@ -42,6 +42,7 @@ import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.
 import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { buildClientConfig } from "./client-config.ts";
+import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
 const ROOT = path.join(__dirname, "..");
 
@@ -542,7 +543,7 @@ function db(): Db {
 // `tool_result` is internal — used to pair a tool's output/status back onto its
 // `tool_use` block (they live on different messages), then stripped before the
 // view is sent. The client-facing blocks are only text/thought/tool.
-type ViewBlock = {
+export type ViewBlock = {
   type: "text" | "thought" | "tool" | "tool_result" | "image";
   text?: string; name?: string;
   toolCallId?: string; status?: "completed" | "failed"; output?: string;
@@ -551,7 +552,7 @@ type ViewBlock = {
 };
 type HistorySessionItem = { sessionId: string; title: string | null; updatedAt: string };
 type DiscoveredHistorySessionItem = HistorySessionItem & { cwd: string; source: "claude-cli" | "codex-cli" };
-type ViewMessage = { role: "user" | "assistant"; blocks: ViewBlock[] };
+export type ViewMessage = { role: "user" | "assistant"; blocks: ViewBlock[] };
 type HistoryMessagesResult = { messages: ViewMessage[]; total: number; start: number; truncated: boolean };
 
 // One page of a transcript. Two modes: `limit` alone gives the tail (what every
@@ -604,6 +605,9 @@ export function historyPageParams(q: URLSearchParams): { limit: number; from?: n
 // "the conversations someone is scrolling through right now".
 const HISTORY_PARSE_CACHE_MAX = 8;
 const historyParseCache = new Map<string, { mtimeMs: number; size: number; msgs: ViewMessage[] }>();
+
+// Exported for the I3 test: search must never add to or evict from this cache.
+export function historyParseCacheSize(): number { return historyParseCache.size; }
 
 async function cachedParse(file: string, parse: () => Promise<ViewMessage[]>): Promise<ViewMessage[]> {
   let stat: fs.Stats;
@@ -838,19 +842,40 @@ function byClaudeRecency(a: ClaudeRecency, b: ClaudeRecency): number {
   return b.mtime - a.mtime;
 }
 
-export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRoot?: string; limit?: number; store?: Db }): Promise<DiscoveredHistorySessionItem[]> {
-  const projectsRoot = opts?.projectsRoot ?? path.join(CLAUDE_DIR, "projects");
-  const fsRoot = opts?.fsRoot ?? FS_ROOT;
-  const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
-  const store = transcriptStore(opts?.store);
+// One transcript as the search and discovery paths both see it: located, with
+// the cwd it records and its REAL last activity.
+//
+// `mtime` does NOT mean the same thing on both producers, and only the claude
+// arm holds the invariant byClaudeRecency describes:
+//   - claudeTranscriptCandidates: a tiebreak WITHIN a recencyAt rank, never a
+//     rank of its own — that is the seam the phantom touches came through.
+//   - codexTranscriptCandidates: `recencyAt` is session_index.jsonl's
+//     `updated_at` and nothing else, and most rollouts have no index entry at
+//     all (measured on one real corpus: 459 of 567, 81%). For those, mtime is
+//     the last-resort rank AND — new with /history/search — the sole since/until
+//     bound, so a bulk touch of ~/.codex would both reorder them and move them
+//     in and out of a date filter, exactly as one did to ~/.claude. That is the
+//     seam to close if it ever happens.
+// The tempting swap is not the fix: all 567 of those rollouts do carry a head
+// timestamp, but it is the session's START time, so substituting it wholesale
+// would rank a conversation that ran for hours by when it began. Closing this
+// properly means each rollout's LAST timestamped line — the codex equivalent of
+// what claudeTranscriptMeta already derives — which stage A deliberately does
+// not pay for on every session on disk.
+type TranscriptCandidate = {
+  sessionId: string; file: string; cwd: string | null; title: string | null;
+  recencyAt: string | null; mtime: number; source: "claude-cli" | "codex-cli";
+};
+
+async function claudeTranscriptCandidates(projectsRoot: string, store: Db | null): Promise<TranscriptCandidate[]> {
   let projects: fs.Dirent[];
   try { projects = await fs.promises.readdir(projectsRoot, { withFileTypes: true }); } catch { return []; }
 
   const files: Array<{ sessionId: string; file: string; size: number; mtime: number }> = [];
   for (const project of projects) {
     if (!project.isDirectory()) continue;
-    let entries: fs.Dirent[];
     const dir = path.join(projectsRoot, project.name);
+    let entries: fs.Dirent[];
     try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.startsWith("agent-")) continue;
@@ -858,21 +883,33 @@ export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRo
       try {
         const st = await fs.promises.stat(file);
         files.push({ sessionId: entry.name.replace(/\.jsonl$/, ""), file, size: st.size, mtime: Math.round(st.mtimeMs) });
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
     }
   }
+
+  const messaged = lastMessageAts(store);
+  const out: TranscriptCandidate[] = [];
+  for (const f of files) {
+    const meta = await claudeTranscriptMeta(f.sessionId, f.file, f.size, f.mtime, store);
+    out.push({
+      sessionId: f.sessionId, file: f.file, cwd: meta.cwd, title: meta.title,
+      recencyAt: laterIso(meta.lastActivityAt, messaged.get(f.sessionId) ?? null),
+      mtime: f.mtime, source: "claude-cli",
+    });
+  }
+  return out;
+}
+
+export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRoot?: string; limit?: number; store?: Db }): Promise<DiscoveredHistorySessionItem[]> {
+  const projectsRoot = opts?.projectsRoot ?? path.join(CLAUDE_DIR, "projects");
+  const fsRoot = opts?.fsRoot ?? FS_ROOT;
+  const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
+  const store = transcriptStore(opts?.store);
 
   // Resolve every candidate's activity BEFORE ranking: the sort and the limit cut
   // have to agree on one value, or a phantom-touched transcript still evicts a
   // genuinely-recent session. Cheap in steady state — unchanged files are cached.
-  const messaged = lastMessageAts(store);
-  const metas: Array<typeof files[number] & ClaudeTranscriptMeta & ClaudeRecency> = [];
-  for (const f of files) {
-    const meta = await claudeTranscriptMeta(f.sessionId, f.file, f.size, f.mtime, store);
-    metas.push({ ...f, ...meta, recencyAt: laterIso(meta.lastActivityAt, messaged.get(f.sessionId) ?? null) });
-  }
+  const metas = await claudeTranscriptCandidates(projectsRoot, store);
   metas.sort(byClaudeRecency);
 
   const out: DiscoveredHistorySessionItem[] = [];
@@ -1141,6 +1178,21 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
   })));
 }
 
+// Codex's own recency lives in session_index.jsonl. CodexSessionFile.updatedAt
+// is mtime-derived, so it is the fallback only — same rule as I1. `thread_name`
+// comes from the same index read, so it is free; what is NOT derived here is the
+// firstCodexUserText fallback, which streams a rollout. Paying that per session
+// on disk is the difference between a listing and reading a gigabyte.
+async function codexTranscriptCandidates(): Promise<TranscriptCandidate[]> {
+  const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
+  return sessions.map((s) => ({
+    sessionId: s.id, file: s.file, cwd: s.cwd,
+    title: index.get(s.id)?.thread_name ?? null,
+    recencyAt: index.get(s.id)?.updated_at ?? null,
+    mtime: dateValue(s.updatedAt), source: "codex-cli" as const,
+  }));
+}
+
 // Codex counterpart to discoverClaudeHistory: every rollout on disk, whatever
 // folder it belongs to. listCodexSessionFiles already recovers each session's
 // cwd from its rollout head — listCodexHistory only filters that down to one
@@ -1154,29 +1206,200 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
 export async function discoverCodexHistory(opts?: { fsRoot?: string; limit?: number }): Promise<DiscoveredHistorySessionItem[]> {
   const fsRoot = opts?.fsRoot ?? FS_ROOT;
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
-  const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
 
-  const within: Array<CodexSessionFile & { index?: CodexIndexEntry }> = [];
-  for (const s of sessions) {
-    const cwd = resolveWithinRootBase(s.cwd, fsRoot);
+  const candidates = await codexTranscriptCandidates();
+  const within: TranscriptCandidate[] = [];
+  for (const c of candidates) {
+    const cwd = c.cwd ? resolveWithinRootBase(c.cwd, fsRoot) : null;
     if (!cwd) continue;
-    within.push({ ...s, cwd, index: index.get(s.id) });
+    within.push({ ...c, cwd });
   }
   const top = within
-    .sort((a, b) => dateValue(b.index?.updated_at || b.updatedAt) - dateValue(a.index?.updated_at || a.updatedAt))
+    .sort((a, b) => (dateValue(b.recencyAt ?? undefined) || b.mtime) - (dateValue(a.recencyAt ?? undefined) || a.mtime))
     .slice(0, limit);
 
   // One readTitles per distinct surviving folder rather than per session.
   const customByCwd = new Map<string, Record<string, string>>();
-  for (const cwd of new Set(top.map((s) => s.cwd))) customByCwd.set(cwd, await readTitles(cwd));
+  for (const cwd of new Set(top.map((s) => s.cwd as string))) customByCwd.set(cwd, await readTitles(cwd));
 
   return Promise.all(top.map(async (s) => ({
-    sessionId: s.id,
-    title: customByCwd.get(s.cwd)?.[s.id] ?? s.index?.thread_name ?? (await firstCodexUserText(s.file)),
-    updatedAt: s.index?.updated_at ?? s.updatedAt,
-    cwd: s.cwd,
+    sessionId: s.sessionId,
+    title: customByCwd.get(s.cwd as string)?.[s.sessionId] ?? s.title ?? (await firstCodexUserText(s.file)),
+    updatedAt: s.recencyAt ?? new Date(s.mtime).toISOString(),
+    cwd: s.cwd as string,
     source: "codex-cli" as const,
   })));
+}
+
+export type SearchCandidate = {
+  sessionId: string; file: string; cwd: string; title: string | null;
+  source: "claude-cli" | "codex-cli"; agentName: string; recencyMs: number;
+};
+
+export type SearchScope = { projectsRoot?: string; fsRoot?: string; store?: Db; cwd?: string | null };
+
+// Providers whose conversations can be searched. opencode is out for the same
+// reason it is out of DISCOVERABLE_PROVIDERS: no transcript to recover a cwd
+// from, and the FS_ROOT guard on message content depends on having one.
+const SEARCHABLE_PROVIDERS: HistoryProvider[] = ["claude", "codex"];
+
+// Stage A. Every searchable transcript, with the cwd it records and its REAL
+// last activity, filtered and ordered. Nothing here opens a transcript for its
+// content — that is stage B, and it only ever sees candidates that survived the
+// FS_ROOT guard below.
+export async function searchCandidates(
+  agents: Array<{ name: string; cmd: string }>,
+  params: SearchQuery,
+  opts?: SearchScope,
+): Promise<{ candidates: SearchCandidate[]; skipped: string[] }> {
+  const fsRoot = opts?.fsRoot ?? FS_ROOT;
+  const store = transcriptStore(opts?.store);
+  const wanted = params.agents ? new Set(params.agents) : null;
+
+  // One agent name per provider — a provider's store is the same store whichever
+  // configured agent you came in under (agents.example.json ships two claudes).
+  // So with no ?agent= filter, results are attributed to whichever agent is first
+  // in cfg.agents for that provider. That is deliberate and matches
+  // deleteHistorySession's reasoning: an agent name says where a conversation was
+  // seen from, it does not identify the conversation.
+  const agentByProvider = new Map<HistoryProvider, string>();
+  const skipped = new Set<string>();
+  for (const a of agents) {
+    if (wanted && !wanted.has(a.name)) continue;
+    const provider = historyProviderFor(a.cmd);
+    if (!provider) continue;
+    if (!SEARCHABLE_PROVIDERS.includes(provider)) { skipped.add(provider); continue; }
+    if (!agentByProvider.has(provider)) agentByProvider.set(provider, a.name);
+  }
+
+  const raw: TranscriptCandidate[] = [];
+  if (agentByProvider.has("claude")) {
+    raw.push(...await claudeTranscriptCandidates(opts?.projectsRoot ?? claudeProjectsRoot(), store));
+  }
+  if (agentByProvider.has("codex")) {
+    raw.push(...await codexTranscriptCandidates());
+  }
+
+  const candidates: SearchCandidate[] = [];
+  for (const c of raw) {
+    // I2: the cwd the transcript itself records, guarded before the file is read.
+    if (!c.cwd) continue;
+    const cwd = resolveWithinRootBase(c.cwd, fsRoot);
+    if (!cwd) continue;
+    if (opts?.cwd && !sameCwd(cwd, opts.cwd)) continue;
+
+    // I1: bound on real activity; mtime is only the fallback when there is none.
+    const parsed = c.recencyAt ? Date.parse(c.recencyAt) : NaN;
+    const recencyMs = Number.isFinite(parsed) ? parsed : c.mtime;
+    if (params.sinceMs !== null && recencyMs < params.sinceMs) continue;
+    if (params.untilMs !== null && recencyMs > params.untilMs) continue;
+    if (params.cursor && !afterCursor(params.cursor, { recencyMs, sessionId: c.sessionId })) continue;
+
+    candidates.push({
+      sessionId: c.sessionId, file: c.file, cwd, title: c.title, source: c.source,
+      agentName: agentByProvider.get(c.source === "claude-cli" ? "claude" : "codex") ?? "",
+      recencyMs,
+    });
+  }
+
+  // Shared with afterCursor above, not restated here: the filter and the sort
+  // must agree on "sorts after" or a resumed scan repeats or skips sessions.
+  candidates.sort(bySearchOrder);
+  return { candidates, skipped: [...skipped] };
+}
+
+// Wall-clock ceiling for one search. A server constant, never a query parameter:
+// a client must not be able to ask the gateway for a 60-second scan.
+export const SEARCH_BUDGET_MS = 2000;
+
+export type SearchResultSession = {
+  sessionId: string; source: "claude-cli" | "codex-cli"; agentName: string;
+  cwd: string; title: string | null; updatedAt: string;
+  hitCount: number; hits: SearchHit[];
+};
+
+export type SearchResponse = {
+  results: SearchResultSession[]; truncated: boolean; cursor: string | null;
+  skipped: string[]; scanned: { files: number; bytes: number; ms: number };
+};
+
+// Stage C parses directly instead of through cachedParse: historyParseCache holds
+// 8 entries for the conversation someone is scrolling RIGHT NOW, and one search
+// would flush it. This cache is request-scoped and dies with the response (I3).
+async function parseForSearch(c: SearchCandidate, cache: Map<string, ViewMessage[]>): Promise<ViewMessage[]> {
+  const hit = cache.get(c.file);
+  if (hit) return hit;
+  const msgs = c.source === "claude-cli"
+    ? await parseClaudeHistoryMessages(c.file, c.sessionId)
+    : await parseCodexHistoryMessages(c.file);
+  cache.set(c.file, msgs);
+  return msgs;
+}
+
+export async function searchTranscripts(
+  agents: Array<{ name: string; cmd: string }>,
+  params: SearchQuery,
+  opts?: SearchScope & { budgetMs?: number; clock?: () => number },
+): Promise<SearchResponse> {
+  const { candidates, skipped } = await searchCandidates(agents, params, opts);
+  const budgetMs = opts?.budgetMs ?? SEARCH_BUDGET_MS;
+  const clock = opts?.clock ?? (() => Date.now());
+  const startedAt = clock();
+
+  // Stage B probe. The query goes through the same UTF-8 → latin1 mapping the
+  // file bytes do, so a CJK term still lines up; latin1 + /i can only be MORE
+  // permissive than a true match, so it yields false positives, never misses.
+  const probe = params.query.probe
+    ? new RegExp(escapeRegExp(Buffer.from(params.query.probe, "utf8").toString("latin1")), "i")
+    : null;
+
+  const results: SearchResultSession[] = [];
+  const parsed = new Map<string, ViewMessage[]>();
+  let files = 0, bytes = 0, examined = 0;
+  let last: SearchCandidate | null = null;
+
+  for (const c of candidates) {
+    if (results.length >= params.limit || clock() - startedAt >= budgetMs) break;
+    examined++;
+    last = c;
+
+    let buf: Buffer;
+    try { buf = await fs.promises.readFile(c.file); } catch { continue; }
+    files++; bytes += buf.length;
+    if (probe && !probe.test(buf.toString("latin1"))) continue;
+
+    const { hits, hitCount } = findHits(await parseForSearch(c, parsed), params.query,
+      { role: params.role ?? undefined });
+    if (hitCount === 0) continue;
+
+    results.push({
+      sessionId: c.sessionId, source: c.source, agentName: c.agentName, cwd: c.cwd,
+      title: c.title, updatedAt: new Date(c.recencyMs).toISOString(), hitCount, hits,
+    });
+  }
+
+  // Titles are resolved only for sessions that actually matched: firstCodexUserText
+  // streams a rollout, and readTitles hits the disk once per folder. Paying either
+  // per candidate instead of per result is the difference between a search and a
+  // full read of the corpus.
+  const customByCwd = new Map<string, Record<string, string>>();
+  for (const cwd of new Set(results.map((r) => r.cwd))) customByCwd.set(cwd, await readTitles(cwd));
+  for (const r of results) {
+    if (r.title === null && r.source === "codex-cli") {
+      const file = candidates.find((c) => c.sessionId === r.sessionId)?.file;
+      if (file) r.title = await firstCodexUserText(file);
+    }
+    r.title = customByCwd.get(r.cwd)?.[r.sessionId] ?? r.title;
+  }
+
+  const truncated = examined < candidates.length;
+  return {
+    results,
+    truncated,
+    cursor: truncated && last ? encodeCursor({ recencyMs: last.recencyMs, sessionId: last.sessionId }) : null,
+    skipped,
+    scanned: { files, bytes, ms: Math.round(clock() - startedAt) },
+  };
 }
 
 async function findCodexSessionFile(cwd: string, sessionId: string): Promise<CodexSessionFile | null> {
@@ -3309,7 +3532,7 @@ export function handleSseRpc(
   return true;
 }
 
-function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+export function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
   const pathname = (req.url ?? "/").split("?")[0];
 
   // SSE downstream + POST upstream transport. Authenticates like the WS upgrade
@@ -3557,6 +3780,32 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       .then((sessions) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ sessions }));
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Content search across past conversations, spanning every folder and every
+  // searchable agent. Unlike /history and /history/discovered this returns
+  // message TEXT, so the FS_ROOT guard inside searchCandidates is a real leak
+  // boundary rather than a listing nicety — see I2 in the design doc.
+  if (consoleEnabled && pathname === "/history/search") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const params = searchQueryParams(q, Date.now());
+    if (!params) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "query must be at least 2 characters" }));
+      return;
+    }
+    // An explicitly-supplied cwd that fails the root check is a client error, not
+    // a silently-widened search.
+    const rawCwd = q.get("cwd");
+    const cwd = rawCwd ? resolveWithinRoot(rawCwd) : null;
+    if (rawCwd && !cwd) { res.writeHead(400); res.end(); return; }
+    const agents = Object.entries(cfg.agents).map(([name, a]) => ({ name, cmd: a.cmd }));
+    searchTranscripts(agents, params, { cwd })
+      .then((r) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(r));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;

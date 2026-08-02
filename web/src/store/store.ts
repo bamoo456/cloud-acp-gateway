@@ -87,7 +87,9 @@ interface State {
   setActive: (id: string) => void;
   selectSession: (id: string) => void;
   newSession: () => Promise<void>;
-  openHistorySession: (s: { sessionId: string; title: string | null; agentName?: string; cwd?: string }) => Promise<void>;
+  // atMessage: an absolute message index (a search hit) to open the conversation at,
+  // instead of its tail.
+  openHistorySession: (s: { sessionId: string; title: string | null; agentName?: string; cwd?: string; atMessage?: number }) => Promise<void>;
   openRecentSession: (s: RecentSession) => Promise<void>;
   loadOlderMessages: (id: string) => Promise<void>;
   sendPrompt: (text: string, images?: MessageImage[], files?: MessageFile[]) => Promise<void>;
@@ -154,6 +156,17 @@ const lastSessionByAgent = new Map<string, { id: string; cwd: string }>();
 const agentCursors = new Map<string, number>();
 const PROVISIONAL = () => "pending-" + Math.random().toString(36).slice(2);
 const MAX_LIVE_SESSIONS = 8;
+const HISTORY_PAGE = 50;
+// A search hit deep-links to an absolute message index. Anchor its page a little
+// BEFORE the match so the lead-in to it is on screen rather than the match sitting
+// on the very first line. Keyed on `undefined`, never on falsiness: index 0 is a
+// legitimate hit (the conversation's opening message).
+const HIT_LEAD_IN = 10;
+function historyPageFor(atMessage?: number): { limit?: number; from?: number; to?: number } {
+  if (atMessage === undefined) return { limit: HISTORY_PAGE };
+  const from = Math.max(0, atMessage - HIT_LEAD_IN);
+  return { from, to: from + HISTORY_PAGE };
+}
 
 export const useStore = create<State>((set, get) => {
   const cfg = readConfig();
@@ -298,7 +311,7 @@ export const useStore = create<State>((set, get) => {
     return get().cfg.agents.find((a) => a.name === get().agentName)?.sessionLoad !== false;
   }
 
-  async function openSavedSession(s: { sessionId: string; title: string | null }, cwd: string) {
+  async function openSavedSession(s: { sessionId: string; title: string | null; atMessage?: number }, cwd: string) {
     const id = s.sessionId;
     if (activateLive(id)) return;   // live in memory → instant, cwd restored
     let sess = get().sessions[id] || makeSession(id, Date.now(), { agentName: get().agentName, cwd });
@@ -306,7 +319,7 @@ export const useStore = create<State>((set, get) => {
     sess = { ...sess, viewOnly: true };
     set((st) => ({ sessions: { ...st.sessions, [id]: sess }, activeId: id, cwd, tip: "Loading conversation…" }));
     try {
-      const r = await getMessages(get().agentName, cwd, id, { limit: 50 });
+      const r = await getMessages(get().agentName, cwd, id, historyPageFor(s.atMessage));
       set((st) => {
         let cur = makeSession(id, st.sessions[id].createdAt, { agentName: get().agentName, cwd });
         cur = { ...cur, title: st.sessions[id].title, viewOnly: true, historyStart: r.start };
@@ -602,10 +615,10 @@ export const useStore = create<State>((set, get) => {
   // as a live viewer. Agents without session/load (Codex ACP today) fall back to
   // the history API as a saved, view-only conversation; replying forks a new
   // session because the old id cannot be resumed over ACP.
-  async function joinSession(id: string) {
+  async function joinSession(id: string, atMessage?: number) {
     if (!agentCanLoadSession()) {
       set({ joining: false });
-      await openSavedSession({ sessionId: id, title: null }, get().cwd);
+      await openSavedSession({ sessionId: id, title: null, atMessage }, get().cwd);
       return;
     }
     // the Thread shows a "Joining conversation…" loading view (s.joining), so no tip needed
@@ -613,7 +626,7 @@ export const useStore = create<State>((set, get) => {
     try {
       patch(id, (s) => ({ ...s, suppressReplay: true })); // drop the agent's load-replay; render from the history API instead
       const lr = (await acp.request("session/load", { sessionId: id, cwd: get().cwd || "", mcpServers: [] })) as NewSessionResult;
-      const r = await getMessages(get().agentName, get().cwd, id, { limit: 50 });
+      const r = await getMessages(get().agentName, get().cwd, id, historyPageFor(atMessage));
       set((st) => {
         const base = makeSession(id, st.sessions[id]?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd });
         const cur = applyHistoryMessages({ ...base, historyStart: r.start }, r.messages);
@@ -656,11 +669,14 @@ export const useStore = create<State>((set, get) => {
   // URL, tear down the current channel, and let handleStatus pick up link.session
   // once the target agent is ready. Used to open a sidebar conversation that lives
   // under a different agent (and by jumpToTask for cross-agent/-folder tasks).
-  function openViaDeepLink(agentName: string, sessionId: string, cwd: string | undefined, tip: string) {
+  function openViaDeepLink(agentName: string, sessionId: string, cwd: string | undefined, tip: string, atMessage?: number) {
     const params = new URLSearchParams();
     params.set("agent", agentName);
     params.set("session", sessionId);
     if (cwd) params.set("cwd", cwd);
+    // A search hit's message index survives the reconnect; without it a cross-agent
+    // hit would silently open at the tail. `undefined`, not falsiness — index 0 is real.
+    if (atMessage !== undefined) params.set("at", String(atMessage));
     history.replaceState(null, "", location.pathname + "?" + params.toString());
     acp?.close();
     clearReconnectTimer();
@@ -718,7 +734,7 @@ export const useStore = create<State>((set, get) => {
           } else if (link.session && get().activeId !== link.session) {
             // deep-link: join the shared session instead of creating our own
             if (link.cwd && get().cwd !== link.cwd) set({ cwd: link.cwd });
-            await joinSession(link.session);
+            await joinSession(link.session, link.at ?? undefined);
           } else {
             // Pick an activation target. An explicit selectSession request always wins.
             // Otherwise restore the conversation we left under this agent ONLY when no
@@ -1008,11 +1024,11 @@ export const useStore = create<State>((set, get) => {
       const agentName = s.agentName ?? get().agentName;
       const cwd = s.cwd ?? get().cwd;
       if (agentName !== get().agentName) {
-        openViaDeepLink(agentName, s.sessionId, cwd, "Opening conversation…");
+        openViaDeepLink(agentName, s.sessionId, cwd, "Opening conversation…", s.atMessage);
         return;
       }
       if (cwd !== get().cwd) { sessionInit = null; set({ cwd }); } // cold: adopt that folder, NO wipe
-      await openSavedSession({ sessionId: s.sessionId, title: s.title }, cwd);
+      await openSavedSession({ sessionId: s.sessionId, title: s.title, atMessage: s.atMessage }, cwd);
     },
 
     // Fetch the page immediately before what's loaded and prepend it. Absolute
