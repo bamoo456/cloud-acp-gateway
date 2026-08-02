@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams, searchCandidates } from "./gateway.ts";
+import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams, searchCandidates, searchTranscripts, historyParseCacheSize } from "./gateway.ts";
 import { searchQueryParams, encodeCursor } from "./search-core.ts";
 import { Db } from "./db.ts";
 
@@ -975,4 +975,141 @@ test("a cursor resumes the candidate order without repeating or skipping", async
   const last = encodeCursor({ recencyMs: rest.candidates[1].recencyMs, sessionId: rest.candidates[1].sessionId });
   const done = await searchCandidates(agents, searchParams("q=needle&all=1&cursor=" + last), scope);
   assert.deepEqual(done.candidates.map((c) => c.sessionId), []);
+});
+
+test("search finds a phrase in a user message and reports its message index", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s1", [
+    { type: "user", cwd, sessionId: "s1", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "unrelated opener" } },
+    { type: "assistant", sessionId: "s1", message: { role: "assistant", content: [{ type: "text", text: "The Liquid Glass chrome is in place" }] } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=liquid glass&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.equal(r.results.length, 1);
+  assert.equal(r.results[0].hits[0].index, 1);
+  assert.equal(r.results[0].hits[0].role, "assistant");
+  assert.ok(r.results[0].hits[0].snippet.includes("Liquid Glass"));
+  // realpathSync: the FS_ROOT guard resolves symlinks before it compares, so the
+  // cwd that comes back is the real one — on macOS os.tmpdir() is /var/... ->
+  // /private/var/.... Same convention as the discovery tests above.
+  assert.equal(r.results[0].cwd, fs.realpathSync(cwd));
+});
+
+test("search ignores a term that appears only in tool output", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s1", [
+    { type: "user", cwd, sessionId: "s1", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "read the file" } },
+    { type: "assistant", sessionId: "s1", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: { file: "x" } }] } },
+    { type: "user", sessionId: "s1", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "zzyzxmarker inside tool output" }] } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=zzyzxmarker&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.deepEqual(r.results, []);
+  // The probe DID hit the file — the exclusion is stage C's job, not the probe's.
+  assert.equal(r.scanned.files, 1);
+});
+
+test("search finds a CJK phrase despite the latin1 probe", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s1", [
+    { type: "user", cwd, sessionId: "s1", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "把時間軸改成液態玻璃" } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=" + encodeURIComponent("液態玻璃") + "&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.equal(r.results.length, 1);
+});
+
+test("search truncates at the limit and resumes from the cursor without overlap", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  for (const [i, id] of ["s1", "s2", "s3"].entries()) {
+    writeClaudeProjectTranscript(root, "proj", id, [
+      { type: "user", cwd, sessionId: id, timestamp: `2026-08-0${i + 1}T00:00:00.000Z`, message: { role: "user", content: "needle here" } },
+    ], Date.parse(`2026-08-0${i + 1}T00:00:00.000Z`));
+  }
+  const scope = { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() };
+  const agents = [{ name: "claude", cmd: CLAUDE_CMD }];
+
+  const first = await searchTranscripts(agents, searchParams("q=needle&all=1&limit=2"), scope);
+  assert.equal(first.results.length, 2);
+  assert.equal(first.truncated, true);
+  assert.ok(first.cursor);
+
+  const next = await searchTranscripts(agents, searchParams(`q=needle&all=1&limit=2&cursor=${first.cursor}`), scope);
+  const seen = new Set(first.results.map((r) => r.sessionId));
+  assert.equal(next.results.length, 1);
+  assert.equal(seen.has(next.results[0].sessionId), false, "resume must not repeat a session");
+});
+
+test("a limit that exactly covers the matches is not reported as truncated", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  for (const [i, id] of ["s1", "s2"].entries()) {
+    writeClaudeProjectTranscript(root, "proj", id, [
+      { type: "user", cwd, sessionId: id, timestamp: `2026-08-0${i + 1}T00:00:00.000Z`, message: { role: "user", content: "needle here" } },
+    ], Date.parse(`2026-08-0${i + 1}T00:00:00.000Z`));
+  }
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&all=1&limit=2"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.equal(r.results.length, 2);
+  // Nothing was left unexamined, so there is nothing to resume — offering a
+  // "繼續搜更早" button here would lead to an empty second page.
+  assert.equal(r.truncated, false);
+  assert.equal(r.cursor, null);
+});
+
+test("a hit's index round-trips through /history/messages to the right message", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s1", [
+    { type: "user", cwd, sessionId: "s1", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "first" } },
+    { type: "user", sessionId: "s1", message: { role: "user", content: "second" } },
+    { type: "user", sessionId: "s1", message: { role: "user", content: "zzyzxmarker is here" } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=zzyzxmarker&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  const idx = r.results[0].hits[0].index;
+  const page = await readAgentHistoryMessages(CLAUDE_CMD, cwd, "s1", 1, { projectsRoot: root, from: idx, to: idx + 1 });
+  assert.equal(page?.messages.length, 1);
+  assert.ok(page!.messages[0].blocks.some((b) => b.type === "text" && b.text?.includes("zzyzxmarker")));
+});
+
+test("search does not disturb the live paging cache (I3)", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  writeClaudeProjectTranscript(root, "proj", "s-open", [
+    { type: "user", cwd, sessionId: "s-open", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "needle one" } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  // Warm the paging cache the way an open conversation does.
+  await readAgentHistoryMessages(CLAUDE_CMD, cwd, "s-open", 50, { projectsRoot: root });
+  const before = historyParseCacheSize();
+  await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&all=1"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.equal(historyParseCacheSize(), before, "search must not add to or evict from historyParseCache");
+});
+
+test("a query with no usable probe scans every candidate instead of none", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  // A quoted term cannot appear literally in JSONL bytes, so parseQuery refuses
+  // it as a probe. A null probe means "no prefilter" — every candidate must reach
+  // stage C, not be skipped as if the probe had missed.
+  writeClaudeProjectTranscript(root, "proj", "s-quoted", [
+    { type: "user", cwd, sessionId: "s-quoted", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: 'she said "hello" back' } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const params = searchParams("q=" + encodeURIComponent('"hello"') + "&all=1");
+  assert.equal(params.query.probe, null, "fixture guard: this query must have no probe");
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], params,
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.deepEqual(r.results.map((x) => x.sessionId), ["s-quoted"]);
 });
