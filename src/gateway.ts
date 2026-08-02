@@ -42,7 +42,7 @@ import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.
 import Database from "better-sqlite3";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { buildClientConfig } from "./client-config.ts";
-import { afterCursor, type SearchQuery } from "./search-core.ts";
+import { afterCursor, bySearchOrder, type SearchQuery } from "./search-core.ts";
 
 const ROOT = path.join(__dirname, "..");
 
@@ -1278,7 +1278,9 @@ export async function searchCandidates(
     });
   }
 
-  candidates.sort((a, b) => (b.recencyMs - a.recencyMs) || (a.sessionId < b.sessionId ? 1 : a.sessionId > b.sessionId ? -1 : 0));
+  // Shared with afterCursor above, not restated here: the filter and the sort
+  // must agree on "sorts after" or a resumed scan repeats or skips sessions.
+  candidates.sort(bySearchOrder);
   return { candidates, skipped: [...skipped] };
 }
 

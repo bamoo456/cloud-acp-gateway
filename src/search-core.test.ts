@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseQuery } from "./search-core.ts";
 import { buildSnippet, SNIPPET_RADIUS } from "./search-core.ts";
 import { findHits, MAX_HITS_PER_SESSION } from "./search-core.ts";
-import { encodeCursor, decodeCursor, afterCursor } from "./search-core.ts";
+import { encodeCursor, decodeCursor, afterCursor, bySearchOrder } from "./search-core.ts";
 import { searchQueryParams, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT, DEFAULT_SINCE_DAYS } from "./search-core.ts";
 import type { ViewMessage } from "./gateway.ts";
 
@@ -103,6 +103,34 @@ test("afterCursor breaks recency ties on sessionId so resume neither repeats nor
   assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-a" }), true);  // tie, sorts after
   assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-b" }), false); // the cursor itself
   assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-c" }), false); // tie, sorts before
+});
+
+test("bySearchOrder and afterCursor are one contract, asserted as a relation", () => {
+  // These two are halves of the same rule: afterCursor(x, y) must be true
+  // exactly when the sort places y after x. They lived in different files once,
+  // where nothing tied them together — a plausible tidy-up of the comparator to
+  // `b.sessionId.localeCompare(a.sessionId)` kept both files' own tests green
+  // while silently desyncing resume, so a truncated scan would repeat or skip
+  // sessions. Hence the relation is asserted over a domain rather than one
+  // sorted example, and the ids below include pairs ICU collates OPPOSITE to
+  // code-unit order ("a"/"B", "_x"/"B"). Those are reachable: a codex session id
+  // is whatever the rollout's session_meta records, not a guaranteed UUID.
+  // afterCursor's own direction is pinned by the test above, so binding the
+  // comparator to it pins the comparator too.
+  const recs = [-1, 0, 1, 1754037920000];
+  const ids = ["", "a", "B", "b", "A", "_x", "0a", "s-new", "s-tie-a", "z", "Z"];
+  const keys = recs.flatMap((recencyMs) => ids.map((sessionId) => ({ recencyMs, sessionId })));
+  for (const x of keys) {
+    for (const y of keys) {
+      const where = `${JSON.stringify(x)} vs ${JSON.stringify(y)}`;
+      assert.equal(bySearchOrder(x, y) < 0, afterCursor(x, y), `sorts-after disagrees at ${where}`);
+      // A comparator Array.prototype.sort can rely on: antisymmetric (the two
+      // directions cancel), and equal only when both keys match, so the cursor
+      // can always separate two rows.
+      assert.equal(Math.sign(bySearchOrder(x, y)) + Math.sign(bySearchOrder(y, x)), 0, `not antisymmetric at ${where}`);
+      assert.equal(bySearchOrder(x, y) === 0, x.recencyMs === y.recencyMs && x.sessionId === y.sessionId, `ties beyond identity at ${where}`);
+    }
+  }
 });
 
 const NOW = Date.parse("2026-08-02T00:00:00.000Z");

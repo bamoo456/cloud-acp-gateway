@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { readClaudeHistoryMessages, stripCommandMarkup, listAgentHistory, readAgentHistoryMessages, discoverClaudeHistory, discoverCodexHistory, findClaudeSessionFile, deleteHistorySession, sliceMessages, historyPageParams, searchCandidates } from "./gateway.ts";
-import { searchQueryParams } from "./search-core.ts";
+import { searchQueryParams, encodeCursor } from "./search-core.ts";
 import { Db } from "./db.ts";
 
 // The Claude history paths cache derived transcript metadata in the shared prefs
@@ -948,4 +948,31 @@ test("search orders by real activity with sessionId breaking ties", async () => 
   // within that tie "s-tie-a" outranks "s-new" because ids sort descending. All
   // three share one mtime, so any mtime-based ranking would scramble this.
   assert.deepEqual(r.candidates.map((c) => c.sessionId), ["s-tie-a", "s-new", "s-old"]);
+});
+
+test("a cursor resumes the candidate order without repeating or skipping", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  const stale = Date.parse("2026-08-01T00:00:00.000Z");
+  writeSkewedTranscript(root, "s-old", cwd, "2026-07-01T00:00:00.000Z", stale, "needle old");
+  writeSkewedTranscript(root, "s-new", cwd, "2026-07-30T00:00:00.000Z", stale, "needle new");
+  writeSkewedTranscript(root, "s-tie-a", cwd, "2026-07-30T00:00:00.000Z", stale, "needle tie");
+
+  const agents = [{ name: "claude", cmd: CLAUDE_CMD }];
+  const scope = { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() };
+  const first = await searchCandidates(agents, searchParams("q=needle&all=1"), scope);
+  assert.deepEqual(first.candidates.map((c) => c.sessionId), ["s-tie-a", "s-new", "s-old"]);
+
+  // Resuming from the first row must yield exactly the rest, in the same order.
+  // "s-new" shares its recency with the cursor, so this pins the tie branch: a
+  // resume that only compared recency would drop it, and one that compared it
+  // the other way would hand back "s-tie-a" a second time.
+  const cursor = encodeCursor({ recencyMs: first.candidates[0].recencyMs, sessionId: first.candidates[0].sessionId });
+  const rest = await searchCandidates(agents, searchParams("q=needle&all=1&cursor=" + cursor), scope);
+  assert.deepEqual(rest.candidates.map((c) => c.sessionId), ["s-new", "s-old"]);
+
+  // And walking to the end terminates rather than looping on the last row.
+  const last = encodeCursor({ recencyMs: rest.candidates[1].recencyMs, sessionId: rest.candidates[1].sessionId });
+  const done = await searchCandidates(agents, searchParams("q=needle&all=1&cursor=" + last), scope);
+  assert.deepEqual(done.candidates.map((c) => c.sessionId), []);
 });
