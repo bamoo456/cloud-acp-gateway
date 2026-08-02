@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { parseQuery } from "./search-core.ts";
 import { buildSnippet, SNIPPET_RADIUS } from "./search-core.ts";
 import { findHits, MAX_HITS_PER_SESSION } from "./search-core.ts";
+import { encodeCursor, decodeCursor, afterCursor } from "./search-core.ts";
 import type { ViewMessage } from "./gateway.ts";
 
 test("parseQuery lowercases and splits on whitespace", () => {
@@ -81,4 +82,24 @@ test("findHits caps returned hits but counts them all", () => {
   const r = findHits(msgs, parseQuery("needle")!);
   assert.equal(r.hits.length, MAX_HITS_PER_SESSION);
   assert.equal(r.hitCount, MAX_HITS_PER_SESSION + 4);
+});
+
+test("cursor round-trips", () => {
+  const c = { recencyMs: 1754037920000, sessionId: "511701f8-ba4d" };
+  assert.deepEqual(decodeCursor(encodeCursor(c)), c);
+});
+
+test("decodeCursor rejects garbage", () => {
+  assert.equal(decodeCursor("not-base64-!!"), null);
+  assert.equal(decodeCursor(Buffer.from("nope", "utf8").toString("base64url")), null);
+  assert.equal(decodeCursor(Buffer.from("abc|s1", "utf8").toString("base64url")), null);
+});
+
+test("afterCursor breaks recency ties on sessionId so resume neither repeats nor skips", () => {
+  const cur = { recencyMs: 1000, sessionId: "s-b" };
+  assert.equal(afterCursor(cur, { recencyMs: 999, sessionId: "s-z" }), true);   // older
+  assert.equal(afterCursor(cur, { recencyMs: 1001, sessionId: "s-a" }), false); // newer
+  assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-a" }), true);  // tie, sorts after
+  assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-b" }), false); // the cursor itself
+  assert.equal(afterCursor(cur, { recencyMs: 1000, sessionId: "s-c" }), false); // tie, sorts before
 });

@@ -117,3 +117,32 @@ export function findHits(
   }
   return { hits, hitCount };
 }
+
+// Where a truncated scan stopped. Opaque to clients: it is a scan position, not
+// a date filter, and must not be confused for one. Recency travels as epoch ms
+// rather than an ISO string so comparison never depends on two timestamps
+// sharing a text format.
+export type SearchCursor = { recencyMs: number; sessionId: string };
+
+export function encodeCursor(c: SearchCursor): string {
+  return Buffer.from(c.recencyMs + "|" + c.sessionId, "utf8").toString("base64url");
+}
+
+export function decodeCursor(raw: string): SearchCursor | null {
+  let decoded = "";
+  try { decoded = Buffer.from(raw, "base64url").toString("utf8"); } catch { return null; }
+  const bar = decoded.indexOf("|");
+  if (bar <= 0 || bar === decoded.length - 1) return null;
+  const recencyMs = Number(decoded.slice(0, bar));
+  if (!Number.isFinite(recencyMs)) return null;
+  return { recencyMs, sessionId: decoded.slice(bar + 1) };
+}
+
+// Candidates are ordered by (recencyMs desc, sessionId desc). Resuming keeps
+// only what sorts strictly after the cursor. The sessionId tiebreak is
+// load-bearing: sessions sharing a recency — including every session that fell
+// back to the same bulk-touched mtime — would otherwise be re-scanned or skipped.
+export function afterCursor(cur: SearchCursor, c: { recencyMs: number; sessionId: string }): boolean {
+  if (c.recencyMs !== cur.recencyMs) return c.recencyMs < cur.recencyMs;
+  return c.sessionId < cur.sessionId;
+}
