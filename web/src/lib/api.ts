@@ -288,11 +288,21 @@ export async function searchSessions(q: string, opts: SearchOptions = {}): Promi
   if (opts.limit) url += "&limit=" + opts.limit;
   if (opts.cursor) url += "&cursor=" + encodeURIComponent(opts.cursor);
   const r = await readJson(await fetch(url), "Search isn't available.");
+  const results: Array<Record<string, unknown>> = Array.isArray(r?.results) ? r.results : [];
+  const scannedRaw = r && typeof r.scanned === "object" && r.scanned !== null ? r.scanned : {};
   return {
-    results: (r && r.results) || [],
+    // A wrong-typed but truthy `hits` (or `results`/`skipped`) would otherwise pass a
+    // gateway's malformed payload straight into a typed slot and throw when Task 11
+    // iterates it — degrade those cases to the empty shape, same as every other
+    // best-effort read in this file.
+    results: results.map((s) => ({ ...s, hits: Array.isArray(s?.hits) ? s.hits : [] })) as SearchResultSession[],
     truncated: !!(r && r.truncated),
     cursor: (r && r.cursor) || null,
-    skipped: (r && r.skipped) || [],
-    scanned: (r && r.scanned) || { files: 0, bytes: 0, ms: 0 },
+    skipped: Array.isArray(r?.skipped) ? r.skipped : [],
+    scanned: {
+      files: typeof scannedRaw.files === "number" ? scannedRaw.files : 0,
+      bytes: typeof scannedRaw.bytes === "number" ? scannedRaw.bytes : 0,
+      ms: typeof scannedRaw.ms === "number" ? scannedRaw.ms : 0,
+    },
   };
 }

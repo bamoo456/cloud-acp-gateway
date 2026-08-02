@@ -150,4 +150,31 @@ describe("api", () => {
     expect(r.results).toEqual([]);
     expect(r.cursor).toBeNull();
   });
+
+  test("searchSessions degrades wrong-typed but truthy fields instead of passing them through", async () => {
+    mockFetch({
+      results: "oops",
+      skipped: { not: "an array" },
+      scanned: "oops",
+    });
+    const r = await searchSessions("needle");
+    expect(r.results).toEqual([]);
+    expect(r.skipped).toEqual([]);
+    expect(r.scanned).toEqual({ files: 0, bytes: 0, ms: 0 });
+  });
+
+  test("searchSessions fills in only the missing fields of a partial scanned object", async () => {
+    mockFetch({ scanned: { files: 3 } });
+    const r = await searchSessions("needle");
+    expect(r.scanned).toEqual({ files: 3, bytes: 0, ms: 0 });
+  });
+
+  test("searchSessions fills in a missing per-result hits array", async () => {
+    mockFetch({
+      results: [{ sessionId: "s1", source: "claude-cli", agentName: "claude", cwd: "/repo",
+                  title: "T", updatedAt: "2026-08-01T00:00:00.000Z", hitCount: 0 }],
+    });
+    const r = await searchSessions("needle");
+    expect(r.results[0].hits).toEqual([]);
+  });
 });
