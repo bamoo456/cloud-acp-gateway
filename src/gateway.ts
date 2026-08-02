@@ -42,6 +42,7 @@ import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.
 import Database from "better-sqlite3";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { buildClientConfig } from "./client-config.ts";
+import { afterCursor, type SearchQuery } from "./search-core.ts";
 
 const ROOT = path.join(__dirname, "..");
 
@@ -1204,6 +1205,81 @@ export async function discoverCodexHistory(opts?: { fsRoot?: string; limit?: num
     cwd: s.cwd as string,
     source: "codex-cli" as const,
   })));
+}
+
+export type SearchCandidate = {
+  sessionId: string; file: string; cwd: string; title: string | null;
+  source: "claude-cli" | "codex-cli"; agentName: string; recencyMs: number;
+};
+
+export type SearchScope = { projectsRoot?: string; fsRoot?: string; store?: Db; cwd?: string | null };
+
+// Providers whose conversations can be searched. opencode is out for the same
+// reason it is out of DISCOVERABLE_PROVIDERS: no transcript to recover a cwd
+// from, and the FS_ROOT guard on message content depends on having one.
+const SEARCHABLE_PROVIDERS: HistoryProvider[] = ["claude", "codex"];
+
+// Stage A. Every searchable transcript, with the cwd it records and its REAL
+// last activity, filtered and ordered. Nothing here opens a transcript for its
+// content — that is stage B, and it only ever sees candidates that survived the
+// FS_ROOT guard below.
+export async function searchCandidates(
+  agents: Array<{ name: string; cmd: string }>,
+  params: SearchQuery,
+  opts?: SearchScope,
+): Promise<{ candidates: SearchCandidate[]; skipped: string[] }> {
+  const fsRoot = opts?.fsRoot ?? FS_ROOT;
+  const store = transcriptStore(opts?.store);
+  const wanted = params.agents ? new Set(params.agents) : null;
+
+  // One agent name per provider — a provider's store is the same store whichever
+  // configured agent you came in under (agents.example.json ships two claudes).
+  // So with no ?agent= filter, results are attributed to whichever agent is first
+  // in cfg.agents for that provider. That is deliberate and matches
+  // deleteHistorySession's reasoning: an agent name says where a conversation was
+  // seen from, it does not identify the conversation.
+  const agentByProvider = new Map<HistoryProvider, string>();
+  const skipped = new Set<string>();
+  for (const a of agents) {
+    if (wanted && !wanted.has(a.name)) continue;
+    const provider = historyProviderFor(a.cmd);
+    if (!provider) continue;
+    if (!SEARCHABLE_PROVIDERS.includes(provider)) { skipped.add(provider); continue; }
+    if (!agentByProvider.has(provider)) agentByProvider.set(provider, a.name);
+  }
+
+  const raw: TranscriptCandidate[] = [];
+  if (agentByProvider.has("claude")) {
+    raw.push(...await claudeTranscriptCandidates(opts?.projectsRoot ?? claudeProjectsRoot(), store));
+  }
+  if (agentByProvider.has("codex")) {
+    raw.push(...await codexTranscriptCandidates());
+  }
+
+  const candidates: SearchCandidate[] = [];
+  for (const c of raw) {
+    // I2: the cwd the transcript itself records, guarded before the file is read.
+    if (!c.cwd) continue;
+    const cwd = resolveWithinRootBase(c.cwd, fsRoot);
+    if (!cwd) continue;
+    if (opts?.cwd && !sameCwd(cwd, opts.cwd)) continue;
+
+    // I1: bound on real activity; mtime is only the fallback when there is none.
+    const parsed = c.recencyAt ? Date.parse(c.recencyAt) : NaN;
+    const recencyMs = Number.isFinite(parsed) ? parsed : c.mtime;
+    if (params.sinceMs !== null && recencyMs < params.sinceMs) continue;
+    if (params.untilMs !== null && recencyMs > params.untilMs) continue;
+    if (params.cursor && !afterCursor(params.cursor, { recencyMs, sessionId: c.sessionId })) continue;
+
+    candidates.push({
+      sessionId: c.sessionId, file: c.file, cwd, title: c.title, source: c.source,
+      agentName: agentByProvider.get(c.source === "claude-cli" ? "claude" : "codex") ?? "",
+      recencyMs,
+    });
+  }
+
+  candidates.sort((a, b) => (b.recencyMs - a.recencyMs) || (a.sessionId < b.sessionId ? 1 : a.sessionId > b.sessionId ? -1 : 0));
+  return { candidates, skipped: [...skipped] };
 }
 
 async function findCodexSessionFile(cwd: string, sessionId: string): Promise<CodexSessionFile | null> {
