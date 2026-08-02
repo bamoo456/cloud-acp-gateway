@@ -419,6 +419,22 @@
   }
   .see-more:hover { background: var(--surface-2); }
   .panel-empty { padding: 18px 16px 22px; color: var(--muted); font-size: 14px; text-align: center; }
+  /* Advanced search filters — collapsed to a single "進階" row until asked for, so
+     the search box reads exactly as plainly as it did before. */
+  .search-filters { padding: 0 10px 8px; }
+  .search-filters > summary { color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; padding: 4px 2px; }
+  .search-filters > summary::-webkit-details-marker { display: none; }
+  .search-filter-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 4px 0; font-size: 13px; color: var(--muted); }
+  .search-filter-row label { display: inline-flex; align-items: center; gap: 4px; }
+  .search-filter-row input[type=date], .search-filter-row select {
+    padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px;
+  }
+  .search-filters .chip {
+    padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--muted); font-size: 13px; font-weight: 600;
+  }
+  .search-filters .chip.active { border-color: var(--accent); color: var(--accent); }
   .search-results { display: flex; flex-direction: column; }
   .search-hit { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 8px 12px; cursor: pointer; }
   .search-hit:hover { background: var(--surface-2); }

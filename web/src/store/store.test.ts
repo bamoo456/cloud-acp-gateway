@@ -1769,6 +1769,45 @@ describe("store notification routing", () => {
     expect(useStore.getState().sessions["old-session"].historyStart).toBe(250);
   });
 
+  test("a search hit opens the page holding its message instead of the tail", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "the matched message" }] }],
+        total: 300, start: 190, truncated: true,
+      }),
+    }));
+
+    await useStore.getState().openHistorySession({ sessionId: "hit-session", title: "Hit", atMessage: 200 });
+    await flush();
+
+    const url = historyCalls.at(-1)!;
+    expect(url).toContain("from=190");
+    expect(url).toContain("to=240");
+    expect(useStore.getState().sessions["hit-session"].historyStart).toBe(190);
+  });
+
+  // Message 0 is a real hit index, so the range must be computed from
+  // `atMessage === undefined`, never from its truthiness.
+  test("a hit on the first message still pages from the start", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "the opener" }] }],
+        total: 300, start: 0, truncated: false,
+      }),
+    }));
+
+    await useStore.getState().openHistorySession({ sessionId: "first-hit", title: "First", atMessage: 0 });
+    await flush();
+
+    const url = historyCalls.at(-1)!;
+    expect(url).toContain("from=0");
+    expect(url).toContain("to=50");
+  });
+
   test("a conversation shorter than one page reports nothing older to load", async () => {
     const { useStore } = await bootstrapClaude();
 
