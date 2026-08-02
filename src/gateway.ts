@@ -42,7 +42,7 @@ import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.
 import Database from "better-sqlite3";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { buildClientConfig } from "./client-config.ts";
-import { afterCursor, bySearchOrder, type SearchQuery } from "./search-core.ts";
+import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, type SearchHit, type SearchQuery } from "./search-core.ts";
 
 const ROOT = path.join(__dirname, "..");
 
@@ -600,6 +600,9 @@ export function historyPageParams(q: URLSearchParams): { limit: number; from?: n
 // "the conversations someone is scrolling through right now".
 const HISTORY_PARSE_CACHE_MAX = 8;
 const historyParseCache = new Map<string, { mtimeMs: number; size: number; msgs: ViewMessage[] }>();
+
+// Exported for the I3 test: search must never add to or evict from this cache.
+export function historyParseCacheSize(): number { return historyParseCache.size; }
 
 async function cachedParse(file: string, parse: () => Promise<ViewMessage[]>): Promise<ViewMessage[]> {
   let stat: fs.Stats;
@@ -1282,6 +1285,100 @@ export async function searchCandidates(
   // must agree on "sorts after" or a resumed scan repeats or skips sessions.
   candidates.sort(bySearchOrder);
   return { candidates, skipped: [...skipped] };
+}
+
+// Wall-clock ceiling for one search. A server constant, never a query parameter:
+// a client must not be able to ask the gateway for a 60-second scan.
+export const SEARCH_BUDGET_MS = 2000;
+
+export type SearchResultSession = {
+  sessionId: string; source: "claude-cli" | "codex-cli"; agentName: string;
+  cwd: string; title: string | null; updatedAt: string;
+  hitCount: number; hits: SearchHit[];
+};
+
+export type SearchResponse = {
+  results: SearchResultSession[]; truncated: boolean; cursor: string | null;
+  skipped: string[]; scanned: { files: number; bytes: number; ms: number };
+};
+
+// Stage C parses directly instead of through cachedParse: historyParseCache holds
+// 8 entries for the conversation someone is scrolling RIGHT NOW, and one search
+// would flush it. This cache is request-scoped and dies with the response (I3).
+async function parseForSearch(c: SearchCandidate, cache: Map<string, ViewMessage[]>): Promise<ViewMessage[]> {
+  const hit = cache.get(c.file);
+  if (hit) return hit;
+  const msgs = c.source === "claude-cli"
+    ? await parseClaudeHistoryMessages(c.file, c.sessionId)
+    : await parseCodexHistoryMessages(c.file);
+  cache.set(c.file, msgs);
+  return msgs;
+}
+
+export async function searchTranscripts(
+  agents: Array<{ name: string; cmd: string }>,
+  params: SearchQuery,
+  opts?: SearchScope & { budgetMs?: number; clock?: () => number },
+): Promise<SearchResponse> {
+  const { candidates, skipped } = await searchCandidates(agents, params, opts);
+  const budgetMs = opts?.budgetMs ?? SEARCH_BUDGET_MS;
+  const clock = opts?.clock ?? (() => Date.now());
+  const startedAt = clock();
+
+  // Stage B probe. The query goes through the same UTF-8 → latin1 mapping the
+  // file bytes do, so a CJK term still lines up; latin1 + /i can only be MORE
+  // permissive than a true match, so it yields false positives, never misses.
+  const probe = params.query.probe
+    ? new RegExp(escapeRegExp(Buffer.from(params.query.probe, "utf8").toString("latin1")), "i")
+    : null;
+
+  const results: SearchResultSession[] = [];
+  const parsed = new Map<string, ViewMessage[]>();
+  let files = 0, bytes = 0, examined = 0;
+  let last: SearchCandidate | null = null;
+
+  for (const c of candidates) {
+    if (results.length >= params.limit || clock() - startedAt >= budgetMs) break;
+    examined++;
+    last = c;
+
+    let buf: Buffer;
+    try { buf = await fs.promises.readFile(c.file); } catch { continue; }
+    files++; bytes += buf.length;
+    if (probe && !probe.test(buf.toString("latin1"))) continue;
+
+    const { hits, hitCount } = findHits(await parseForSearch(c, parsed), params.query,
+      { role: params.role ?? undefined });
+    if (hitCount === 0) continue;
+
+    results.push({
+      sessionId: c.sessionId, source: c.source, agentName: c.agentName, cwd: c.cwd,
+      title: c.title, updatedAt: new Date(c.recencyMs).toISOString(), hitCount, hits,
+    });
+  }
+
+  // Titles are resolved only for sessions that actually matched: firstCodexUserText
+  // streams a rollout, and readTitles hits the disk once per folder. Paying either
+  // per candidate instead of per result is the difference between a search and a
+  // full read of the corpus.
+  const customByCwd = new Map<string, Record<string, string>>();
+  for (const cwd of new Set(results.map((r) => r.cwd))) customByCwd.set(cwd, await readTitles(cwd));
+  for (const r of results) {
+    if (r.title === null && r.source === "codex-cli") {
+      const file = candidates.find((c) => c.sessionId === r.sessionId)?.file;
+      if (file) r.title = await firstCodexUserText(file);
+    }
+    r.title = customByCwd.get(r.cwd)?.[r.sessionId] ?? r.title;
+  }
+
+  const truncated = examined < candidates.length;
+  return {
+    results,
+    truncated,
+    cursor: truncated && last ? encodeCursor({ recencyMs: last.recencyMs, sessionId: last.sessionId }) : null,
+    skipped,
+    scanned: { files, bytes, ms: Math.round(clock() - startedAt) },
+  };
 }
 
 async function findCodexSessionFile(cwd: string, sessionId: string): Promise<CodexSessionFile | null> {
