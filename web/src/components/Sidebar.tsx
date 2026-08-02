@@ -139,6 +139,14 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // Tier 2: the server content search. Tier 1 (the local title filter above it) stays
   // instant and untouched — this only ADDS the matches a title filter cannot see.
   useEffect(() => {
+    // Only this tab renders the results, and one search reads transcripts off
+    // disk — so a folder or filter change with Conversations hidden would spend
+    // a full scan on a term nobody can see. Deliberately NOT gated on `open`:
+    // above 860px the panel is a persistent column (CSS `display: flex
+    // !important`) whose toggle button is hidden, so `open` is false there for
+    // a panel the user is looking at, and an `open` gate would kill search on
+    // desktop entirely.
+    if (tab !== "conversations") return;
     const term = q.trim();
     const gen = ++searchGen.current;
     // Clearing `searching` here too: without it, backspacing from a pending query
@@ -155,7 +163,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     // retires this generation so nothing already in flight — from here or from the
     // cursor-resume below — can still write state, including after unmount.
     return () => { clearTimeout(t); searchGen.current++; };
-  }, [q, filters, s.cwd]);
+  }, [q, filters, s.cwd, tab]);
 
   // Running indicator, reusing the polled runningTasks. Rows can belong to any
   // agent now, so match on agent + sessionId (a bare sessionId could collide
@@ -227,6 +235,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // asked for" — and `all` is the widest range there is. Leaving `all` out makes the
   // 搜尋全部 button re-run the identical query forever and the resume cursor dead code.
   const rangeExplicit = filters.window === "custom" || filters.window === "all";
+  const hasServerHits = (searchRes?.results.length ?? 0) > 0;
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
     const active = !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
     return (
@@ -385,7 +394,9 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                 <div className="sess-list">
                   {err && <div className="panel-empty">Couldn't load conversations.</div>}
                   {!err && items === null && <div className="panel-empty">Loading…</div>}
-                  {!err && items !== null && visibleItems.length === 0 && <div className="panel-empty">No conversations in this folder yet.</div>}
+                  {/* The title filter's empty state would otherwise sit right on top of
+                      the server's content hits, the two contradicting each other on screen. */}
+                  {!err && items !== null && visibleItems.length === 0 && !hasServerHits && <div className="panel-empty">No conversations in this folder yet.</div>}
                   {visibleItems.map((it) => renderItem(it))}
                   {!err && items !== null && hasOlderItems && (
                     <button className="see-more" onClick={() => setShowMore((v) => !v)}>

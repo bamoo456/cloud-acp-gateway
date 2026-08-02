@@ -988,6 +988,65 @@ describe("Sidebar recent conversations", () => {
     expect(container.textContent).not.toContain("Liquid glass timeline");
   });
 
+  // The default window is the server's own 14 days, so a term older than that
+  // answers "No messages match." with nothing truncated — no escape would be
+  // offered at all. The window is a scan budget, not a corpus boundary.
+  test("a zero-result default search offers to widen the window to everything", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+
+    expect(container.textContent).toContain("No messages match.");
+    expect(container.querySelector(".search-more")!.textContent).toBe("搜尋全部");
+    await clickSearchMore();
+
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { all: true });
+  });
+
+  // A content search reads transcripts off disk. Only the Conversations tab
+  // renders its results, so a folder change with that tab hidden must not spend
+  // a full scan on a term nobody can see.
+  test("changing folders with the Conversations tab hidden does not scan", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+    expect(searchSessions).toHaveBeenCalledTimes(1);
+
+    const recentTab = container.querySelector<HTMLButtonElement>('[data-tab="recent"]')!;
+    await act(async () => { recentTab.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => { useStore.setState({ cwd: "/other-repo" } as any); await flush(); });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+
+    expect(searchSessions).toHaveBeenCalledTimes(1);
+  });
+
+  // The local title filter and the server content search share one box and one
+  // column, so their empty states must not contradict each other on screen.
+  test("the local empty state stays hidden while server results are showing", async () => {
+    searchSessions.mockResolvedValue({
+      results: [{
+        sessionId: "hit-1", source: "claude-cli", agentName: "claude", cwd: "/elsewhere",
+        title: "Liquid glass timeline", updatedAt: "2026-06-10T03:00:00.000Z", hitCount: 1,
+        hits: [{ index: 42, role: "user", snippet: "make it liquid", offsets: [[8, 14]] }],
+      }],
+      truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 1, ms: 1 },
+    });
+    await renderSidebar();
+    await clickConversationsTab();
+    // No local title matches "liquid" — the title filter's own list is empty.
+    await typeInSearchBox("liquid");
+
+    expect(container.textContent).toContain("Liquid glass timeline");
+    expect(container.textContent).not.toContain("No conversations in this folder yet.");
+  });
+
   test("has no New chat button inside the panel", async () => {
     await renderSidebar();
     expect(container.querySelector(".list-new")).toBeNull();

@@ -62,4 +62,48 @@ describe("SearchResults", () => {
     await mount({ response: envelope({ skipped: ["opencode"] }), loading: false, rangeExplicit: false, onOpen: vi.fn(), onSearchAll: vi.fn(), onSearchOlder: vi.fn() });
     expect(container.textContent).toContain("opencode");
   });
+
+  // The two zero-result shapes below are the ones an early return on
+  // `results.length === 0` swallowed: `skipped` exists precisely to explain a
+  // thin result set, and a scan that spends its whole budget without matching
+  // is a dead end unless the resume cursor is still reachable.
+  const emptyPage = (over: Partial<SearchResponse> = {}) => envelope({ results: [], ...over });
+
+  test("an empty result set still reports the agent that could not be searched", async () => {
+    await mount({ response: emptyPage({ skipped: ["opencode"] }), loading: false, rangeExplicit: false, onOpen: vi.fn(), onSearchAll: vi.fn(), onSearchOlder: vi.fn() });
+    expect(container.textContent).toContain("No messages match.");
+    expect(container.textContent).toContain("opencode");
+  });
+
+  test("an empty page that ran out of budget still offers the resume escape", async () => {
+    const onSearchOlder = vi.fn();
+    await mount({ response: emptyPage({ truncated: true, cursor: "c1" }), loading: false, rangeExplicit: true, onOpen: vi.fn(), onSearchAll: vi.fn(), onSearchOlder });
+    expect(container.querySelector(".search-more")!.textContent).toBe("繼續搜更早");
+    await act(async () => { container.querySelector<HTMLButtonElement>(".search-more")!.click(); });
+    expect(onSearchOlder).toHaveBeenCalled();
+  });
+
+  // The recency window is a scan budget, not a corpus boundary: finding nothing
+  // inside the default window must not read as "it isn't there".
+  test("no results inside the default window offers to widen to everything", async () => {
+    const onSearchAll = vi.fn();
+    await mount({ response: emptyPage(), loading: false, rangeExplicit: false, onOpen: vi.fn(), onSearchAll, onSearchOlder: vi.fn() });
+    expect(container.querySelector(".search-more")!.textContent).toBe("搜尋全部");
+    await act(async () => { container.querySelector<HTMLButtonElement>(".search-more")!.click(); });
+    expect(onSearchAll).toHaveBeenCalled();
+  });
+
+  test("no results inside a range the user picked offers no widening", async () => {
+    await mount({ response: emptyPage(), loading: false, rangeExplicit: true, onOpen: vi.fn(), onSearchAll: vi.fn(), onSearchOlder: vi.fn() });
+    expect(container.textContent).toContain("No messages match.");
+    expect(container.querySelector(".search-more")).toBeNull();
+  });
+
+  // Truncation already owns the widening button; the empty-state affordance must
+  // not stack a second identical one underneath it.
+  test("an empty truncated default-window page offers exactly one escape", async () => {
+    await mount({ response: emptyPage({ truncated: true, cursor: "c1" }), loading: false, rangeExplicit: false, onOpen: vi.fn(), onSearchAll: vi.fn(), onSearchOlder: vi.fn() });
+    expect(container.querySelectorAll(".search-more")).toHaveLength(1);
+    expect(container.querySelector(".search-more")!.textContent).toBe("搜尋全部");
+  });
 });

@@ -28,11 +28,17 @@ export function SearchResults(props: {
   const { response, loading, rangeExplicit } = props;
   if (loading && !response) return <div className="panel-empty">Searching…</div>;
   if (!response) return null;
-  if (response.results.length === 0) return <div className="panel-empty">No messages match.</div>;
+  const empty = response.results.length === 0;
+  // The recency window is a scan budget and an ordering, not a corpus boundary —
+  // so finding nothing inside the default window must never read as "it isn't
+  // there". Offer the same widening the truncation escape offers, but only when
+  // truncation did NOT already render one (they are the same action), and only
+  // while the range is still ours to widen: a range the user picked is theirs.
+  const offerWiden = empty && !response.truncated && !rangeExplicit;
 
   return (
     <div className="search-results">
-      <div className="listhead"><span>訊息內容 · 全部資料夾</span></div>
+      {!empty && <div className="listhead"><span>訊息內容 · 全部資料夾</span></div>}
       {response.results.map((r) => (
         <button key={r.sessionId} className="search-hit" onClick={() => props.onOpen(r, r.hits[0]?.index ?? 0)}>
           <div className="search-hit-title">{r.title || r.sessionId}</div>
@@ -53,6 +59,17 @@ export function SearchResults(props: {
         <button className="search-more" onClick={rangeExplicit ? props.onSearchOlder : props.onSearchAll}>
           {rangeExplicit ? "繼續搜更早" : "搜尋全部"}
         </button>
+      )}
+      {/* Last, deliberately: this used to be an early return, which swallowed
+          the skipped notice and both escapes above — exactly the cases they
+          exist for. Rendering it after them makes that shadowing impossible. */}
+      {empty && (
+        <div className="panel-empty">
+          No messages match.{offerWiden ? " 目前只搜尋了最近的對話。" : ""}
+        </div>
+      )}
+      {offerWiden && (
+        <button className="search-more" onClick={props.onSearchAll}>搜尋全部</button>
       )}
     </div>
   );
