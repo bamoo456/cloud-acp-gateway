@@ -7,7 +7,6 @@ import http from "node:http";
 import { makeTestServer, Gateway, TASK_TTL_MS, handleRequest, type Conn } from "./gateway.ts";
 import { Db } from "./db.ts";
 import { sse, post, sseStatus, USER, TOKEN, parseFrame, type Evt } from "./sse-testclient.ts";
-import { searchQueryParams } from "./search-core.ts";
 
 // Parsed message type
 type Msg = Record<string, unknown>;
@@ -1130,25 +1129,55 @@ test("/history/search ignores a ?projectsRoot= override: a claude fixture under 
   }
 });
 
-// budgetMs has no fixture-based proof that stays fast and non-flaky: forcing
-// stage B to run long enough to observe a budget difference means either many
-// fixture files or slow-enough I/O, and the margin between "budget applied"
-// and "budget ignored" would then depend on this machine's disk/JSON-parse
-// speed — exactly the slow-or-flaky tradeoff the search plan's own budget
-// design (SEARCH_BUDGET_MS, a server constant) exists to avoid taking on. This
-// narrower test pins the one thing that IS deterministic: searchQueryParams,
-// which the route's only other query-derived value (q, since/until/all,
-// agent, role, limit, cursor) all pass through, never surfaces a budgetMs
-// field for the route to accidentally forward. It does NOT prove the route
-// itself stays budgetMs-free if a future edit added
-// `budgetMs: Number(q.get("budgetMs"))` directly to the options literal
-// bypassing searchQueryParams entirely — that gap is real; see the report.
-test("/history/search's query parsing never surfaces a budgetMs field to forward", () => {
-  const params = searchQueryParams(new URLSearchParams("q=needle&budgetMs=60000"), Date.now());
-  assert.ok(params, "a valid query must still parse");
-  assert.equal(
-    (params as unknown as Record<string, unknown>).budgetMs,
-    undefined,
-    "SearchQuery must never carry a budgetMs field through from the query string",
-  );
+// budgetMs=0 is fully deterministic: searchTranscripts's loop
+// (src/gateway.ts ~line 1346) breaks on `clock() - startedAt >= budgetMs`,
+// which is true on the very first check when budgetMs is 0 — no dependence on
+// machine speed or fixture count. That determinism is what makes this a real
+// positive control rather than a pin one layer removed from the route: a
+// codex fixture that legitimately matches (cwd inside the real FS_ROOT, unlike
+// the fsRoot test's fixture above) is asserted FOUND. If a future edit threads
+// `?budgetMs=` into the route's options literal, `budgetMs=0` would stop the
+// scan before reading anything and the needle would vanish — this test would
+// fail loudly. It also doubles as a well-formedness check on this fixture
+// shape: if the JSONL were malformed, this test would fail too (unlike a
+// "not found" assertion, which passes the same way whether the override was
+// honoured or the fixture was simply broken).
+// Limitation, disclosed rather than silently assumed away: a route written as
+// `Number(q.get("budgetMs")) || undefined` would not be caught, since 0 is
+// falsy and `||` would fall back to the 2000ms default — this test can only
+// catch a `??`-style or explicit-presence passthrough. Still strictly
+// stronger than pinning searchQueryParams alone (search-core.test.ts already
+// has that pin), which cannot fail against a route that reads
+// `q.get("budgetMs")` directly, bypassing searchQueryParams entirely.
+test("/history/search finds a codex fixture even with ?budgetMs=0 — the query string cannot override SEARCH_BUDGET_MS", async () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-budget-"));
+  // Inside the real FS_ROOT (unlike the fsRoot test's fixture) — this fixture
+  // must legitimately match so "found" is a real assertion, not luck.
+  const fixtureCwd = fs.mkdtempSync(path.join(os.homedir(), ".acpg-search-test-"));
+  const needle = "cdxbudgetneedle" + Date.now();
+  const rolloutDir = path.join(codexHome, "sessions", "2026", "07", "20");
+  fs.mkdirSync(rolloutDir, { recursive: true });
+  fs.writeFileSync(path.join(rolloutDir, "rollout-BUDGET.jsonl"), [
+    { type: "session_meta", payload: { id: "CDX-BUDGET", cwd: fixtureCwd, timestamp: "2026-07-20T10:00:00.000Z" } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: needle }] } },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const prevCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed(`/history/search?q=${needle}&all=1&agent=codex&budgetMs=0`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(
+      (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "CDX-BUDGET"),
+      true,
+      "?budgetMs=0 must not cut the scan short — SEARCH_BUDGET_MS (2000ms) is a server constant, not a query parameter",
+    );
+  } finally {
+    await close();
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prevCodexHome;
+    fs.rmSync(codexHome, { recursive: true, force: true });
+    fs.rmSync(fixtureCwd, { recursive: true, force: true });
+  }
 });
