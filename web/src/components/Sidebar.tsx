@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getHistory, getDiscoveredHistory, searchSessions, type HistorySession, type DiscoveredHistorySession, type RunningTask, type SearchResponse } from "../lib/api.ts";
 import type { RecentSession } from "../lib/recentSessions.ts";
 import { resolveRunningTask, runningView } from "../lib/runningTask.ts";
@@ -64,6 +64,12 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
   const [searchRes, setSearchRes] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
+  // Every content search — debounced or cursor-resumed — stamps a generation, and
+  // only a response whose stamp is still current is allowed to reach state. A
+  // resumed page can take seconds, so without this it could land after the query
+  // was erased (resurrecting results under an empty box), after a newer query
+  // resolved (overwriting it with the old term's pages), or after unmount.
+  const searchGen = useRef(0);
   // The gateway marks agents with no native history reader as history:false.
   // Missing flag (dev fallback, older gateway) = supported.
   const agentByName = new Map(s.cfg.agents.map((a) => [a.name, a] as const));
@@ -134,20 +140,21 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // instant and untouched — this only ADDS the matches a title filter cannot see.
   useEffect(() => {
     const term = q.trim();
+    const gen = ++searchGen.current;
     // Clearing `searching` here too: without it, backspacing from a pending query
     // down to one character strands the spinner with no request left to answer it.
     if (term.length < MIN_SEARCH_LEN) { setSearchRes(null); setSearching(false); return; }
-    let cancelled = false;
     setSearching(true);
     const t = setTimeout(() => {
       searchSessions(term, filtersToOptions(filters, s.cwd, Date.now()))
-        .then((r) => { if (!cancelled) setSearchRes(r); })
-        .catch(() => { if (!cancelled) setSearchRes(null); })
-        .finally(() => { if (!cancelled) setSearching(false); });
+        .then((r) => { if (gen === searchGen.current) setSearchRes(r); })
+        .catch(() => { if (gen === searchGen.current) setSearchRes(null); })
+        .finally(() => { if (gen === searchGen.current) setSearching(false); });
     }, SEARCH_DEBOUNCE_MS);
-    // Cancels both halves — a queued query a later keystroke or filter change has
-    // outdated, and an in-flight one whose answer would land after unmount.
-    return () => { cancelled = true; clearTimeout(t); };
+    // Drops a queued query a later keystroke or filter change has outdated, and
+    // retires this generation so nothing already in flight — from here or from the
+    // cursor-resume below — can still write state, including after unmount.
+    return () => { clearTimeout(t); searchGen.current++; };
   }, [q, filters, s.cwd]);
 
   // Running indicator, reusing the polled runningTasks. Rows can belong to any
@@ -216,6 +223,10 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const queriedItems = allItems.filter((it) => matchesQuery(it, q));
   const visibleItems = showMore ? queriedItems : queriedItems.filter((it) => withinRecentWindow(it.updatedAt));
   const hasOlderItems = queriedItems.some((it) => !withinRecentWindow(it.updatedAt));
+  // "The user already asked for this range, so widening it would discard what they
+  // asked for" — and `all` is the widest range there is. Leaving `all` out makes the
+  // 搜尋全部 button re-run the identical query forever and the resume cursor dead code.
+  const rangeExplicit = filters.window === "custom" || filters.window === "all";
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
     const active = !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
     return (
@@ -384,19 +395,23 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                   <SearchResults
                     response={searchRes}
                     loading={searching}
-                    rangeExplicit={filters.window === "custom"}
+                    rangeExplicit={rangeExplicit}
                     onOpen={(r, index) => {
                       void s.openHistorySession({ sessionId: r.sessionId, title: r.title, agentName: r.agentName, cwd: r.cwd, atMessage: index });
                       onClose();
                     }}
                     onSearchAll={() => setFilters({ ...filters, window: "all" })}
                     onSearchOlder={() => {
-                      if (!searchRes?.cursor) return;
+                      // `searching` doubles as the re-entrancy guard: one page at a
+                      // time, so a second click can't stack a duplicate scan.
+                      const shown = searchRes;
+                      if (!shown?.cursor || searching) return;
+                      const gen = ++searchGen.current;
                       setSearching(true);
-                      searchSessions(q.trim(), { ...filtersToOptions(filters, s.cwd, Date.now()), cursor: searchRes.cursor })
-                        .then((more) => setSearchRes({ ...more, results: [...searchRes.results, ...more.results] }))
+                      searchSessions(q.trim(), { ...filtersToOptions(filters, s.cwd, Date.now()), cursor: shown.cursor })
+                        .then((more) => { if (gen === searchGen.current) setSearchRes({ ...more, results: [...shown.results, ...more.results] }); })
                         .catch(() => { /* keep the page already on screen */ })
-                        .finally(() => setSearching(false));
+                        .finally(() => { if (gen === searchGen.current) setSearching(false); });
                     }}
                   />
                 </div>

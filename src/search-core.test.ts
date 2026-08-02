@@ -158,6 +158,18 @@ test("searchQueryParams ignores an unparseable instant rather than inventing one
   assert.equal(params("q=liquid&until=yesterday")?.untilMs, null);
 });
 
+// `until` is an INCLUSIVE bound (recencyMs > untilMs skips), so the console sends
+// the END of the day the user picked — 23:59:59.999 local, as a full ISO instant.
+// That sub-second precision has to survive the parse, or everything from the
+// chosen day is dropped and the filter reads as broken.
+test("searchQueryParams keeps an end-of-day until to the millisecond", () => {
+  const endOfDay = new Date(2026, 6, 15, 23, 59, 59, 999).toISOString();
+  const p = params("q=liquid&until=" + encodeURIComponent(endOfDay));
+  assert.equal(p?.untilMs, Date.parse(endOfDay));
+  // Anything that happened during that day is still under the bound.
+  assert.ok(new Date(2026, 6, 15, 23, 30).getTime() <= p!.untilMs!);
+});
+
 test("searchQueryParams clamps the limit and collects repeated agents", () => {
   assert.equal(params("q=liquid&limit=9999")?.limit, MAX_SEARCH_LIMIT);
   assert.equal(params("q=liquid&limit=0")?.limit, 1);

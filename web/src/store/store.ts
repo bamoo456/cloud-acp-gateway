@@ -615,10 +615,10 @@ export const useStore = create<State>((set, get) => {
   // as a live viewer. Agents without session/load (Codex ACP today) fall back to
   // the history API as a saved, view-only conversation; replying forks a new
   // session because the old id cannot be resumed over ACP.
-  async function joinSession(id: string) {
+  async function joinSession(id: string, atMessage?: number) {
     if (!agentCanLoadSession()) {
       set({ joining: false });
-      await openSavedSession({ sessionId: id, title: null }, get().cwd);
+      await openSavedSession({ sessionId: id, title: null, atMessage }, get().cwd);
       return;
     }
     // the Thread shows a "Joining conversation…" loading view (s.joining), so no tip needed
@@ -626,7 +626,7 @@ export const useStore = create<State>((set, get) => {
     try {
       patch(id, (s) => ({ ...s, suppressReplay: true })); // drop the agent's load-replay; render from the history API instead
       const lr = (await acp.request("session/load", { sessionId: id, cwd: get().cwd || "", mcpServers: [] })) as NewSessionResult;
-      const r = await getMessages(get().agentName, get().cwd, id, { limit: 50 });
+      const r = await getMessages(get().agentName, get().cwd, id, historyPageFor(atMessage));
       set((st) => {
         const base = makeSession(id, st.sessions[id]?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd });
         const cur = applyHistoryMessages({ ...base, historyStart: r.start }, r.messages);
@@ -669,11 +669,14 @@ export const useStore = create<State>((set, get) => {
   // URL, tear down the current channel, and let handleStatus pick up link.session
   // once the target agent is ready. Used to open a sidebar conversation that lives
   // under a different agent (and by jumpToTask for cross-agent/-folder tasks).
-  function openViaDeepLink(agentName: string, sessionId: string, cwd: string | undefined, tip: string) {
+  function openViaDeepLink(agentName: string, sessionId: string, cwd: string | undefined, tip: string, atMessage?: number) {
     const params = new URLSearchParams();
     params.set("agent", agentName);
     params.set("session", sessionId);
     if (cwd) params.set("cwd", cwd);
+    // A search hit's message index survives the reconnect; without it a cross-agent
+    // hit would silently open at the tail. `undefined`, not falsiness — index 0 is real.
+    if (atMessage !== undefined) params.set("at", String(atMessage));
     history.replaceState(null, "", location.pathname + "?" + params.toString());
     acp?.close();
     clearReconnectTimer();
@@ -731,7 +734,7 @@ export const useStore = create<State>((set, get) => {
           } else if (link.session && get().activeId !== link.session) {
             // deep-link: join the shared session instead of creating our own
             if (link.cwd && get().cwd !== link.cwd) set({ cwd: link.cwd });
-            await joinSession(link.session);
+            await joinSession(link.session, link.at ?? undefined);
           } else {
             // Pick an activation target. An explicit selectSession request always wins.
             // Otherwise restore the conversation we left under this agent ONLY when no
@@ -1021,7 +1024,7 @@ export const useStore = create<State>((set, get) => {
       const agentName = s.agentName ?? get().agentName;
       const cwd = s.cwd ?? get().cwd;
       if (agentName !== get().agentName) {
-        openViaDeepLink(agentName, s.sessionId, cwd, "Opening conversation…");
+        openViaDeepLink(agentName, s.sessionId, cwd, "Opening conversation…", s.atMessage);
         return;
       }
       if (cwd !== get().cwd) { sessionInit = null; set({ cwd }); } // cold: adopt that folder, NO wipe
