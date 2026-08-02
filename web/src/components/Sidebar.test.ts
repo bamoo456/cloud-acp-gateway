@@ -32,6 +32,7 @@ describe("Sidebar recent conversations", () => {
   let container: HTMLDivElement;
   let getHistory: ReturnType<typeof vi.fn>;
   let getDiscoveredHistory: ReturnType<typeof vi.fn>;
+  let searchSessions: ReturnType<typeof vi.fn>;
   let openHistorySession: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -51,10 +52,12 @@ describe("Sidebar recent conversations", () => {
     localStorage.clear();
     getHistory = vi.fn().mockResolvedValue(historyItems);
     getDiscoveredHistory = vi.fn().mockResolvedValue([]);
+    searchSessions = vi.fn();
     openHistorySession = vi.fn();
     vi.doMock("../lib/api.ts", () => ({
       getHistory,
       getDiscoveredHistory,
+      searchSessions,
       getMessages: vi.fn(),
       renameSession: vi.fn(),
       listDir: vi.fn(),
@@ -721,6 +724,145 @@ describe("Sidebar recent conversations", () => {
     expect(container.querySelector(".search")).toBeNull();
     await clickConversationsTab();
     expect(container.querySelector(".search")).not.toBeNull();
+  });
+
+  // The one search box drives two tiers: the instant local title filter (above)
+  // and the debounced server content search (below).
+  async function typeInSearchBox(text: string) {
+    const box = container.querySelector<HTMLInputElement>(".search input")!;
+    await act(async () => {
+      // go through the native setter so React's value tracker sees the change
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(box, text);
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+  }
+
+  test("typing in the Conversations search box also queries the server", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    await clickConversationsTab();
+
+    await typeInSearchBox("liquid");
+
+    // Default filters send no bounds: the server's own 14-day default applies.
+    expect(searchSessions).toHaveBeenCalledWith("liquid", {});
+  });
+
+  // Every keystroke re-arms the debounce, so the half-typed prefixes must never
+  // reach the network — only the term the user stopped on.
+  test("keystrokes inside the debounce window coalesce into one query", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    await clickConversationsTab();
+
+    const box = container.querySelector<HTMLInputElement>(".search input")!;
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    for (const term of ["li", "liq", "liquid"]) {
+      await act(async () => {
+        setValue.call(box, term);
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => { vi.advanceTimersByTime(100); });
+    }
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+
+    expect(searchSessions).toHaveBeenCalledTimes(1);
+    expect(searchSessions).toHaveBeenCalledWith("liquid", {});
+  });
+
+  test("a one-character query does not reach the server", async () => {
+    await renderSidebar();
+    await clickConversationsTab();
+
+    await typeInSearchBox("l");
+
+    expect(searchSessions).not.toHaveBeenCalled();
+  });
+
+  test("narrowing the query back below two characters clears the results and the spinner", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    await clickConversationsTab();
+
+    await typeInSearchBox("liquid");
+    expect(container.textContent).toContain("No messages match.");
+
+    await typeInSearchBox("l");
+    // Neither the previous answer nor a spinner stranded by the early return.
+    expect(container.textContent).not.toContain("No messages match.");
+    expect(container.textContent).not.toContain("Searching…");
+  });
+
+  test("opening a content hit opens the conversation at the matched message", async () => {
+    searchSessions.mockResolvedValue({
+      results: [{
+        sessionId: "hit-1", source: "claude-cli", agentName: "claude", cwd: "/repo",
+        title: "Liquid glass timeline", updatedAt: "2026-06-10T03:00:00.000Z", hitCount: 1,
+        hits: [{ index: 42, role: "user", snippet: "make it liquid", offsets: [[8, 14]] }],
+      }],
+      truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 1, ms: 1 },
+    });
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+
+    const hit = container.querySelector<HTMLButtonElement>(".search-hit");
+    expect(hit).not.toBeNull();
+    await act(async () => { hit!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(openHistorySession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "hit-1", agentName: "claude", cwd: "/repo", atMessage: 42,
+    }));
+  });
+
+  test("an advanced filter re-runs the search with the narrowed options", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+
+    const folderOnly = container.querySelectorAll<HTMLInputElement>(".search-filters input[type=checkbox]")[0];
+    expect(folderOnly).toBeDefined();
+    await act(async () => { folderOnly.click(); });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { cwd: "/repo" });
+  });
+
+  // The panel doesn't unmount on close (desktop keeps it mounted as a column), so
+  // the filters have to be dropped explicitly — a narrowed scope that silently
+  // survives into the next search is the thing we refused to persist at all.
+  test("reopening the panel drops the advanced filters", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    const folderOnly = () => container.querySelectorAll<HTMLInputElement>(".search-filters input[type=checkbox]")[0];
+    await renderSidebar();
+    await clickConversationsTab();
+    await typeInSearchBox("liquid");
+    await act(async () => { folderOnly().click(); });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { cwd: "/repo" });
+
+    const { Sidebar } = await import("./Sidebar.tsx");
+    for (const open of [false, true]) {
+      await act(async () => {
+        root!.render(React.createElement(Sidebar, { open, onClose: vi.fn(), onOpenPicker: vi.fn() }));
+        await flush();
+      });
+    }
+    await clickConversationsTab();
+
+    expect(folderOnly().checked).toBe(false);
   });
 
   test("has no New chat button inside the panel", async () => {

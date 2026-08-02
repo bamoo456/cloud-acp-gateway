@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { getHistory, getDiscoveredHistory, type HistorySession, type DiscoveredHistorySession, type RunningTask } from "../lib/api.ts";
+import { getHistory, getDiscoveredHistory, searchSessions, type HistorySession, type DiscoveredHistorySession, type RunningTask, type SearchResponse } from "../lib/api.ts";
 import type { RecentSession } from "../lib/recentSessions.ts";
 import { resolveRunningTask, runningView } from "../lib/runningTask.ts";
 import { useStore } from "../store/store.ts";
 import { AgentMark } from "./AgentPill.tsx";
+import { SearchResults } from "./SearchResults.tsx";
+import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
 import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
@@ -15,6 +17,11 @@ import type { AgentRef } from "../types.ts";
 // gone" rather than "they're behind See more".
 const RECENT_LIMIT = 15;
 const CONVERSATION_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
+// A content search reads transcripts off disk, so it waits for the typing to
+// settle; a one-character term would scan everything to match everything, so it
+// never leaves the client at all.
+const SEARCH_DEBOUNCE_MS = 300;
+const MIN_SEARCH_LEN = 2;
 // A history row tagged with the agent it was fetched from, so the unified list can
 // show the owning agent's mark and reopen it under that agent.
 type TaggedHistory = HistorySession & { agentName: string };
@@ -51,6 +58,12 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const [showMoreRecent, setShowMoreRecent] = useState(false);
   const [discovered, setDiscovered] = useState<TaggedDiscoveredHistory[] | null>(null);
   const [tab, setTab] = useState<"recent" | "conversations">("recent");
+  // In-memory only, by design: neither localStorage nor the cross-device `meta` KV
+  // that holds text_size/screen_lock. A sticky custom range that silently applies
+  // to the next search is worse than re-picking it.
+  const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
+  const [searchRes, setSearchRes] = useState<SearchResponse | null>(null);
+  const [searching, setSearching] = useState(false);
   // The gateway marks agents with no native history reader as history:false.
   // Missing flag (dev fallback, older gateway) = supported.
   const agentByName = new Map(s.cfg.agents.map((a) => [a.name, a] as const));
@@ -106,14 +119,36 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   }
   useEffect(() => { loadHistory(true); loadDiscovered(true); }, [open, s.cwd, histAgentsKey, discoverAgentsKey]);
   // The panel always opens on Recent so cross-folder switching is one tap away,
-  // collapsed back to the first few recents.
-  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); } }, [open]);
+  // collapsed back to the first few recents. The search filters reset with it:
+  // they're deliberately unpersisted, and the panel stays mounted while closed
+  // (desktop keeps it as a column), so nothing else would ever drop them.
+  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setFilters(DEFAULT_FILTERS); } }, [open]);
   // refresh the list in place (no loading flash) when something renames a session
   useEffect(() => {
     if (s.historyNonce === 0) return;
     loadHistory(false);
     loadDiscovered(false);
   }, [s.historyNonce]);
+
+  // Tier 2: the server content search. Tier 1 (the local title filter above it) stays
+  // instant and untouched — this only ADDS the matches a title filter cannot see.
+  useEffect(() => {
+    const term = q.trim();
+    // Clearing `searching` here too: without it, backspacing from a pending query
+    // down to one character strands the spinner with no request left to answer it.
+    if (term.length < MIN_SEARCH_LEN) { setSearchRes(null); setSearching(false); return; }
+    let cancelled = false;
+    setSearching(true);
+    const t = setTimeout(() => {
+      searchSessions(term, filtersToOptions(filters, s.cwd, Date.now()))
+        .then((r) => { if (!cancelled) setSearchRes(r); })
+        .catch(() => { if (!cancelled) setSearchRes(null); })
+        .finally(() => { if (!cancelled) setSearching(false); });
+    }, SEARCH_DEBOUNCE_MS);
+    // Cancels both halves — a queued query a later keystroke or filter change has
+    // outdated, and an in-flight one whose answer would land after unmount.
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [q, filters, s.cwd]);
 
   // Running indicator, reusing the polled runningTasks. Rows can belong to any
   // agent now, so match on agent + sessionId (a bare sessionId could collide
@@ -335,6 +370,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                 <div className="search">
                   <input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
                 </div>
+                <SearchFilters value={filters} agents={s.cfg.agents.map((a) => a.name)} onChange={setFilters} />
                 <div className="sess-list">
                   {err && <div className="panel-empty">Couldn't load conversations.</div>}
                   {!err && items === null && <div className="panel-empty">Loading…</div>}
@@ -345,6 +381,24 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                       {showMore ? "Show recent only" : "See more"}
                     </button>
                   )}
+                  <SearchResults
+                    response={searchRes}
+                    loading={searching}
+                    rangeExplicit={filters.window === "custom"}
+                    onOpen={(r, index) => {
+                      void s.openHistorySession({ sessionId: r.sessionId, title: r.title, agentName: r.agentName, cwd: r.cwd, atMessage: index });
+                      onClose();
+                    }}
+                    onSearchAll={() => setFilters({ ...filters, window: "all" })}
+                    onSearchOlder={() => {
+                      if (!searchRes?.cursor) return;
+                      setSearching(true);
+                      searchSessions(q.trim(), { ...filtersToOptions(filters, s.cwd, Date.now()), cursor: searchRes.cursor })
+                        .then((more) => setSearchRes({ ...more, results: [...searchRes.results, ...more.results] }))
+                        .catch(() => { /* keep the page already on screen */ })
+                        .finally(() => setSearching(false));
+                    }}
+                  />
                 </div>
               </div>
             )}
