@@ -39,3 +39,36 @@ export function parseQuery(raw: string): ParsedQuery | null {
   if (terms.length === 0) return null;
   return { terms, probe: probeFor(terms) };
 }
+
+export const SNIPPET_RADIUS = 120;
+
+export type SnippetResult = {
+  snippet: string;
+  // Half-open [start, end) ranges into `snippet` for the client to highlight.
+  // The server emits ranges, never markup, so the client escapes its own output.
+  offsets: Array<[number, number]>;
+};
+
+export function buildSnippet(text: string, terms: string[]): SnippetResult | null {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const hay = flat.toLowerCase();
+  const firsts = terms.map((t) => hay.indexOf(t));
+  if (firsts.some((i) => i < 0)) return null;
+
+  const anchor = Math.min(...firsts);
+  const start = Math.max(0, anchor - SNIPPET_RADIUS);
+  const end = Math.min(flat.length, anchor + SNIPPET_RADIUS);
+  const lead = start > 0 ? "…" : "";
+  const body = flat.slice(start, end);
+  const snippet = lead + body + (end < flat.length ? "…" : "");
+
+  const low = body.toLowerCase();
+  const offsets: Array<[number, number]> = [];
+  for (const t of terms) {
+    for (let i = low.indexOf(t); i >= 0; i = low.indexOf(t, i + t.length)) {
+      offsets.push([i + lead.length, i + lead.length + t.length]);
+    }
+  }
+  offsets.sort((a, b) => a[0] - b[0]);
+  return { snippet, offsets };
+}
