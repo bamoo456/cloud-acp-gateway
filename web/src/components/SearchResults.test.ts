@@ -35,6 +35,29 @@ describe("SearchResults", () => {
     expect(container.querySelector("mark")?.textContent).toBe("liquid");
   });
 
+  // The server centres a snippet on its match (SNIPPET_RADIUS chars either side),
+  // so in the ~270px sidebar column the lead alone is about three lines — enough
+  // to push the highlight out of a row clamped to keep it readable. The rendered
+  // snippet has to reach its match within a line or so of text.
+  test("a hit deep inside a long message still leads with its match", async () => {
+    const snippet = "…" + "x".repeat(200) + "needle" + "y".repeat(50);
+    await mount({
+      response: envelope({
+        results: [{
+          sessionId: "s1", source: "claude-cli", agentName: "claude", cwd: "/Users/me/repo",
+          title: "Long message", updatedAt: "2026-08-01T00:00:00.000Z", hitCount: 1,
+          hits: [{ index: 3, role: "user", snippet, offsets: [[201, 207]] }],
+        }],
+      }),
+      loading: false, rangeExplicit: false, onOpen: vi.fn(), onSearchAll: vi.fn(), onSearchOlder: vi.fn(),
+    });
+    expect(container.querySelector("mark")?.textContent).toBe("needle");
+    const rendered = container.querySelector(".search-hit-snippet")!.textContent!;
+    expect(rendered.indexOf("needle")).toBeLessThanOrEqual(40);
+    // The trailing context survives the trim — only the lead is cut.
+    expect(rendered).toContain("needle" + "y".repeat(50));
+  });
+
   test("opening a hit passes the session and its message index", async () => {
     const onOpen = vi.fn();
     await mount({ response: envelope(), loading: false, rangeExplicit: false, onOpen, onSearchAll: vi.fn(), onSearchOlder: vi.fn() });
