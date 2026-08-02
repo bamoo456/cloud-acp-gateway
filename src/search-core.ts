@@ -146,3 +146,48 @@ export function afterCursor(cur: SearchCursor, c: { recencyMs: number; sessionId
   if (c.recencyMs !== cur.recencyMs) return c.recencyMs < cur.recencyMs;
   return c.sessionId < cur.sessionId;
 }
+
+export const DEFAULT_SINCE_DAYS = 14;
+export const DEFAULT_SEARCH_LIMIT = 50;
+export const MAX_SEARCH_LIMIT = 200;
+const DAY_MS = 86400000;
+
+export type SearchQuery = {
+  query: ParsedQuery;
+  sinceMs: number | null;  // null = unbounded (all=1)
+  untilMs: number | null;
+  agents: string[] | null; // null = every configured agent
+  role: "user" | "assistant" | null;
+  limit: number;
+  cursor: SearchCursor | null;
+};
+
+// ISO 8601 or epoch ms. An unparseable value degrades to "no bound" rather than
+// inventing one — the same all-or-nothing rule historyPageParams uses.
+function instantMs(raw: string | null): number | null {
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+export function searchQueryParams(q: URLSearchParams, nowMs: number): SearchQuery | null {
+  const query = parseQuery(q.get("q") ?? "");
+  if (!query) return null;
+  const agents = q.getAll("agent").filter((a) => a.length > 0);
+  const role = q.get("role");
+  const cursorRaw = q.get("cursor");
+  const rawLimit = parseInt(q.get("limit") ?? String(DEFAULT_SEARCH_LIMIT), 10);
+  // A legitimate 0 must clamp to 1, not fall back to the default — so NaN is
+  // tested explicitly rather than leaning on falsiness.
+  const limit = Number.isNaN(rawLimit) ? DEFAULT_SEARCH_LIMIT : rawLimit;
+  return {
+    query,
+    sinceMs: q.get("all") === "1" ? null : (instantMs(q.get("since")) ?? nowMs - DEFAULT_SINCE_DAYS * DAY_MS),
+    untilMs: instantMs(q.get("until")),
+    agents: agents.length > 0 ? agents : null,
+    role: role === "user" || role === "assistant" ? role : null,
+    limit: Math.min(Math.max(limit, 1), MAX_SEARCH_LIMIT),
+    cursor: cursorRaw ? decodeCursor(cursorRaw) : null,
+  };
+}
