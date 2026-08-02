@@ -147,6 +147,23 @@ export function afterCursor(cur: SearchCursor, c: { recencyMs: number; sessionId
   return c.sessionId < cur.sessionId;
 }
 
+// The sort that produces that order. It lives here, beside afterCursor, because
+// the two are halves of one contract — afterCursor(x, y) is true exactly when
+// this comparator places y after x — and a comparator kept in another file has
+// nothing holding it to that. Both compare ids with the bare relational
+// operators, i.e. code-unit order; switching either to localeCompare desyncs
+// resume for every id pair ICU collates differently, which is why the test
+// asserts the relation between them and not just a sorted example. Both
+// recencies must be finite — stage A guarantees that, since it falls back to an
+// mtime — because a NaN would make this fall through to the id tiebreak while
+// afterCursor took its unequal branch, i.e. the same desync one layer up.
+export function bySearchOrder(
+  a: { recencyMs: number; sessionId: string },
+  b: { recencyMs: number; sessionId: string },
+): number {
+  return (b.recencyMs - a.recencyMs) || (a.sessionId < b.sessionId ? 1 : a.sessionId > b.sessionId ? -1 : 0);
+}
+
 export const DEFAULT_SINCE_DAYS = 14;
 export const DEFAULT_SEARCH_LIMIT = 50;
 export const MAX_SEARCH_LIMIT = 200;
