@@ -1006,7 +1006,8 @@ export async function readClaudeHistoryMessages(file: string, sessionId: string,
 }
 
 type CodexIndexEntry = { id: string; thread_name?: string; updated_at?: string };
-type CodexSessionFile = { id: string; cwd: string; file: string; updatedAt: string };
+type CodexSessionMeta = { id: string; cwd: string; timestamp?: string; isSubagent: boolean };
+type CodexSessionFile = { id: string; cwd: string; file: string; updatedAt: string; isSubagent: boolean };
 
 async function readCodexIndex(): Promise<Map<string, CodexIndexEntry>> {
   const out = new Map<string, CodexIndexEntry>();
@@ -1035,12 +1036,20 @@ async function readFirstJsonLine(file: string): Promise<Record<string, unknown> 
   return null;
 }
 
-function codexMetaFromLine(line: Record<string, unknown> | null): { id: string; cwd: string; timestamp?: string } | null {
+function codexMetaFromLine(line: Record<string, unknown> | null): CodexSessionMeta | null {
   const payload = line?.payload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const p = payload as Record<string, unknown>;
+  const source = p.source;
+  const sourceMarksSubagent = !!source && typeof source === "object" && !Array.isArray(source)
+    && Object.prototype.hasOwnProperty.call(source, "subagent");
   return typeof p.id === "string" && typeof p.cwd === "string"
-    ? { id: p.id, cwd: p.cwd, timestamp: typeof p.timestamp === "string" ? p.timestamp : undefined }
+    ? {
+      id: p.id,
+      cwd: p.cwd,
+      timestamp: typeof p.timestamp === "string" ? p.timestamp : undefined,
+      isSubagent: sourceMarksSubagent || p.thread_source === "subagent",
+    }
     : null;
 }
 
@@ -1066,7 +1075,7 @@ async function codexSessionFileFromPath(file: string): Promise<CodexSessionFile 
   if (!meta) return null;
   let mtime = "";
   try { mtime = new Date((await fs.promises.stat(file)).mtimeMs).toISOString(); } catch { /* ignore */ }
-  return { id: meta.id, cwd: meta.cwd, file, updatedAt: mtime || meta.timestamp || "" };
+  return { id: meta.id, cwd: meta.cwd, file, updatedAt: mtime || meta.timestamp || "", isSubagent: meta.isSubagent };
 }
 
 async function listCodexArchivedSessions(): Promise<CodexSessionFile[]> {
@@ -1093,9 +1102,18 @@ async function listCodexSessionFiles(): Promise<CodexSessionFile[]> {
   const byId = new Map<string, CodexSessionFile>();
   for (const s of [...archived, ...active]) {
     const existing = byId.get(s.id);
-    if (!existing || dateValue(s.updatedAt) >= dateValue(existing.updatedAt)) byId.set(s.id, s);
+    if (!existing) {
+      byId.set(s.id, s);
+      continue;
+    }
+    const newer = dateValue(s.updatedAt) >= dateValue(existing.updatedAt) ? s : existing;
+    byId.set(s.id, { ...newer, isSubagent: existing.isSubagent || s.isSubagent });
   }
   return [...byId.values()];
+}
+
+function isUserVisibleCodexSession(session: CodexSessionFile): boolean {
+  return !session.isSubagent;
 }
 
 function sameCwd(a: string, b: string): boolean {
@@ -1167,6 +1185,7 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
   const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
   const custom = await readTitles(cwd);
   const matching = sessions
+    .filter(isUserVisibleCodexSession)
     .filter((s) => sameCwd(s.cwd, cwd))
     .map((s) => ({ ...s, index: index.get(s.id) }))
     .sort((a, b) => dateValue(b.index?.updated_at || b.updatedAt) - dateValue(a.index?.updated_at || a.updatedAt))
@@ -1185,7 +1204,7 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
 // on disk is the difference between a listing and reading a gigabyte.
 async function codexTranscriptCandidates(): Promise<TranscriptCandidate[]> {
   const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
-  return sessions.map((s) => ({
+  return sessions.filter(isUserVisibleCodexSession).map((s) => ({
     sessionId: s.id, file: s.file, cwd: s.cwd,
     title: index.get(s.id)?.thread_name ?? null,
     recencyAt: index.get(s.id)?.updated_at ?? null,
