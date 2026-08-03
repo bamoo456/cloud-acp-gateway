@@ -219,6 +219,13 @@ test("Codex history hides explicitly marked subagent rollouts but still reads th
 
     const hidden = await readAgentHistoryMessages(CODEX_CMD, cwd, "CDX-CHILD-ARCHIVED", 20);
     assert.ok(hidden?.messages.some((m) => m.blocks.some((b) => b.type === "text" && b.text === "archived nested child")), "hidden archived child remains directly readable by id");
+
+    const duplicate = await readAgentHistoryMessages(CODEX_CMD, cwd, "CDX-DUPLICATE", 20);
+    assert.deepEqual(
+      duplicate?.messages.flatMap((m) => m.blocks.filter((b) => b.type === "text").map((b) => b.text ?? "")),
+      ["active duplicate"],
+      "duplicate read selects the newer active copy while the archived child marker still hides it from listing",
+    );
   });
   assert.equal(fs.existsSync(archivedChild), true);
 });
