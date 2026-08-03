@@ -168,6 +168,10 @@ test("Codex history excludes explicit subagents but keeps direct access", async 
   fs.utimesSync(rootCli, new Date(1000), new Date(1000));
   fs.utimesSync(rootLegacy, new Date(2000), new Date(2000));
   fs.utimesSync(rootObject, new Date(3000), new Date(3000));
+  const rootNull = writeCodexRollout(home, "ROOT-NULL", { id: "CDX-ROOT-NULL", cwd, timestamp, source: null }, "root null");
+  const rootArray = writeCodexRollout(home, "ROOT-ARRAY", { id: "CDX-ROOT-ARRAY", cwd, timestamp, source: [] }, "root array");
+  fs.utimesSync(rootNull, new Date(500), new Date(500));
+  fs.utimesSync(rootArray, new Date(750), new Date(750));
   writeCodexRollout(home, "SUB-LEGACY", { id: "CDX-SUB-LEGACY", cwd, timestamp, source: { subagent: "review" } }, "legacy child");
   writeCodexRollout(home, "SUB-NESTED", {
     id: "CDX-SUB-NESTED",
@@ -195,7 +199,7 @@ test("Codex history excludes explicit subagents but keeps direct access", async 
 
   await withCodexHome(home, async () => {
     const listed = await listAgentHistory(CODEX_CMD, cwd, 20);
-    assert.deepEqual(listed.map((s) => s.sessionId), ["CDX-ROOT-OBJECT", "CDX-ROOT-LEGACY", "CDX-ROOT-CLI"]);
+    assert.deepEqual(listed.map((s) => s.sessionId), ["CDX-ROOT-OBJECT", "CDX-ROOT-LEGACY", "CDX-ROOT-CLI", "CDX-ROOT-ARRAY", "CDX-ROOT-NULL"]);
 
     const direct = await readAgentHistoryMessages(CODEX_CMD, cwd, "CDX-SUB-NESTED", 20);
     assert.deepEqual(direct?.messages.flatMap((m) => m.blocks.filter((b) => b.type === "text").map((b) => b.text ?? "")), ["nested child"]);
