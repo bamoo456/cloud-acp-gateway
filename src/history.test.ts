@@ -131,10 +131,13 @@ test("Claude discovery recovers cwd from CLI transcripts and filters outside the
 function writeCodexRollout(
   home: string,
   name: string,
-  meta: { id: string; cwd: string; timestamp: string },
+  meta: { id: string; cwd: string; timestamp: string; source?: unknown; thread_source?: unknown },
   userText: string,
+  opts: { location?: "active" | "archived" } = {},
 ): string {
-  const dir = path.join(home, "sessions", "2026", "07", "20");
+  const dir = opts.location === "archived"
+    ? path.join(home, "archived_sessions")
+    : path.join(home, "sessions", "2026", "07", "20");
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `rollout-${name}.jsonl`);
   fs.writeFileSync(file, [
@@ -152,6 +155,8 @@ async function withCodexHome<T>(home: string, fn: () => Promise<T>): Promise<T> 
   }
 }
 
+const CODEX_CMD = "/opt/acp-gateway/node_modules/.bin/codex-acp";
+
 test("Codex discovery spans folders and filters outside the filesystem root", async () => {
   const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codexhome-"));
@@ -164,6 +169,8 @@ test("Codex discovery spans folders and filters outside the filesystem root", as
   writeCodexRollout(home, "A", { id: "CDX-A", cwd: inCwd, timestamp: "2026-07-20T10:00:00.000Z" }, "older prompt");
   writeCodexRollout(home, "B", { id: "CDX-B", cwd: otherCwd, timestamp: "2026-07-20T12:00:00.000Z" }, "newer prompt");
   writeCodexRollout(home, "C", { id: "CDX-C", cwd: outCwd, timestamp: "2026-07-20T14:00:00.000Z" }, "out of bounds");
+  writeCodexRollout(home, "child-active", { id: "CDX-CHILD-ACTIVE", cwd: inCwd, timestamp: "2026-07-20T16:00:00.000Z", source: { subagent: "review" } }, "ignore active child");
+  writeCodexRollout(home, "child-archived", { id: "CDX-CHILD-ARCHIVED", cwd: otherCwd, timestamp: "2026-07-20T18:00:00.000Z", source: { subagent: { thread_spawn: { depth: 1 } } } }, "ignore archived child", { location: "archived" });
   // The index supplies a thread name and the authoritative recency; a session
   // absent from it falls back to the rollout's own first user message + mtime.
   fs.writeFileSync(path.join(home, "session_index.jsonl"),
@@ -171,12 +178,57 @@ test("Codex discovery spans folders and filters outside the filesystem root", as
   // mtime is what an un-indexed session ranks and dates by.
   fs.utimesSync(path.join(home, "sessions", "2026", "07", "20", "rollout-A.jsonl"), new Date(1000), new Date(1000));
 
-  const sessions = await withCodexHome(home, () => discoverCodexHistory({ fsRoot, limit: 10 }));
+  const sessions = await withCodexHome(home, () => discoverCodexHistory({ fsRoot, limit: 2 }));
 
   assert.deepEqual(sessions, [
     { sessionId: "CDX-B", title: "named thread", updatedAt: "2026-07-20T12:00:00.000Z", cwd: fs.realpathSync(otherCwd), source: "codex-cli" },
     { sessionId: "CDX-A", title: "older prompt", updatedAt: new Date(1000).toISOString(), cwd: fs.realpathSync(inCwd), source: "codex-cli" },
-  ], "both in-root folders listed, newest first; the out-of-root rollout is dropped");
+  ], "subagent rollouts are filtered before the recency limit; both in-root folders remain, newest first");
+});
+
+test("Codex history hides explicitly marked subagent rollouts but still reads them by id", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codexhome-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+
+  const visibleIds = [
+    "CDX-CLI",
+    "CDX-MISSING",
+    "CDX-OBJECT",
+    "CDX-NULL",
+    "CDX-ARRAY",
+  ];
+  writeCodexRollout(home, "root-cli", { id: "CDX-CLI", cwd, timestamp: "2026-07-20T10:00:00.000Z", source: "cli" }, "cli root");
+  writeCodexRollout(home, "root-missing", { id: "CDX-MISSING", cwd, timestamp: "2026-07-20T10:01:00.000Z" }, "missing source root");
+  writeCodexRollout(home, "root-object", { id: "CDX-OBJECT", cwd, timestamp: "2026-07-20T10:02:00.000Z", source: { kind: "cli" } }, "unmarked object root");
+  writeCodexRollout(home, "root-null", { id: "CDX-NULL", cwd, timestamp: "2026-07-20T10:03:00.000Z", source: null }, "null source root");
+  writeCodexRollout(home, "root-array", { id: "CDX-ARRAY", cwd, timestamp: "2026-07-20T10:04:00.000Z", source: [] }, "array source root");
+
+  writeCodexRollout(home, "child-active", { id: "CDX-CHILD-ACTIVE", cwd, timestamp: "2026-07-20T10:05:00.000Z", source: { subagent: "review" } }, "active legacy child");
+  const archivedChild = writeCodexRollout(home, "child-archived", { id: "CDX-CHILD-ARCHIVED", cwd, timestamp: "2026-07-20T10:06:00.000Z", source: { subagent: { thread_spawn: { depth: 1 } } } }, "archived nested child", { location: "archived" });
+  writeCodexRollout(home, "child-thread-source", { id: "CDX-CHILD-THREAD-SOURCE", cwd, timestamp: "2026-07-20T10:07:00.000Z", thread_source: "subagent" }, "thread source child");
+
+  const duplicateArchived = writeCodexRollout(home, "duplicate-archived", { id: "CDX-DUPLICATE", cwd, timestamp: "2026-07-20T10:08:00.000Z", source: { subagent: "review" } }, "archived duplicate", { location: "archived" });
+  const duplicateActive = writeCodexRollout(home, "duplicate-active", { id: "CDX-DUPLICATE", cwd, timestamp: "2026-07-20T10:09:00.000Z" }, "active duplicate");
+  fs.utimesSync(duplicateArchived, new Date(1000), new Date(1000));
+  fs.utimesSync(duplicateActive, new Date(2000), new Date(2000));
+
+  await withCodexHome(home, async () => {
+    const sessions = await listAgentHistory(CODEX_CMD, cwd, 50);
+    assert.deepEqual(sessions.map((s) => s.sessionId).sort(), visibleIds.sort(), "only user-visible roots are listed");
+
+    const hidden = await readAgentHistoryMessages(CODEX_CMD, cwd, "CDX-CHILD-ARCHIVED", 20);
+    assert.ok(hidden?.messages.some((m) => m.blocks.some((b) => b.type === "text" && b.text === "archived nested child")), "hidden archived child remains directly readable by id");
+
+    const duplicate = await readAgentHistoryMessages(CODEX_CMD, cwd, "CDX-DUPLICATE", 20);
+    assert.deepEqual(
+      duplicate?.messages.flatMap((m) => m.blocks.filter((b) => b.type === "text").map((b) => b.text ?? "")),
+      ["active duplicate"],
+      "duplicate read selects the newer active copy while the archived child marker still hides it from listing",
+    );
+  });
+  assert.equal(fs.existsSync(archivedChild), true);
 });
 
 // The limit is a recency cut, not an arbitrary one — deriving titles happens
@@ -542,8 +594,6 @@ test("turn traffic the gateway pumped outranks a stale transcript tail", async (
 // Deleting a conversation removes it from the agent's OWN store, so each
 // provider needs its own primitive. All three are exercised against temp stores
 // (projectsRoot / CODEX_HOME / XDG_DATA_HOME) — never the real ones on this host.
-const CODEX_CMD = "/opt/acp-gateway/node_modules/.bin/codex-acp";
-
 test("deleting a claude conversation unlinks its transcript and its custom title", async () => {
   const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-repo-"));
@@ -621,7 +671,7 @@ test("deleting a codex conversation unlinks its rollout and leaves the index alo
   const cwd = "/work/repo";
   const file = path.join(sessionsDir, "rollout-S.jsonl");
   fs.writeFileSync(file, [
-    { type: "session_meta", payload: { id: "CDX-1", cwd, timestamp: "2026-07-20T10:00:00Z" } },
+    { type: "session_meta", payload: { id: "CDX-1", cwd, timestamp: "2026-07-20T10:00:00Z", source: { subagent: "review" } } },
     { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "delete me" }] } },
   ].map((l) => JSON.stringify(l)).join("\n") + "\n");
   // session_index.jsonl is append-only and joined ONTO the files found on disk,
@@ -1147,4 +1197,28 @@ test("search extracts a codex hit and titles it from the rollout's first user te
   assert.equal(r.results[0].hits[0].role, "assistant");
   assert.ok(r.results[0].hits[0].snippet.includes("zzyzxmarker"));
   assert.equal(r.results[0].title, "codex opener", "no thread_name, so the title falls back to firstCodexUserText");
+});
+
+test("search excludes Codex subagents before scanning their transcripts", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codexhome-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+
+  writeCodexRollout(home, "FILTER-ROOT", {
+    id: "CDX-FILTER-ROOT", cwd, timestamp: "2026-08-03T17:00:00.000Z", source: "cli",
+  }, "subagentfiltermarker root");
+  writeCodexRollout(home, "FILTER-CHILD", {
+    id: "CDX-FILTER-CHILD", cwd, timestamp: "2026-08-03T18:00:00.000Z", source: { subagent: "review" },
+  }, "subagentfiltermarker child", { location: "archived" });
+
+  await withCodexHome(home, async () => {
+    const params = searchParams("q=subagentfiltermarker&all=1");
+    const candidates = await searchCandidates([{ name: "codex", cmd: CODEX_CMD }], params, { fsRoot });
+    assert.deepEqual(candidates.candidates.map((c) => c.sessionId), ["CDX-FILTER-ROOT"]);
+
+    const results = await searchTranscripts([{ name: "codex", cmd: CODEX_CMD }], params, { fsRoot });
+    assert.deepEqual(results.results.map((r) => r.sessionId), ["CDX-FILTER-ROOT"]);
+    assert.equal(results.scanned.files, 1);
+  });
 });
