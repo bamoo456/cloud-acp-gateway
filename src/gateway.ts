@@ -1204,7 +1204,7 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
 // on disk is the difference between a listing and reading a gigabyte.
 async function codexTranscriptCandidates(): Promise<TranscriptCandidate[]> {
   const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
-  return sessions.map((s) => ({
+  return sessions.filter(isUserVisibleCodexSession).map((s) => ({
     sessionId: s.id, file: s.file, cwd: s.cwd,
     title: index.get(s.id)?.thread_name ?? null,
     recencyAt: index.get(s.id)?.updated_at ?? null,
