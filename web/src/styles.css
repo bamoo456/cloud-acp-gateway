@@ -413,12 +413,61 @@
   .sess-item .run-dot.awaiting { background: var(--err); }
   /* Cooling-down: recently finished, lingering in Running — a muted hollow ring, no pulse. */
   .sess-item .run-dot.cooling { background: transparent; border: 1.5px solid var(--muted); animation: none; }
-  .see-more {
+  /* .search-more (搜尋全部 / 繼續搜更早) plays the same role in Conversations that
+     .see-more plays in Recent — the one way out of a bounded list — so it wears the
+     same style instead of falling through the bare `button` reset as plain text. */
+  .see-more, .search-more {
     width: 100%; min-height: 40px; margin-top: 4px; border-radius: 10px;
     color: var(--accent); font-size: 14px; font-weight: 700;
   }
-  .see-more:hover { background: var(--surface-2); }
+  .see-more:hover, .search-more:hover { background: var(--surface-2); }
   .panel-empty { padding: 18px 16px 22px; color: var(--muted); font-size: 14px; text-align: center; }
+  /* Advanced search filters — collapsed to a single "進階" row until asked for, so
+     the search box reads exactly as plainly as it did before. */
+  .search-filters { padding: 0 10px 8px; }
+  /* The native marker is hidden (as on every other <details> here), so the summary
+     carries the app's own chevron instead — without it "進階" reads as a label
+     rather than something you can open. */
+  .search-filters > summary {
+    display: inline-flex; align-items: center; gap: 5px; user-select: none;
+    color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; list-style: none; padding: 4px 2px;
+  }
+  .search-filters > summary::-webkit-details-marker { display: none; }
+  .search-filters > summary:hover { color: var(--text); }
+  .search-filters > summary .chev { display: grid; place-items: center; transition: transform .15s ease; }
+  .search-filters > summary .chev svg { width: 13px; height: 13px; }
+  .search-filters[open] > summary .chev { transform: rotate(90deg); }
+  .search-filter-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 4px 0; font-size: 13px; color: var(--muted); }
+  .search-filter-row label { display: inline-flex; align-items: center; gap: 4px; }
+  .search-filter-row input[type=date], .search-filter-row select {
+    padding: 5px 8px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px;
+  }
+  .search-filters .chip {
+    padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--muted); font-size: 13px; font-weight: 600;
+  }
+  .search-filters .chip.active { border-color: var(--accent); color: var(--accent); }
+  .search-results { display: flex; flex-direction: column; }
+  .search-hit { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 8px 12px; cursor: pointer; }
+  .search-hit:hover { background: var(--surface-2); }
+  /* The sidebar is a 271px column, not the desktop-width surface SNIPPET_RADIUS
+     (120 chars either side of the hit) was sized for: unclamped, one row ran a
+     4-line title over a 10-line snippet — 347px, a third of the viewport for a
+     single result. Clamp what this column renders rather than shrinking the
+     radius, which also feeds consumers that have the width for it. */
+  .search-hit-title {
+    font-weight: 600; display: -webkit-box; -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2; overflow: hidden;
+  }
+  .search-hit-meta { font-size: 0.8em; opacity: 0.7; }
+  .search-hit-snippet {
+    font-size: 0.85em; opacity: 0.9; margin-top: 2px;
+    display: -webkit-box; -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3; overflow: hidden;
+  }
+  .search-hit-snippet mark { background: var(--hit-bg, rgba(255, 214, 0, 0.35)); color: inherit; }
+  .panel-note { font-size: 0.8em; opacity: 0.6; padding: 4px 12px; }
 
   /* scrim behind panel */
   #scrim { position: fixed; inset: 0; z-index: 20; display: none; }

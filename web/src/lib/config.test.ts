@@ -3,13 +3,22 @@ import { linkParams, shareUrl, resumeCommand } from "./config.ts";
 
 describe("deep-link url helpers", () => {
   test("linkParams reads agent + session + cwd from the query string", () => {
-    expect(linkParams("?agent=codex&session=abc-123&cwd=/home/x")).toEqual({ agent: "codex", session: "abc-123", cwd: "/home/x" });
-    expect(linkParams("?session=abc-123")).toEqual({ agent: null, session: "abc-123", cwd: null });
-    expect(linkParams("")).toEqual({ agent: null, session: null, cwd: null });
+    expect(linkParams("?agent=codex&session=abc-123&cwd=/home/x")).toEqual({ agent: "codex", session: "abc-123", cwd: "/home/x", at: null });
+    expect(linkParams("?session=abc-123")).toEqual({ agent: null, session: "abc-123", cwd: null, at: null });
+    expect(linkParams("")).toEqual({ agent: null, session: null, cwd: null, at: null });
   });
 
   test("linkParams decodes encoded values", () => {
-    expect(linkParams("?session=s1&cwd=%2Fhome%2Fa%20b")).toEqual({ agent: null, session: "s1", cwd: "/home/a b" });
+    expect(linkParams("?session=s1&cwd=%2Fhome%2Fa%20b")).toEqual({ agent: null, session: "s1", cwd: "/home/a b", at: null });
+  });
+
+  // `at` carries a search hit's absolute message index across an agent switch, so a
+  // cross-agent hit still opens at the match instead of silently at the tail.
+  test("linkParams reads a message index, including index 0, and rejects a bad one", () => {
+    expect(linkParams("?session=s1&at=42").at).toBe(42);
+    expect(linkParams("?session=s1&at=0").at).toBe(0);
+    expect(linkParams("?session=s1&at=-3").at).toBeNull();
+    expect(linkParams("?session=s1&at=abc").at).toBeNull();
   });
 
   test("shareUrl builds a deep-link with agent from origin + pathname", () => {
@@ -25,7 +34,9 @@ describe("deep-link url helpers", () => {
   test("shareUrl round-trips through linkParams", () => {
     const url = shareUrl("sess-9", "/home/a b", "claude", "http://h", "/");
     const search = url.slice(url.indexOf("?"));
-    expect(linkParams(search)).toEqual({ agent: "claude", session: "sess-9", cwd: "/home/a b" });
+    // A shared link deliberately carries no `at`: it points at a conversation, not
+    // at one reader's search hit inside it.
+    expect(linkParams(search)).toEqual({ agent: "claude", session: "sess-9", cwd: "/home/a b", at: null });
   });
 });
 

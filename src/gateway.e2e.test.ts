@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { makeTestServer, Gateway, TASK_TTL_MS, type Conn } from "./gateway.ts";
+import http from "node:http";
+import { makeTestServer, Gateway, TASK_TTL_MS, handleRequest, type Conn } from "./gateway.ts";
 import { Db } from "./db.ts";
 import { sse, post, sseStatus, USER, TOKEN, parseFrame, type Evt } from "./sse-testclient.ts";
 
@@ -12,6 +13,27 @@ type Msg = Record<string, unknown>;
 
 const authHeader = (user: string, pass: string) =>
   "Basic " + Buffer.from(`${user}:${pass}`, "utf8").toString("base64");
+
+// makeTestServer() above wires only the SSE+POST transport (handleSseRpc), not
+// the Basic-auth'd HTTP surface (/history*, /fs, ...) — that lives in
+// handleRequest, which the real entrypoint only attaches to a listening server
+// when ACPG_NO_LISTEN is unset. Tests always set ACPG_NO_LISTEN=1, so exercising
+// that surface means wiring handleRequest to our own ephemeral server here.
+// Auth is the gateway's real Basic credentials (ACPG_AUTH_USER/ACPG_AUTH_TOKEN),
+// not the SSE transport's "u"/"t" test constant above.
+function startHttpServer(): Promise<{ base: string; authed: (p: string) => Promise<Response>; close: () => Promise<void> }> {
+  const srv = http.createServer(handleRequest);
+  return new Promise((resolve) => {
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address() as import("node:net").AddressInfo;
+      const base = `http://127.0.0.1:${port}`;
+      const authed = (p: string) => fetch(base + p, {
+        headers: { authorization: authHeader(process.env.ACPG_AUTH_USER ?? "", process.env.ACPG_AUTH_TOKEN ?? "") },
+      });
+      resolve({ base, authed, close: () => new Promise((r) => srv.close(() => r())) });
+    });
+  });
+}
 
 // Await the next agent->client frame whose parsed body matches pred.
 function nextFrame(c: { next: (p: (e: Evt) => boolean) => Promise<Evt> }, pred: (o: Msg) => boolean): Promise<Msg> {
@@ -967,5 +989,244 @@ test("a cursor below the retained ledger floor asks for reload without replaying
     if (prev === undefined) delete process.env.ACPG_LEDGER_MAX_FRAMES;
     else process.env.ACPG_LEDGER_MAX_FRAMES = prev;
     await close();
+  }
+});
+
+test("/history/search requires auth", async () => {
+  const { base, close } = await startHttpServer();
+  try {
+    const res = await fetch(base + "/history/search?q=needle");
+    assert.equal(res.status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test("/history/search rejects a query shorter than two characters", async () => {
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed("/history/search?q=a");
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test("/history/search rejects a cwd outside FS_ROOT", async () => {
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed("/history/search?q=needle&cwd=" + encodeURIComponent("/definitely/not/under/root"));
+    assert.equal(res.status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test("/history/search answers with the search envelope", async () => {
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed("/history/search?q=needle&all=1");
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(Array.isArray(body.results));
+    assert.equal(typeof body.truncated, "boolean");
+    assert.ok(Array.isArray(body.skipped));
+    assert.equal(typeof body.scanned.ms, "number");
+  } finally {
+    await close();
+  }
+});
+
+// The three tests below lock in the security properties the route is solely
+// responsible for (search-core.ts and searchTranscripts have no way to enforce
+// them — see the route's own comments in gateway.ts). Without these, a future
+// edit could add e.g. `fsRoot: q.get("fsRoot") ?? undefined` to the options
+// object passed to searchTranscripts and nothing would fail: SearchScope's
+// fields are all optional, so it would compile cleanly. Each assertion is
+// designed to FAIL if the query-string parameter were honoured, not just to
+// exercise the parameter and check for 200 — see the fixture comments for why.
+
+// What makes the three hermetic, and why none of it can live in this file:
+//   - agents: `npm test` sets ACPG_AGENTS_FILE=agents.test.json, which defines
+//     exactly `claude` and `codex`. cfg.agents is built at import, so a test
+//     cannot set this itself — and without it, ?agent=codex resolves to nothing
+//     on a host whose own agents.json lacks that key, which would make the two
+//     NOT-FOUND assertions below pass for the wrong reason.
+//   - stores: `npm test` also points CLAUDE_CONFIG_DIR and CODEX_HOME at
+//     throwaway dirs. CLAUDE_DIR is a module-scope const fixed at import, so the
+//     shell is the only reach; codexHome() re-reads its env per call, so a test
+//     may additionally swap CODEX_HOME for a fixture of its own.
+// The fixture cwds still live under the real homedir: FS_ROOT defaults there and
+// a candidate outside it is dropped before its file is ever opened, which is the
+// property half of these tests exist to prove.
+
+// Codex is the fast lever for fsRoot: CODEX_HOME re-read per call means this
+// test can point stage A at a rollout it wrote itself. ?agent=codex additionally
+// excludes the claude provider, so stage A never walks a claude store at all.
+test("/history/search ignores a ?fsRoot= override: a codex fixture outside the real FS_ROOT stays excluded", async () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-fsroot-"));
+  // A cwd outside the real FS_ROOT (which defaults to the real homedir) — same
+  // shape as history.test.ts's own "outside" fixtures.
+  const outCwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-outcwd-"));
+  const needle = "cdxfsrootneedle" + Date.now();
+  const rolloutDir = path.join(codexHome, "sessions", "2026", "07", "20");
+  fs.mkdirSync(rolloutDir, { recursive: true });
+  fs.writeFileSync(path.join(rolloutDir, "rollout-EVIL.jsonl"), [
+    { type: "session_meta", payload: { id: "CDX-EVIL", cwd: outCwd, timestamp: "2026-07-20T10:00:00.000Z" } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: needle }] } },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const prevCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  const { authed, close } = await startHttpServer();
+  try {
+    // ?fsRoot= names the fixture's OWN out-of-bounds cwd as the root. If the
+    // route ever threaded this into searchCandidates's fsRoot option, the
+    // fixture would sit exactly ON its root and pass the guard trivially —
+    // this is what makes "not found" a real proof, not a vacuous one.
+    const res = await authed(`/history/search?q=${needle}&all=1&agent=codex&fsRoot=${encodeURIComponent(outCwd)}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(
+      (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "CDX-EVIL"),
+      false,
+      "a query-string fsRoot must never widen the real FS_ROOT guard",
+    );
+  } finally {
+    await close();
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prevCodexHome;
+    fs.rmSync(codexHome, { recursive: true, force: true });
+    fs.rmSync(outCwd, { recursive: true, force: true });
+  }
+});
+
+// The claude store the gateway really reads, for the pair of tests below. It is
+// the throwaway CLAUDE_CONFIG_DIR `npm test` created: CLAUDE_DIR is fixed at
+// import, so this is the only reach — and refusing to run without it is what
+// stops these fixtures from being written into a developer's real ~/.claude.
+function fixtureClaudeProjectsRoot(): string {
+  const dir = process.env.CLAUDE_CONFIG_DIR;
+  assert.ok(dir, "CLAUDE_CONFIG_DIR must point at a throwaway claude store — run this suite via `npm test`");
+  assert.notEqual(path.resolve(dir), path.join(os.homedir(), ".claude"), "refusing to write fixtures into the real ~/.claude");
+  const root = path.join(dir, "projects");
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+// One claude transcript, in the claude JSONL shape stage C parses.
+function writeClaudeFixture(projectsRoot: string, project: string, sessionId: string, cwd: string, text: string) {
+  const dir = path.join(projectsRoot, project);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`),
+    JSON.stringify({ type: "user", cwd, sessionId, message: { role: "user", content: text } }) + "\n");
+}
+
+// The positive control for the claude arm — the sibling the ?projectsRoot= test
+// below had none of. Without it, "not found" there would pass just as happily
+// against a claude provider that never ran, or a fixture shape stage C cannot
+// parse. Asserting the SAME fixture shape IS found from the real projects root
+// is what makes the next test's silence mean something.
+test("/history/search finds a claude fixture sitting in the projects root it actually reads", async () => {
+  const fixtureCwd = fs.mkdtempSync(path.join(os.homedir(), ".acpg-search-test-"));
+  const needle = "clzfoundneedle" + Date.now();
+  writeClaudeFixture(fixtureClaudeProjectsRoot(), "-real-project", "SESSION-FOUND", fixtureCwd, needle);
+
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed(`/history/search?q=${needle}&all=1&agent=claude`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(
+      (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "SESSION-FOUND"),
+      true,
+      "the claude provider must be configured and reading CLAUDE_DIR/projects, or the ?projectsRoot= test below proves nothing",
+    );
+  } finally {
+    await close();
+    fs.rmSync(path.join(fixtureClaudeProjectsRoot(), "-real-project"), { recursive: true, force: true });
+    fs.rmSync(fixtureCwd, { recursive: true, force: true });
+  }
+});
+
+// The negative half of the pair: the SAME fixture shape the test above proves is
+// findable, this time reachable only through ?projectsRoot=. Its absence from
+// the results can therefore mean one thing only — the query string did not move
+// stage A off the projects root the gateway resolves for itself.
+test("/history/search ignores a ?projectsRoot= override: a claude fixture under a fake root is not found", async () => {
+  const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-projroot-"));
+  // Must resolve within the real FS_ROOT (defaults to the real homedir) so that,
+  // if projectsRoot WERE honoured, nothing else would still filter it out —
+  // otherwise "not found" would prove nothing.
+  const fixtureCwd = fs.mkdtempSync(path.join(os.homedir(), ".acpg-search-test-"));
+  const needle = "clzprojrootneedle" + Date.now();
+  writeClaudeFixture(fakeRoot, "-fake-project", "SESSION-EVIL", fixtureCwd, needle);
+
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed(`/history/search?q=${needle}&all=1&agent=claude&projectsRoot=${encodeURIComponent(fakeRoot)}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(
+      (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "SESSION-EVIL"),
+      false,
+      "a query-string projectsRoot must never redirect stage A away from the projects root the gateway resolved for itself",
+    );
+  } finally {
+    await close();
+    fs.rmSync(fakeRoot, { recursive: true, force: true });
+    fs.rmSync(fixtureCwd, { recursive: true, force: true });
+  }
+});
+
+// budgetMs=0 is fully deterministic: searchTranscripts's loop
+// (src/gateway.ts ~line 1346) breaks on `clock() - startedAt >= budgetMs`,
+// which is true on the very first check when budgetMs is 0 — no dependence on
+// machine speed or fixture count. That determinism is what makes this a real
+// positive control rather than a pin one layer removed from the route: a
+// codex fixture that legitimately matches (cwd inside the real FS_ROOT, unlike
+// the fsRoot test's fixture above) is asserted FOUND. If a future edit threads
+// `?budgetMs=` into the route's options literal, `budgetMs=0` would stop the
+// scan before reading anything and the needle would vanish — this test would
+// fail loudly. It also doubles as a well-formedness check on this fixture
+// shape: if the JSONL were malformed, this test would fail too (unlike a
+// "not found" assertion, which passes the same way whether the override was
+// honoured or the fixture was simply broken).
+// Limitation, disclosed rather than silently assumed away: a route written as
+// `Number(q.get("budgetMs")) || undefined` would not be caught, since 0 is
+// falsy and `||` would fall back to the 2000ms default — this test can only
+// catch a `??`-style or explicit-presence passthrough. Still strictly
+// stronger than pinning searchQueryParams alone (search-core.test.ts already
+// has that pin), which cannot fail against a route that reads
+// `q.get("budgetMs")` directly, bypassing searchQueryParams entirely.
+test("/history/search finds a codex fixture even with ?budgetMs=0 — the query string cannot override SEARCH_BUDGET_MS", async () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-budget-"));
+  // Inside the real FS_ROOT (unlike the fsRoot test's fixture) — this fixture
+  // must legitimately match so "found" is a real assertion, not luck.
+  const fixtureCwd = fs.mkdtempSync(path.join(os.homedir(), ".acpg-search-test-"));
+  const needle = "cdxbudgetneedle" + Date.now();
+  const rolloutDir = path.join(codexHome, "sessions", "2026", "07", "20");
+  fs.mkdirSync(rolloutDir, { recursive: true });
+  fs.writeFileSync(path.join(rolloutDir, "rollout-BUDGET.jsonl"), [
+    { type: "session_meta", payload: { id: "CDX-BUDGET", cwd: fixtureCwd, timestamp: "2026-07-20T10:00:00.000Z" } },
+    { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: needle }] } },
+  ].map((l) => JSON.stringify(l)).join("\n") + "\n");
+
+  const prevCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  const { authed, close } = await startHttpServer();
+  try {
+    const res = await authed(`/history/search?q=${needle}&all=1&agent=codex&budgetMs=0`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(
+      (body.results as Array<{ sessionId: string }>).some((r) => r.sessionId === "CDX-BUDGET"),
+      true,
+      "?budgetMs=0 must not cut the scan short — SEARCH_BUDGET_MS (2000ms) is a server constant, not a query parameter",
+    );
+  } finally {
+    await close();
+    if (prevCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prevCodexHome;
+    fs.rmSync(codexHome, { recursive: true, force: true });
+    fs.rmSync(fixtureCwd, { recursive: true, force: true });
   }
 });
