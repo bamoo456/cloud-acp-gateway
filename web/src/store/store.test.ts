@@ -670,6 +670,134 @@ describe("store notification routing", () => {
     expect((useStore.getState() as any).promptStateRevision).toBe(2);
   });
 
+  test("a successful current inbox snapshot authoritatively resolves missing prompts", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    ws.recv({
+      jsonrpc: "2.0", id: 90, method: "session/request_permission",
+      params: {
+        sessionId: "home-session", toolCall: { title: "Edit a file" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      },
+    });
+    await flush();
+    const revision = (useStore.getState() as any).promptStateRevision;
+
+    (useStore.getState() as any).ingestInboxItems([], revision);
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(0);
+    expect(state.inboxItems).toHaveLength(0);
+    expect(state.sessions["home-session"].items.find(
+      (item: any) => item.kind === "permission" && item.reqId === 90,
+    )).toMatchObject({ resolved: true, chosen: "Answered on another device" });
+    expect(state.promptStateRevision).toBe(revision + 1);
+  });
+
+  test("an inbox snapshot started before a new prompt cannot clear it", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    const oldRevision = (useStore.getState() as any).promptStateRevision;
+    ws.recv({
+      jsonrpc: "2.0", id: 91, method: "session/request_permission",
+      params: {
+        sessionId: "home-session", toolCall: { title: "Edit a file" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      },
+    });
+    await flush();
+
+    (useStore.getState() as any).ingestInboxItems([], oldRevision);
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(1);
+    expect(state.inboxItems).toHaveLength(1);
+    expect(state.sessions["home-session"].items.find(
+      (item: any) => item.kind === "permission" && item.reqId === 91,
+    )).toMatchObject({ resolved: false });
+  });
+
+  test("an inbox snapshot started before a tombstone cannot resurrect its prompt", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    const options = [{ optionId: "allow", kind: "allow_once", name: "Allow" }];
+    ws.recv({
+      jsonrpc: "2.0", id: 92, method: "session/request_permission",
+      params: { sessionId: "home-session", toolCall: { title: "Edit a file" }, options },
+    });
+    await flush();
+    const oldRevision = (useStore.getState() as any).promptStateRevision;
+    const staleInboxItem = {
+      id: 1, type: "permission", agentName: "claude", sessionId: "home-session",
+      reqId: "92", title: "Edit a file", options, status: "pending", createdAt: "now",
+    };
+
+    ws.recv({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: "home-session",
+        requestId: 92,
+        requestMethod: "session/request_permission",
+      },
+    });
+    await flush();
+    (useStore.getState() as any).ingestInboxItems([staleInboxItem], oldRevision);
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(0);
+    expect(state.inboxItems).toHaveLength(0);
+    expect(state.sessions["home-session"].items.find(
+      (item: any) => item.kind === "permission" && item.reqId === 92,
+    )).toMatchObject({ resolved: true, chosen: "Answered on another device" });
+  });
+
+  test("an authoritative inbox snapshot retains only exact prompt keys", async () => {
+    const { useStore } = await bootstrapClaude();
+    const option = { optionId: "allow", kind: "allow_once", name: "Allow" };
+    const home = useStore.getState().sessions["home-session"];
+    useStore.setState({
+      sessions: {
+        "home-session": {
+          ...home,
+          items: [
+            { id: "home-session:1", kind: "permission", reqId: 1, title: "Keep", options: [option], resolved: false },
+            { id: "home-session:2", kind: "elicitation", reqId: 1, message: "Resolve", fields: [], resolved: false },
+          ],
+        },
+      },
+      pendingPermissions: [
+        { reqId: 1, sessionId: "home-session", agentName: "claude", title: "Keep", options: [option], createdAt: 1 },
+        {
+          reqId: 1, sessionId: "home-session", agentName: "claude", title: "Resolve", options: [], createdAt: 1,
+          elicitation: { message: "Resolve", fields: [] },
+        },
+      ],
+    } as any);
+    const revision = (useStore.getState() as any).promptStateRevision;
+    const authoritative = [{
+      id: 1, type: "permission", agentName: "claude", sessionId: "home-session", reqId: "1",
+      title: "Keep", options: [option], status: "pending", createdAt: "now",
+    }];
+
+    (useStore.getState() as any).ingestInboxItems(authoritative, revision);
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(1);
+    expect(state.pendingPermissions[0]).not.toHaveProperty("elicitation");
+    expect(state.sessions["home-session"].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "permission", reqId: 1, resolved: false }),
+      expect.objectContaining({ kind: "elicitation", reqId: 1, resolved: true }),
+    ]));
+  });
+
+  test("an unchanged inbox snapshot preserves unaffected session references", async () => {
+    const { useStore } = await bootstrapClaude();
+    const session = useStore.getState().sessions["home-session"];
+    const revision = (useStore.getState() as any).promptStateRevision;
+
+    (useStore.getState() as any).ingestInboxItems([], revision);
+
+    expect(useStore.getState().sessions["home-session"]).toBe(session);
+  });
+
   test("ensureConnected is a no-op while the socket is open", async () => {
     const { useStore } = await bootstrapClaude();
     const before = FakeSse.instances.length;

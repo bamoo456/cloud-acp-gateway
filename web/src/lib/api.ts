@@ -207,12 +207,12 @@ export interface InboxItem {
   createdAt: string;
 }
 
-// Pending inbox prompts across every agent. Best-effort: an offline or older
-// gateway just yields an empty list.
-export async function getInboxPending(): Promise<InboxItem[]> {
+// Pending inbox prompts across every agent. Only a successful response is
+// authoritative; null keeps the current client state intact during failures.
+export async function getInboxPending(): Promise<InboxItem[] | null> {
   try {
     const r = await fetch(base() + "/inbox?status=pending");
-    if (!r.ok) return [];
+    if (!r.ok) return null;
     const j = await r.json();
     const items: Array<Record<string, unknown>> = Array.isArray(j?.items) ? j.items : [];
     return items.map((it) => ({
@@ -227,7 +227,7 @@ export async function getInboxPending(): Promise<InboxItem[]> {
       createdAt: String(it.createdAt ?? ""),
     }));
   } catch {
-    return [];
+    return null;
   }
 }
 
