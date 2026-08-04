@@ -2147,6 +2147,14 @@ function controlSnapshot(result: unknown): {
 // rest is applied on top of the settled list instead of against it.
 const controlRank = (configId: string): number => (configId === "model" ? 0 : configId === "mode" ? 1 : 2);
 
+type PromptRequestMethod = "session/request_permission" | "elicitation/create";
+type PendingPrompt = {
+  sid: string;
+  seq: number;
+  frame: Buffer;
+  method: PromptRequestMethod;
+};
+
 // One running agent + its ledger + the set of connections attached to it.
 // Routes agent↔client frames: notifications broadcast to all conns; responses
 // go point-to-point via id rewriting; agent→client requests (permission) go to
@@ -2195,7 +2203,7 @@ class Channel {
   // client that drops (or reloads) reconnects at cursor=end and never sees the
   // original frame again. Re-delivered after that session's session/load so the
   // prompt survives reconnects; dropped once answered or when the agent exits.
-  private pendingPerms = new Map<number | string, { sid: string; seq: number; frame: Buffer; method: string }>();
+  private pendingPerms = new Map<number | string, PendingPrompt>();
   // The `initialize` handshake is per-PROCESS, but one agent process is shared
   // across every client connection. codex-acp answers `initialize` exactly once
   // and returns -32603 "Already initialized" on any later one, so a reconnect /
@@ -2494,6 +2502,43 @@ class Channel {
     const ids = connIds ?? [...this.conns.keys()];
     for (const id of ids) this.sendTo(id, seq, buf);
   }
+
+  private resolvePendingPrompt(key: number | string, response: Buffer): boolean {
+    const pending = this.pendingPerms.get(key);
+    if (!pending || !this.permGate.claim(key)) return false;
+
+    const resolved = Buffer.from(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: pending.sid,
+        requestId: key,
+        requestMethod: pending.method,
+      },
+    }));
+
+    let resolutionSeq: number;
+    try {
+      resolutionSeq = this.ledger.append(resolved, pending.sid).seq;
+    } catch (error) {
+      this.permGate.forget(key);
+      throw error;
+    }
+
+    this.pendingPerms.delete(key);
+    const parsed = parse(response);
+    this.store?.resolveInboxItem(
+      this.name,
+      String(key),
+      "answered",
+      new Date().toISOString(),
+      JSON.stringify(parsed?.result ?? parsed?.error ?? null),
+    );
+    this.agent.send(response);
+    this.broadcast(resolutionSeq, resolved, this.subs.viewers(pending.sid));
+    return true;
+  }
+
   // Answer a client `initialize` from the cached handshake result, rewritten to
   // that client's own request id. Like every JSON-RPC response it is point-to-
   // point and must NOT be appended to the ledger (that would replay it to an
@@ -2645,7 +2690,8 @@ class Channel {
       // session/load branch above.
       if (sid && f.id !== undefined && f.id !== null &&
           (f.method === "session/request_permission" || f.method === "elicitation/create")) {
-        this.pendingPerms.set(f.id as string | number, { sid, seq, frame: line, method: f.method });
+        const promptMethod = f.method as PromptRequestMethod;
+        this.pendingPerms.set(f.id as string | number, { sid, seq, frame: line, method: promptMethod });
         // Mirror into the durable inbox so the prompt survives a reload and is
         // visible/answerable across agents via /inbox (pendingPerms stays the
         // in-run, low-latency re-delivery source; the inbox is the audit trail).
@@ -2733,11 +2779,10 @@ class Channel {
       return;
     }
     if (isResponse(f)) {
-      // reply to an agent→client request (permission). First reply wins, and the
-      // prompt is now answered → stop re-delivering it on future reconnects.
-      if (this.permGate.claim(f.id as string | number)) {
-        this.pendingPerms.delete(f.id as string | number);
-        this.store?.resolveInboxItem(this.name, String(f.id), "answered", new Date().toISOString(), JSON.stringify(f.result ?? f.error ?? null));
+      const key = f.id as string | number;
+      if (this.pendingPerms.has(key)) {
+        this.resolvePendingPrompt(key, line);
+      } else if (this.permGate.claim(key)) {
         this.agent.send(line);
       }
       return;
@@ -3002,12 +3047,12 @@ class Channel {
       key = k;
       break;
     }
-    if (key === undefined || !this.permGate.claim(key)) return false;
-    this.pendingPerms.delete(key);
+    if (key === undefined) return false;
     const result = { outcome: { outcome: "selected", optionId } };
-    this.store?.resolveInboxItem(this.name, reqId, "answered", new Date().toISOString(), JSON.stringify(result));
-    this.agent.send(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: key, result })));
-    return true;
+    return this.resolvePendingPrompt(
+      key,
+      Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: key, result })),
+    );
   }
 
   // Trim an interrupted Codex rollout's dangling tail, then forward the
@@ -4043,6 +4088,7 @@ export async function makeTestServer(): Promise<{
   sessionLoad: (name: string) => boolean | undefined;
   inbox: (opts?: { status?: InboxStatus; agentName?: string; limit?: number }) => InboxItem[];
   answerInbox: (agentName: string, reqId: string, optionId: string) => boolean;
+  failNextLedgerAppend: () => void;
   // Force an idle-session sweep at the given wall-clock (tests pass a future `now`
   // to make the TTL elapse without waiting).
   reap: (now?: number) => void;
@@ -4073,7 +4119,7 @@ export async function makeTestServer(): Promise<{
   );
   // Pre-create the channel so the fake agent is initialised before the first
   // client connects (the agent factory runs lazily on first channel() call).
-  b.channel("claude");
+  const testChannel = b.channel("claude");
   // Serve the SSE/POST transport through the same production code path so the e2e
   // tests exercise the real handler (auth uses the test "u"/"t" credentials).
   const srv = http.createServer((req, res) => {
@@ -4098,6 +4144,14 @@ export async function makeTestServer(): Promise<{
     sessionLoad: (name: string) => b.sessionLoad(name),
     inbox: (opts) => b.inbox(opts),
     answerInbox: (agentName, reqId, optionId) => b.answerInboxPermission(agentName, reqId, optionId),
+    failNextLedgerAppend: () => {
+      const ledger = testChannel.ledger;
+      const append = ledger.append.bind(ledger);
+      ledger.append = ((frame: Buffer, sid: string | null) => {
+        ledger.append = append;
+        throw new Error("injected ledger append failure");
+      }) as Ledger["append"];
+    },
     reap: (now?: number) => b.reapIdleSessions(now),
     close: () => new Promise<void>((r) => srv.close(() => r())),
   };

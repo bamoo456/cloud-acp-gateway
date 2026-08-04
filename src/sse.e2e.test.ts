@@ -3,6 +3,13 @@ import assert from "node:assert/strict";
 import { makeTestServer } from "./gateway.ts";
 import { sse, post, sseStatus, parseFrame as parse } from "./sse-testclient.ts";
 
+function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(message)), 1000)),
+  ]);
+}
+
 test("SSE rejects a connection without valid credentials", async () => {
   const { port, close } = await makeTestServer();
   assert.equal(await sseStatus(port, "agent=claude"), 401);
@@ -105,9 +112,42 @@ test("permission goes to viewers over SSE; first POST reply wins, the rest are d
     a.next((e) => !!e.data && parse(e.data).id === 99),
     b.next((e) => !!e.data && parse(e.data).id === 99),
   ]);
-  // both answer; only the first reaches the agent
+  const isResolved = (frame: Record<string, unknown>) =>
+    frame.method === "_gateway/prompt_resolved" &&
+    (frame.params as { sessionId?: string } | undefined)?.sessionId === "S";
+  const resolvedA = withTimeout(
+    a.next((e) => !!e.data && isResolved(parse(e.data))),
+    "first viewer did not receive the prompt resolution",
+  );
+  const resolvedB = withTimeout(
+    b.next((e) => !!e.data && isResolved(parse(e.data))),
+    "second viewer did not receive the prompt resolution",
+  );
+
+  // Both answer; only the first reaches the agent and both see one durable
+  // resolution notification carrying the original request-id type.
   await post(port, ca, { jsonrpc: "2.0", id: 99, result: { outcome: "allow" } });
+  const [gotResolvedA, gotResolvedB] = await Promise.all([resolvedA, resolvedB]);
+  assert.deepEqual(parse(gotResolvedA.data), {
+    jsonrpc: "2.0",
+    method: "_gateway/prompt_resolved",
+    params: {
+      sessionId: "S",
+      requestId: 99,
+      requestMethod: "session/request_permission",
+    },
+  });
+  assert.deepEqual(parse(gotResolvedB.data), parse(gotResolvedA.data));
+
   await post(port, cb, { jsonrpc: "2.0", id: 99, result: { outcome: "deny" } });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  for (const client of [a, b]) {
+    assert.equal(
+      client.frames.filter((e) => !!e.data && isResolved(parse(e.data))).length,
+      1,
+      "a losing answer must not append or broadcast a second tombstone",
+    );
+  }
   const answers = agent().sent.map(parse).filter((o) => o.id === 99 && "result" in o);
   assert.equal(answers.length, 1);
   assert.equal((answers[0].result as { outcome?: string }).outcome, "allow");
