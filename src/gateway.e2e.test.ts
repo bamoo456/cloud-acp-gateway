@@ -462,7 +462,13 @@ test("inbox: an answer broadcasts one durable resolution to every viewer", async
 
   // A second server-side answer is a no-op (first-reply-wins).
   assert.equal(answerInbox("claude", "99", "deny"), false);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  agent().emit(Buffer.from(JSON.stringify({
+    jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", marker: "after-duplicate-answer" },
+  })));
+  await Promise.all([
+    nextFrame(a, (frame) => (frame.params as { marker?: string } | undefined)?.marker === "after-duplicate-answer"),
+    nextFrame(b, (frame) => (frame.params as { marker?: string } | undefined)?.marker === "after-duplicate-answer"),
+  ]);
   for (const client of [a, b]) {
     assert.equal(client.frames.filter((event) =>
       !!event.data && parseFrame(event.data).method === "_gateway/prompt_resolved").length, 1);
@@ -471,6 +477,38 @@ test("inbox: an answer broadcasts one durable resolution to every viewer", async
   a.close();
   b.close();
   await close();
+});
+
+test("inbox: an HTTP append failure returns 500 and preserves a retryable prompt", async () => {
+  const { port, agent, inbox, failNextLedgerAppend, close } = await makeTestServer();
+  const a = sse(port);
+  try {
+    const ca = await a.conn;
+    await post(port, ca, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S" } });
+
+    const got = nextFrame(a, (o) => o.id === 99 && o.method === "session/request_permission");
+    agent().emit(Buffer.from(JSON.stringify({
+      jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S", options: [] },
+    })));
+    await got;
+    agent().sent.length = 0;
+
+    const answerUrl = `http://127.0.0.1:${port}/inbox/answer?agent=claude&reqId=99&optionId=allow`;
+    failNextLedgerAppend();
+    const failed = await fetch(answerUrl, { method: "POST" });
+    assert.equal(failed.status, 500);
+    assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 1);
+    assert.equal(fwdedReplies(agent().sent, 99), 0);
+
+    const retried = await fetch(answerUrl, { method: "POST" });
+    assert.equal(retried.status, 200);
+    assert.deepEqual(await retried.json(), { ok: true });
+    assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 0);
+    assert.equal(fwdedReplies(agent().sent, 99), 1);
+  } finally {
+    a.close();
+    await close();
+  }
 });
 
 test("inbox: a failed resolution append keeps the prompt pending and retryable", async () => {

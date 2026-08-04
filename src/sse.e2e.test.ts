@@ -140,7 +140,12 @@ test("permission goes to viewers over SSE; first POST reply wins, the rest are d
   assert.deepEqual(parse(gotResolvedB.data), parse(gotResolvedA.data));
 
   await post(port, cb, { jsonrpc: "2.0", id: 99, result: { outcome: "deny" } });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  const marker = { jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", marker: "after-losing-answer" } };
+  agent().emit(Buffer.from(JSON.stringify(marker)));
+  await Promise.all([
+    a.next((e) => !!e.data && (parse(e.data).params as { marker?: string })?.marker === "after-losing-answer"),
+    b.next((e) => !!e.data && (parse(e.data).params as { marker?: string })?.marker === "after-losing-answer"),
+  ]);
   for (const client of [a, b]) {
     assert.equal(
       client.frames.filter((e) => !!e.data && isResolved(parse(e.data))).length,
@@ -153,6 +158,39 @@ test("permission goes to viewers over SSE; first POST reply wins, the rest are d
   assert.equal((answers[0].result as { outcome?: string }).outcome, "allow");
   a.close(); b.close();
   await close();
+});
+
+test("a prompt resolution append failure returns 500 and remains retryable over RPC", async () => {
+  const { port, agent, inbox, failNextLedgerAppend, close } = await makeTestServer();
+  const client = sse(port);
+  try {
+    const conn = await client.conn;
+    await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S" } });
+
+    agent().emit(Buffer.from(JSON.stringify({
+      jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S", options: [] },
+    })));
+    await client.next((e) => !!e.data && parse(e.data).id === 99);
+    agent().sent.length = 0;
+
+    failNextLedgerAppend();
+    const url = `http://127.0.0.1:${port}/acp/rpc?user=u&token=t&agent=claude&conn=${encodeURIComponent(conn)}`;
+    const failed = await fetch(url, {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 99, result: { outcome: "allow" } }),
+      signal: AbortSignal.timeout(1000),
+    });
+    assert.equal(failed.status, 500);
+    assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 1);
+    assert.equal(agent().sent.filter((line) => parse(line).id === 99).length, 0);
+
+    assert.equal(await post(port, conn, { jsonrpc: "2.0", id: 99, result: { outcome: "allow" } }), 202);
+    assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 0);
+    assert.equal(agent().sent.filter((line) => parse(line).id === 99).length, 1);
+  } finally {
+    client.close();
+    await close();
+  }
 });
 
 test("POST to an unknown conn is rejected with 409", async () => {
