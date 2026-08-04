@@ -405,37 +405,102 @@ test("permission goes to viewers; first reply wins, rest dropped", async () => {
   await close();
 });
 
-test("inbox: a permission request is recorded pending, then answered via the server-side route", async () => {
+test("inbox: an answer broadcasts one durable resolution to every viewer", async () => {
   const { port, agent, inbox, answerInbox, close } = await makeTestServer();
   const a = sse(port);
+  const b = sse(port);
   const ca = await a.conn;
+  const cb = await b.conn;
   await post(port, ca, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S" } });
+  await post(port, cb, { jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId: "S" } });
   agent().sent.length = 0;
 
-  const got = nextFrame(a, (o) => o.id === 7 && o.method === "session/request_permission");
+  const gotA = nextFrame(a, (o) => o.id === 99 && o.method === "session/request_permission");
+  const gotB = nextFrame(b, (o) => o.id === 99 && o.method === "session/request_permission");
   agent().emit(Buffer.from(JSON.stringify({
-    jsonrpc: "2.0", id: 7, method: "session/request_permission",
+    jsonrpc: "2.0", id: 99, method: "session/request_permission",
     params: { sessionId: "S", toolCall: { title: "Edit file" }, options: [{ optionId: "allow", name: "Allow" }] },
   })));
-  await got;
+  await Promise.all([gotA, gotB]);
 
   const pending = inbox({ status: "pending" });
   assert.equal(pending.length, 1);
-  assert.equal(pending[0].reqId, "7");
+  assert.equal(pending[0].reqId, "99");
   assert.equal(pending[0].title, "Edit file");
   assert.equal(pending[0].sessionId, "S");
 
   // Answer from the server side (no client reply) — the gateway routes it to the
   // live agent, so any device can answer without holding that agent's connection.
-  assert.equal(answerInbox("claude", "7", "allow"), true);
-  const fwd = agent().sent.map((s) => JSON.parse(s) as Msg).filter((o) => o.id === 7 && o.result != null);
+  const resolvedA = withTimeout(
+    nextFrame(a, (o) => o.method === "_gateway/prompt_resolved"),
+    1000,
+    "first viewer did not receive the inbox resolution",
+  );
+  const resolvedB = withTimeout(
+    nextFrame(b, (o) => o.method === "_gateway/prompt_resolved"),
+    1000,
+    "second viewer did not receive the inbox resolution",
+  );
+  assert.equal(answerInbox("claude", "99", "allow"), true);
+  const [resolutionA, resolutionB] = await Promise.all([resolvedA, resolvedB]);
+  assert.deepEqual(resolutionA, {
+    jsonrpc: "2.0",
+    method: "_gateway/prompt_resolved",
+    params: {
+      sessionId: "S",
+      requestId: 99,
+      requestMethod: "session/request_permission",
+    },
+  });
+  assert.deepEqual(resolutionB, resolutionA);
+
+  const fwd = agent().sent.map((s) => JSON.parse(s) as Msg).filter((o) => o.id === 99 && o.result != null);
   assert.equal(fwd.length, 1, "the answer is forwarded once to the agent");
   assert.equal((fwd[0].result as { outcome: { optionId: string } }).outcome.optionId, "allow");
   assert.deepEqual(inbox({ status: "pending" }), []);
   assert.equal(inbox({ status: "answered" }).length, 1);
 
   // A second server-side answer is a no-op (first-reply-wins).
-  assert.equal(answerInbox("claude", "7", "deny"), false);
+  assert.equal(answerInbox("claude", "99", "deny"), false);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  for (const client of [a, b]) {
+    assert.equal(client.frames.filter((event) =>
+      !!event.data && parseFrame(event.data).method === "_gateway/prompt_resolved").length, 1);
+  }
+
+  a.close();
+  b.close();
+  await close();
+});
+
+test("inbox: a failed resolution append keeps the prompt pending and retryable", async () => {
+  const { port, agent, inbox, answerInbox, failNextLedgerAppend, close } = await makeTestServer();
+  const a = sse(port);
+  const ca = await a.conn;
+  await post(port, ca, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S" } });
+
+  const got = nextFrame(a, (o) => o.id === 99 && o.method === "session/request_permission");
+  agent().emit(Buffer.from(JSON.stringify({
+    jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S", options: [] },
+  })));
+  await got;
+  agent().sent.length = 0;
+  assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 1);
+
+  failNextLedgerAppend();
+  assert.throws(
+    () => answerInbox("claude", "99", "allow"),
+    /injected ledger append failure/,
+  );
+  assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 1);
+  assert.equal(
+    agent().sent.map((line) => JSON.parse(line) as Msg)
+      .filter((frame) => frame.id === 99 && "result" in frame).length,
+    0,
+  );
+
+  assert.equal(answerInbox("claude", "99", "allow"), true);
+  assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 0);
 
   a.close();
   await close();
@@ -909,7 +974,21 @@ test("an outstanding elicitation (agent question) is re-delivered on reload and 
 
   // And B's form answer reaches the agent through the same first-reply-wins gate.
   agent().sent.length = 0;
+  const resolved = withTimeout(
+    nextFrame(b, (o) => o.method === "_gateway/prompt_resolved"),
+    1000,
+    "the elicitation viewer did not receive the prompt resolution",
+  );
   await post(port, cb, { jsonrpc: "2.0", id: 42, result: { action: "accept", content: { question_0: "Option A" } } });
+  assert.deepEqual(await resolved, {
+    jsonrpc: "2.0",
+    method: "_gateway/prompt_resolved",
+    params: {
+      sessionId: "S",
+      requestId: 42,
+      requestMethod: "elicitation/create",
+    },
+  });
   assert.equal(fwdedReplies(agent().sent, 42), 1, "the elicitation answer reaches the agent");
   assert.equal(inbox({ status: "pending" }).length, 0, "the inbox entry resolves with the answer");
 
