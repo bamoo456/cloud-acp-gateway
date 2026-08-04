@@ -99,9 +99,14 @@ export class Ledger {
   // `sid` is the session the frame belongs to (null for responses / frames without
   // one), used for the per-session index. Enforces the retention caps afterwards.
   append(frame: Buffer, sid: string | null): LedgerEntry {
-    const entry = this.add(this.nextSeq, sid, frame);
+    const entry: LedgerEntry = { seq: this.nextSeq, sid, frame };
     fs.writeSync(this.fd, this.serialize(entry));
-    this.enforceLimits();
+    this.add(entry.seq, entry.sid, entry.frame);
+    try {
+      this.enforceLimits();
+    } catch (error) {
+      console.warn(`ledger retention maintenance failed: ${String(error)}`);
+    }
     return entry;
   }
 
