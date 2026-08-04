@@ -3572,11 +3572,43 @@ export function handleSseRpc(
   });
   req.on("end", () => {
     if (tooBig) { res.writeHead(413); res.end(); return; }
-    gateway.fromClient(agentName, conn, Buffer.concat(chunks));
+    try {
+      gateway.fromClient(agentName, conn, Buffer.concat(chunks));
+    } catch (error) {
+      console.error(`failed to route client frame: ${String(error)}`);
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(error) }));
+      return;
+    }
     res.writeHead(202);
     res.end();
   });
   req.on("error", () => { res.writeHead(400); res.end(); });
+  return true;
+}
+
+function handleInboxAnswerRequest(
+  gateway: Gateway,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): boolean {
+  const pathname = (req.url ?? "/").split("?")[0];
+  if (pathname !== "/inbox/answer") return false;
+  if (req.method !== "POST") { res.writeHead(405); res.end(); return true; }
+  const q = new URL(req.url ?? "/", "http://x").searchParams;
+  const agent = q.get("agent") ?? "";
+  const reqId = q.get("reqId") ?? "";
+  const optionId = q.get("optionId") ?? "";
+  if (!agent || !reqId || !optionId) { res.writeHead(400); res.end(); return true; }
+  try {
+    const ok = gateway.answerInboxPermission(agent, reqId, optionId);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok }));
+  } catch (error) {
+    console.error(`failed to answer inbox prompt: ${String(error)}`);
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: String(error) }));
+  }
   return true;
 }
 
@@ -3879,18 +3911,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // Answer a pending permission server-side: the gateway routes the chosen option
   // to the live agent, so any device can answer a prompt for any agent without
   // holding that agent's SSE connection.
-  if (consoleEnabled && pathname === "/inbox/answer") {
-    if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
-    const q = new URL(req.url ?? "/", "http://x").searchParams;
-    const agent = q.get("agent") ?? "";
-    const reqId = q.get("reqId") ?? "";
-    const optionId = q.get("optionId") ?? "";
-    if (!agent || !reqId || !optionId) { res.writeHead(400); res.end(); return; }
-    const ok = gateway.answerInboxPermission(agent, reqId, optionId);
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok }));
-    return;
-  }
+  if (consoleEnabled && handleInboxAnswerRequest(gateway, req, res)) return;
   // Rename a conversation (persist a custom title to the per-cwd sidecar).
   if (consoleEnabled && pathname === "/history/rename") {
     if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
@@ -4132,6 +4153,7 @@ export async function makeTestServer(): Promise<{
       authOk: (authorization, user, token) =>
         wsAuthOk({ authorization, user, token, expectedUser: "u", expectedPass: "t" }),
     })) return;
+    if (handleInboxAnswerRequest(b, req, res)) return;
     res.writeHead(404);
     res.end();
   });
