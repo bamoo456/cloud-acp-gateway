@@ -34,7 +34,7 @@ import { IdMux } from "./idmux.ts";
 import { Subscriptions } from "./subscriptions.ts";
 import { OnceGate } from "./oncegate.ts";
 import { SseSink, type ClientSink } from "./sink.ts";
-import { Ledger } from "./ledger.ts";
+import { Ledger, type LedgerEntry } from "./ledger.ts";
 import { basicAuthOk, wsAuthOk } from "./auth.ts";
 import { resolveTls } from "./tls.ts";
 import { accessUrls } from "./access.ts";
@@ -2503,6 +2503,25 @@ class Channel {
   addConn(conn: Conn): void {
     this.conns.set(conn.id, conn);
   }
+
+  replaySince(afterSeq: number): LedgerEntry[] {
+    return this.ledger.since(afterSeq).filter((entry) => {
+      const frame = parse(entry.frame);
+      if (!frame || !isRequest(frame)) return true;
+      if (
+        frame.method !== "session/request_permission" &&
+        frame.method !== "elicitation/create"
+      ) return true;
+
+      const key = frame.id as string | number;
+      const pending = this.pendingPerms.get(key);
+      return pending !== undefined &&
+        pending.seq === entry.seq &&
+        pending.sid === sessionIdOf(frame) &&
+        pending.method === frame.method;
+    });
+  }
+
   removeConn(id: string): void {
     this.conns.delete(id);
     this.idmux.forgetConn(id);
@@ -3218,7 +3237,7 @@ export class Gateway {
       ch.addConn(conn);
       return conn;
     }
-    for (const e of ch.ledger.since(afterSeq)) sink.send(e.seq, e.frame);
+    for (const e of ch.replaySince(afterSeq)) sink.send(e.seq, e.frame);
     ch.addConn(conn);
     return conn;
   }
