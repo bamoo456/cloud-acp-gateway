@@ -18,6 +18,14 @@ import { parseElicitationFields } from "../lib/elicitation.ts";
 type ConnState = "connecting" | "connected" | "offline";
 export type TextSize = "small" | "default" | "large" | "xl";
 
+type PromptRequestMethod = "session/request_permission" | "elicitation/create";
+
+type PromptResolution = {
+  sessionId: string;
+  requestId: number | string;
+  requestMethod: PromptRequestMethod;
+};
+
 export const TEXT_SIZE_OPTIONS: Array<{ id: TextSize; label: string; description: string }> = [
   { id: "small", label: "Small", description: "More messages on screen" },
   { id: "default", label: "Default", description: "Current Claude-style reading size" },
@@ -67,6 +75,7 @@ interface State {
   configOptions: ConfigOption[];
   promptCapabilities: PromptCapabilities; // what the active agent accepts in a prompt (image, …)
   pendingPermissions: PendingPermission[];
+  promptStateRevision: number;
   autoApprove: boolean;
   textSize: TextSize;
   busy: boolean;
@@ -200,11 +209,67 @@ export const useStore = create<State>((set, get) => {
   function markPromptResolved(s: Session, reqId: number | string, chosen: string): Session {
     let changed = false;
     const items = s.items.map((it) => {
-      if (!isPromptItem(it) || !sameReq(it.reqId, reqId)) return it;
+      if (!isPromptItem(it) || it.resolved || !sameReq(it.reqId, reqId)) return it;
       changed = true;
       return { ...it, resolved: true, chosen };
     });
     return changed ? { ...s, items } : s;
+  }
+
+  function promptMethodOf(pending: PendingPermission): PromptRequestMethod {
+    return pending.elicitation ? "elicitation/create" : "session/request_permission";
+  }
+
+  function hasPendingPrompt(items: PendingPermission[], candidate: PendingPermission): boolean {
+    return items.some((item) =>
+      item.agentName === candidate.agentName &&
+      item.sessionId === candidate.sessionId &&
+      sameReq(item.reqId, candidate.reqId) &&
+      promptMethodOf(item) === promptMethodOf(candidate));
+  }
+
+  function itemMatchesResolution(
+    item: ThreadItem,
+    resolution: PromptResolution,
+  ): item is Extract<ThreadItem, { kind: "permission" | "elicitation" }> {
+    const expectedKind = resolution.requestMethod === "elicitation/create"
+      ? "elicitation"
+      : "permission";
+    return item.kind === expectedKind && sameReq(item.reqId, resolution.requestId);
+  }
+
+  function applyRemotePromptResolution(sourceAgent: string, resolution: PromptResolution) {
+    set((state) => {
+      const pendingMatches = (pending: PendingPermission) =>
+        pending.agentName === sourceAgent &&
+        pending.sessionId === resolution.sessionId &&
+        sameReq(pending.reqId, resolution.requestId) &&
+        promptMethodOf(pending) === resolution.requestMethod;
+      const inboxMatches = (item: InboxItem) =>
+        item.agentName === sourceAgent &&
+        item.sessionId === resolution.sessionId &&
+        item.reqId === String(resolution.requestId) &&
+        item.type === (resolution.requestMethod === "elicitation/create" ? "elicitation" : "permission");
+
+      let changed = state.pendingPermissions.some(pendingMatches) || state.inboxItems.some(inboxMatches);
+      const sessions = { ...state.sessions };
+      const session = sessions[resolution.sessionId];
+      if (session && (!session.agentName || session.agentName === sourceAgent)) {
+        const items = session.items.map((item) => {
+          if (!itemMatchesResolution(item, resolution) || item.resolved) return item;
+          changed = true;
+          return { ...item, resolved: true, chosen: "Answered on another device" };
+        });
+        sessions[resolution.sessionId] = { ...session, items };
+      }
+      if (!changed) return state;
+      return {
+        sessions,
+        pendingPermissions: state.pendingPermissions.filter((item) => !pendingMatches(item)),
+        inboxItems: state.inboxItems.filter((item) => !inboxMatches(item)),
+        promptStateRevision: state.promptStateRevision + 1,
+      };
+    });
   }
 
   // Re-attach still-pending permission prompts to a freshly (re)built thread.
@@ -383,14 +448,26 @@ export const useStore = create<State>((set, get) => {
       models: [], modes: [], commands: [], configOptions: [],
       promptCapabilities: {}, pendingPermissions: [],
       busy: false, busySessionIds: {},
+      promptStateRevision: get().promptStateRevision + 1,
     });
     // An agent restart is an involuntary reconnect — lock first when the lock is on.
     reconnectOrLock(openConnection);
   }
 
-  function handleNotification(m: RpcMessage) {
+  function handleNotification(m: RpcMessage, sourceAgent: string) {
     if (m.method === "_gateway/reload") return onGatewayReload();
     if (m.method === "_gateway/agent_restart") return onAgentRestart();
+    if (m.method === "_gateway/prompt_resolved") {
+      const params = m.params as Partial<PromptResolution> | undefined;
+      if (
+        typeof params?.sessionId === "string" &&
+        (typeof params.requestId === "string" || typeof params.requestId === "number") &&
+        (params.requestMethod === "session/request_permission" || params.requestMethod === "elicitation/create")
+      ) {
+        applyRemotePromptResolution(sourceAgent, params as PromptResolution);
+      }
+      return;
+    }
     if (m.method !== "session/update") return;
     const p = m.params as { sessionId?: string; update?: any } | undefined;
     if (!p?.update) return;
@@ -439,13 +516,21 @@ export const useStore = create<State>((set, get) => {
     acp.respond(reqId, result);
     set((st) => {
       const sessions: Record<string, Session> = {};
+      let changed = false;
       for (const [sid, sess] of Object.entries(st.sessions)) {
-        sessions[sid] = sess.agentName && sess.agentName !== agent ? sess : markPromptResolved(sess, reqId, chosen);
+        const next = sess.agentName && sess.agentName !== agent ? sess : markPromptResolved(sess, reqId, chosen);
+        sessions[sid] = next;
+        changed ||= next !== sess;
       }
+      const pendingPermissions = st.pendingPermissions.filter((it) => !(it.agentName === agent && sameReq(it.reqId, reqId)));
+      const inboxItems = st.inboxItems.filter((it) => !(it.agentName === agent && it.reqId === String(reqId)));
+      changed ||= pendingPermissions.length !== st.pendingPermissions.length || inboxItems.length !== st.inboxItems.length;
+      if (!changed) return st;
       return {
-        pendingPermissions: st.pendingPermissions.filter((it) => !(it.agentName === agent && sameReq(it.reqId, reqId))),
-        inboxItems: st.inboxItems.filter((it) => !(it.agentName === agent && it.reqId === String(reqId))),
+        pendingPermissions,
+        inboxItems,
         sessions,
+        promptStateRevision: st.promptStateRevision + 1,
       };
     });
     if (pending?.sessionId) touchSessionActivity(pending.sessionId);
@@ -471,15 +556,20 @@ export const useStore = create<State>((set, get) => {
       // re-delivery — surfaces it, and let a client that has the session answer.
       if (p.sessionId && m.id != null) {
         const title = p.toolCall?.title || "Run a tool";
-        set((cur) => ({
-          pendingPermissions: [
+        const pending = { reqId: m.id!, sessionId: p.sessionId!, agentName: st.agentName, title, options: opts, createdAt: Date.now() };
+        set((cur) => {
+          const changed = !hasPendingPrompt(cur.pendingPermissions, pending);
+          return {
+            pendingPermissions: [
             // Dedupe a re-delivery of THIS agent's reqId only — another agent's
             // connection can reuse the same number for an unrelated prompt.
             ...cur.pendingPermissions.filter((it) => !(it.agentName === st.agentName && sameReq(it.reqId, m.id!))),
-            { reqId: m.id!, sessionId: p.sessionId!, agentName: st.agentName, title, options: opts, createdAt: Date.now() },
+            pending,
           ],
-          inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, p.sessionId!, m.id!, title, opts),
-        }));
+            inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, p.sessionId!, m.id!, title, opts),
+            promptStateRevision: cur.promptStateRevision + (changed ? 1 : 0),
+          };
+        });
       }
       return;
     }
@@ -504,15 +594,20 @@ export const useStore = create<State>((set, get) => {
       return { ...s, seq, hasContent: true, working: false, curAssistantId: null, curThoughtId: null, items: [...s.items, item] };
     });
     touchSessionActivity(sid);
-    set((cur) => ({
-      pendingPermissions: [
+    const pending = { reqId: m.id!, sessionId: sid, agentName: st.agentName, title, options: opts, createdAt: Date.now() };
+    set((cur) => {
+      const changed = !hasPendingPrompt(cur.pendingPermissions, pending);
+      return {
+        pendingPermissions: [
         // Dedupe a re-delivery of THIS agent's reqId only — another agent's
         // connection can reuse the same number for an unrelated prompt.
         ...cur.pendingPermissions.filter((it) => !(it.agentName === st.agentName && sameReq(it.reqId, m.id!))),
-        { reqId: m.id!, sessionId: sid, agentName: st.agentName, title, options: opts, createdAt: Date.now() },
+        pending,
       ],
-      inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, sid, m.id!, title, opts),
-    }));
+        inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, sid, m.id!, title, opts),
+        promptStateRevision: cur.promptStateRevision + (changed ? 1 : 0),
+      };
+    });
   }
 
   // The Claude agent's AskUserQuestion tool (and MCP form elicitations) arrive as
@@ -540,13 +635,18 @@ export const useStore = create<State>((set, get) => {
     });
     if (!st.sessions[sid]) {
       if (p.sessionId && m.id != null) {
-        set((cur) => ({
-          pendingPermissions: [
+        const pending = pendingEntry(p.sessionId!);
+        set((cur) => {
+          const changed = !hasPendingPrompt(cur.pendingPermissions, pending);
+          return {
+            pendingPermissions: [
             ...cur.pendingPermissions.filter((it) => !(it.agentName === st.agentName && sameReq(it.reqId, m.id!))),
-            pendingEntry(p.sessionId!),
+            pending,
           ],
-          inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, p.sessionId!, m.id!, message, [], "elicitation"),
-        }));
+            inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, p.sessionId!, m.id!, message, [], "elicitation"),
+            promptStateRevision: cur.promptStateRevision + (changed ? 1 : 0),
+          };
+        });
       }
       return;
     }
@@ -562,13 +662,18 @@ export const useStore = create<State>((set, get) => {
       return { ...s, seq, hasContent: true, working: false, curAssistantId: null, curThoughtId: null, items: [...s.items, item] };
     });
     touchSessionActivity(sid);
-    set((cur) => ({
-      pendingPermissions: [
+    const pending = pendingEntry(sid);
+    set((cur) => {
+      const changed = !hasPendingPrompt(cur.pendingPermissions, pending);
+      return {
+        pendingPermissions: [
         ...cur.pendingPermissions.filter((it) => !(it.agentName === st.agentName && sameReq(it.reqId, m.id!))),
-        pendingEntry(sid),
+        pending,
       ],
-      inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, sid, m.id!, message, [], "elicitation"),
-    }));
+        inboxItems: upsertInboxItem(cur.inboxItems, st.agentName, sid, m.id!, message, [], "elicitation"),
+        promptStateRevision: cur.promptStateRevision + (changed ? 1 : 0),
+      };
+    });
   }
 
   function initSession(): Promise<unknown> {
@@ -658,7 +763,7 @@ export const useStore = create<State>((set, get) => {
       get: () => agentCursors.get(agent) ?? -1,
       set: (n) => agentCursors.set(agent, n),
     }));
-    acp.onNotification(handleNotification);
+    acp.onNotification((message) => handleNotification(message, agent));
     acp.onRequest(handleRequest);
     acp.onStatus(handleStatus);
     acp.connect();
@@ -687,6 +792,7 @@ export const useStore = create<State>((set, get) => {
       conn: "connecting", agentReady: false, tip,
       sessions: {}, activeId: null, models: [], modes: [], commands: [], configOptions: [],
       promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, joining: true,
+      promptStateRevision: get().promptStateRevision + 1,
     });
     openConnection();
   }
@@ -795,6 +901,7 @@ export const useStore = create<State>((set, get) => {
     models: [], modes: [], commands: [], configOptions: [],
     promptCapabilities: {},
     pendingPermissions: [],
+    promptStateRevision: 0,
     autoApprove: false, textSize: initialTextSize, busy: false, busySessionIds: {},
     joining: !!linkParams().session, // deep-link present → show "Joining…" from first paint
     historyNonce: 0,
@@ -867,6 +974,7 @@ export const useStore = create<State>((set, get) => {
         // badge only surfaces prompts answerable on the now-active agent.
         models: [], modes: [], commands: [], configOptions: [],
         promptCapabilities: {}, busy: false, busySessionIds: {}, joining: false,
+        promptStateRevision: get().promptStateRevision + 1,
       });
       openConnection();
     },
@@ -940,13 +1048,21 @@ export const useStore = create<State>((set, get) => {
       const matchesPending = (it: PendingPermission) => it.agentName === agentName && sameReq(it.reqId, reqId);
       set((st) => {
         const sessions: Record<string, Session> = {};
+        let changed = false;
         for (const [sid, sess] of Object.entries(st.sessions)) {
-          sessions[sid] = sess.agentName && sess.agentName !== agentName ? sess : markPromptResolved(sess, reqId, chosen);
+          const next = sess.agentName && sess.agentName !== agentName ? sess : markPromptResolved(sess, reqId, chosen);
+          sessions[sid] = next;
+          changed ||= next !== sess;
         }
+        const inboxItems = st.inboxItems.filter((it) => !(it.agentName === agentName && it.reqId === reqId));
+        const pendingPermissions = st.pendingPermissions.filter((it) => !matchesPending(it));
+        changed ||= inboxItems.length !== st.inboxItems.length || pendingPermissions.length !== st.pendingPermissions.length;
+        if (!changed) return st;
         return {
-          inboxItems: st.inboxItems.filter((it) => !(it.agentName === agentName && it.reqId === reqId)),
-          pendingPermissions: st.pendingPermissions.filter((it) => !matchesPending(it)),
+          inboxItems,
+          pendingPermissions,
           sessions,
+          promptStateRevision: st.promptStateRevision + 1,
         };
       });
       if (item?.sessionId) touchSessionActivity(item.sessionId);
@@ -1290,7 +1406,10 @@ export const useStore = create<State>((set, get) => {
       if (busyId) pendingResyncId = busyId;
       clearReconnectTimer();
       acp?.close();
-      set({ locked: true, conn: "offline", agentReady: false, tip: "" });
+      set({
+        locked: true, conn: "offline", agentReady: false, tip: "",
+        promptStateRevision: get().promptStateRevision + 1,
+      });
     },
 
     // Unlock (the LockScreen has already verified the PIN) and reopen the
