@@ -117,6 +117,7 @@ interface State {
   answerInboxItem: (agentName: string, reqId: string, optionId: string) => void;
   jumpToTask: (task: RunningTask) => void;
   ingestRunningTasks: (tasks: RunningTask[]) => void;
+  ingestInboxItems: (items: InboxItem[], expectedRevision: number) => void;
   ensureConnected: () => void;
   lock: () => void;
   unlock: () => void;
@@ -1215,6 +1216,47 @@ export const useStore = create<State>((set, get) => {
     // Running section for RUNNING_GRACE_MS after its last activity.
     ingestRunningTasks(tasks) {
       set({ runningTasks: tasks, runningSeen: ingestSeen(get().runningSeen, tasks, Date.now()) });
+    },
+
+    ingestInboxItems(items, expectedRevision) {
+      set((state) => {
+        if (state.promptStateRevision !== expectedRevision) return state;
+
+        const key = (agentName: string, sessionId: string | null, reqId: string, type: string) =>
+          JSON.stringify([agentName, sessionId, reqId, type]);
+        const pendingKeys = new Set(
+          items
+            .filter((item) => item.reqId !== null)
+            .map((item) => key(item.agentName, item.sessionId, item.reqId!, item.type)),
+        );
+        const isAuthoritative = (pending: PendingPermission) => pendingKeys.has(key(
+          pending.agentName,
+          pending.sessionId,
+          String(pending.reqId),
+          pending.elicitation ? "elicitation" : "permission",
+        ));
+
+        let sessions = state.sessions;
+        for (const [sessionId, session] of Object.entries(state.sessions)) {
+          let sessionChanged = false;
+          const threadItems = session.items.map((item) => {
+            if ((item.kind !== "permission" && item.kind !== "elicitation") || item.resolved) return item;
+            if (pendingKeys.has(key(session.agentName, sessionId, String(item.reqId), item.kind))) return item;
+            sessionChanged = true;
+            return { ...item, resolved: true, chosen: "Answered on another device" };
+          });
+          if (!sessionChanged) continue;
+          if (sessions === state.sessions) sessions = { ...state.sessions };
+          sessions[sessionId] = { ...session, items: threadItems };
+        }
+
+        return {
+          inboxItems: items,
+          pendingPermissions: state.pendingPermissions.filter(isAuthoritative),
+          sessions,
+          promptStateRevision: state.promptStateRevision + 1,
+        };
+      });
     },
 
     async sendPrompt(text, images, files) {
