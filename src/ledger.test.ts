@@ -55,6 +55,15 @@ test("replayed bytes are exactly the appended bytes", () => {
   assert.equal(l.since(0)[0].frame.toString("utf8"), f.toString("utf8"));
 });
 
+test("a failed append does not publish a phantom replay entry or consume a sequence", async () => {
+  const l = new Ledger(tmpLedger());
+  await l.close();
+
+  assert.throws(() => l.append(FRAME("S", 1), "S"), /EBADF|bad file descriptor/i);
+  assert.equal(l.headSeq(), 0);
+  assert.deepEqual(l.since(0), []);
+});
+
 test("persists v2 and reloads with seqs + index intact; nextSeq continues", async () => {
   const p = tmpLedger();
   const a = new Ledger(p);
