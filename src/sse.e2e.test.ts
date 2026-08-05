@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { makeTestServer } from "./gateway.ts";
-import { sse, post, sseStatus, parseFrame as parse } from "./sse-testclient.ts";
+import { sse, post, sseStatus, parseFrame as parse, USER, TOKEN } from "./sse-testclient.ts";
 
 function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
   return Promise.race([
@@ -344,5 +345,77 @@ test("a closed SSE stream does not break broadcast to the survivors", async () =
   const gotB = await b.next((e) => !!e.data && parse(e.data).method === "session/update");
   assert.equal((parse(gotB.data).params as { hi?: number }).hi, 2);
   b.close();
+  await close();
+});
+
+test("ready is written before the replay, not after it", async () => {
+  const { port, agent, close } = await makeTestServer();
+  for (let n = 1; n <= 3; n++) {
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", n } })));
+  }
+
+  // The shared sse() helper strips the ready event out of `frames`, so ordering
+  // needs a raw client that records every block in wire order.
+  const order: string[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const req = http.get(
+      `http://127.0.0.1:${port}/acp/sse?user=${USER}&token=${TOKEN}&agent=claude`,
+      { headers: { accept: "text/event-stream", "last-event-id": "0" } },
+      (res) => {
+        let buf = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => {
+          buf += chunk;
+          let i: number;
+          while ((i = buf.indexOf("\n\n")) >= 0) {
+            const block = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            if (block.startsWith(":")) continue; // keepalive
+            order.push(block.includes("event: ready") ? "ready" : "frame");
+            // Three replayed frames requested; stop once everything expected arrived.
+            if (order.length === 4) { req.destroy(); resolve(); }
+          }
+        });
+      },
+    );
+    req.on("error", (e: NodeJS.ErrnoException) => {
+      // destroy() above surfaces as a socket error after we already resolved.
+      if (order.length < 4) reject(e);
+    });
+    setTimeout(() => reject(new Error(`timed out; saw ${JSON.stringify(order)}`)), 1000);
+  });
+  assert.deepEqual(order, ["ready", "frame", "frame", "frame"]);
+  await close();
+});
+
+test("?session= scopes the replay to that session plus channel-scoped frames", async () => {
+  const { port, agent, close } = await makeTestServer();
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S1", n: 1 } })));
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S2", n: 2 } })));
+  // No sessionId → appended with sid null, i.e. a channel-scoped frame (the same
+  // shape _gateway/agent_restart takes). The filter must keep it.
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "channel/notice", params: {} })));
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S1", n: 3 } })));
+
+  const c = sse(port, { lastEventId: "0", session: "S1" });
+  // The last S1 frame is the barrier: replay is ordered, so once it arrives the
+  // filter has already decided about everything before it.
+  await c.next((e) => !!e.data && (parse(e.data).params as { n?: number })?.n === 3);
+  const methods = c.frames.map((e) => parse(e.data)).map((f) => `${f.method}:${(f.params as { sessionId?: string; n?: number })?.sessionId ?? "-"}`);
+  assert.deepEqual(methods, ["session/update:S1", "channel/notice:-", "session/update:S1"]);
+  c.close();
+  await close();
+});
+
+test("no ?session= replays the whole channel exactly as before", async () => {
+  const { port, agent, close } = await makeTestServer();
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S1", n: 1 } })));
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S2", n: 2 } })));
+
+  const c = sse(port, { lastEventId: "0" });
+  await c.next((e) => !!e.data && (parse(e.data).params as { n?: number })?.n === 2);
+  const sids = c.frames.map((e) => (parse(e.data).params as { sessionId?: string }).sessionId);
+  assert.deepEqual(sids, ["S1", "S2"]);
+  c.close();
   await close();
 });
