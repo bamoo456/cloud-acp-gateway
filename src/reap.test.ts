@@ -250,6 +250,48 @@ test("a client frame for a reaped session transparently re-loads it, then forwar
   await shutdown(streams, close);
 });
 
+test("a revive's load replay is dropped outright — delivered to nobody and not appended", async () => {
+  const { port, agent, reap, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  const { conn, stream } = await openSession(port, agent, "S1", streams);
+
+  reap(FAR_FUTURE); // S1's CLI is reclaimed
+  agent().sent.length = 0;
+
+  // Touching the reaped session revives it. This load's gate points at
+  // REVIVE_SENTINEL — not a real conn — so the adapter's replay reaches no client
+  // at all. It used to be written to the ledger anyway: a full copy of the
+  // conversation persisted on behalf of nobody.
+  await post(port, conn, { jsonrpc: "2.0", id: 9, method: "session/prompt", params: { sessionId: "S1", prompt: [{ type: "text", text: "again" }] } });
+  const load = agent().sent.map(parse).find((o) => o.method === "session/load" && (o.params as { sessionId?: string }).sessionId === "S1");
+  assert.ok(load, "a transparent session/load was sent for the reaped session");
+
+  const revivedNo = (e: { data: string }) => (parse(e.data).params as { revived?: number })?.revived;
+  for (let n = 1; n <= 3; n++) {
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S1", revived: n } })));
+  }
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: load!.id, result: { sessionId: "S1" } })));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(
+    stream.frames.some((e) => !!e.data && revivedNo(e) !== undefined),
+    false,
+    "the touching client already has its history rendered — re-broadcasting would duplicate it",
+  );
+
+  // A frame the ledger DOES hold, giving the replay client below a deterministic
+  // stopping point.
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S1", marker: "after-revive" } })));
+  const replay = sse(port, { lastEventId: "0" });
+  streams.push(replay);
+  await replay.next((e) => !!e.data && (parse(e.data).params as { marker?: string })?.marker === "after-revive");
+  assert.equal(
+    replay.frames.some((e) => !!e.data && revivedNo(e) !== undefined),
+    false,
+    "nothing consumed the revive replay, so nothing should have persisted it either",
+  );
+  await shutdown(streams, close);
+});
+
 // --- session controls across a rebuilt session -------------------------------
 // The adapter holds mode/model/effort/agent in memory only, so a session that was
 // reaped (or LRU-evicted, or whose fingerprint changed) comes back from

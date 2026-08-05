@@ -2542,6 +2542,14 @@ class Channel {
     const c = this.conns.get(connId);
     if (c && c.sink.alive) c.sink.send(seq, buf);
   }
+  // sendTo for a frame that was deliberately not appended and so has no seq to
+  // carry — the client applies it without moving its resume cursor. See
+  // SseSink.sendUnsequenced for why a fabricated or borrowed seq corrupts that
+  // cursor instead. Deliberately has no broadcast counterpart.
+  private sendUnsequencedTo(connId: string, buf: Buffer): void {
+    const c = this.conns.get(connId);
+    if (c && c.sink.alive) c.sink.sendUnsequenced(buf);
+  }
   private broadcast(seq: number, buf: Buffer, connIds?: string[]): void {
     const ids = connIds ?? [...this.conns.keys()];
     for (const id of ids) this.sendTo(id, seq, buf);
@@ -2709,11 +2717,22 @@ class Channel {
       }
       return;
     }
-    // Requests and notifications are replayable broadcast frames: append with the
-    // frame's session so the ledger's per-session index is built, and reuse the
-    // assigned seq for every send of this frame below.
-    const { seq } = this.ledger.append(line, sessionIdOf(f));
+    // Requests and notifications are the replayable broadcast frames — but only the
+    // ones that actually earn a ledger position, so the append is decided per kind
+    // below instead of running ahead of the routing decision. It used to run first,
+    // which meant the transcript an agent streams back during session/load was
+    // persisted in full on EVERY load: measured on a production ledger, one
+    // conversation held 41,520 entries / 160.1 MB with its first frame (a 1.18 MB
+    // inline image) stored 105 times. That is what made cursor-based resume replays
+    // enormous. Where a frame IS appended, its session goes along so the ledger's
+    // per-session index is built, and the assigned seq is reused for every send of it.
     if (isRequest(f)) {
+      // Requests append unconditionally, load-gated session or not: pendingPerms
+      // records {sid, seq, frame} at this position and the post-load re-delivery
+      // above re-sends that exact frame with that exact seq, so a permission the
+      // user hasn't answered survives a reconnect or a reload. Dropping one would
+      // strand a turn blocked on the user with nothing left to answer.
+      const { seq } = this.ledger.append(line, sessionIdOf(f));
       // agent→client request (e.g. session/request_permission): route to viewers.
       // Reset the first-reply-wins gate for this request id so a *new* request
       // round starts fresh — within the round the first reply wins, but the same
@@ -2779,7 +2798,25 @@ class Channel {
       this.tasks.set(nsid, { state: this.hasPendingPromptFor(nsid) ? "awaiting-input" : "active", lastSeen: Date.now() });
     }
     if (nsid) this.touchSession(nsid); // any agent frame for a session keeps it alive
-    if (nsid && this.loadGate.has(nsid)) { this.sendTo(this.loadGate.get(nsid)!, seq, line); return; }
+    // A load-gated notification is the agent replaying history the loader asked for.
+    // It is duplication by definition — which is why it has never been broadcast —
+    // so it isn't appended either: persisting it stored one more full copy of the
+    // conversation per load, and nothing could ever usefully replay that copy (a
+    // client resuming past it already holds the original frames). Having no ledger
+    // position, it goes out id-less, leaving the loader's resume cursor on the last
+    // genuinely replayable frame — see SseSink.sendUnsequenced for why borrowing or
+    // inventing a seq here would corrupt that cursor instead.
+    //
+    // A revive's gate points at REVIVE_SENTINEL, which is not a real conn, so such a
+    // replay is now neither delivered nor appended — finishing what
+    // reviveThenForward's comment already intended (it was being written to the
+    // ledger and handed to nobody).
+    //
+    // Accepted edge: the gate can be cleared mid-replay (the loader disconnects, or
+    // the agent exits), and the tail of that replay then takes the append+broadcast
+    // path below — rare, benign, and exactly the semantics an ungated frame gets today.
+    if (nsid && this.loadGate.has(nsid)) { this.sendUnsequencedTo(this.loadGate.get(nsid)!, line); return; }
+    const { seq } = this.ledger.append(line, nsid);
     this.broadcast(seq, line);
   }
 
