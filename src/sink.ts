@@ -8,6 +8,11 @@
 // it as the event `id:` so a client can resume via `Last-Event-ID`.
 export interface ClientSink {
   send(seq: number, frame: Buffer): void;
+  // Deliver a frame that was deliberately never appended to the ledger, so no seq
+  // identifies it: the client applies it but leaves its resume cursor alone. Kept a
+  // separate operation rather than a nullable `seq` so an id-less frame cannot reach
+  // the broadcast fan-out, where a stalled cursor would hit every client at once.
+  sendUnsequenced(frame: Buffer): void;
   close(code?: number, reason?: string): void;
   // Whether the underlying transport is still open for writes. Routing skips a sink
   // that isn't.
@@ -38,6 +43,19 @@ export class SseSink implements ClientSink {
   }
   send(seq: number, frame: Buffer): void {
     this.writeRaw(`id:${seq}\ndata:${frame.toString("utf8")}\n\n`);
+  }
+  // A frame with no ledger position: written WITHOUT an `id:` line. Both ways of
+  // faking one are broken. A made-up seq is unsafe because seqs come into existence
+  // only by appending (Ledger.add advances nextSeq past what it stored), so the
+  // number would be handed out again by the next real append — and a client's
+  // "id <= last applied → drop" dedupe would then silently discard that genuine
+  // frame. Reusing the current head seq fails too: a client already sitting at head
+  // drops the whole delivery to the same dedupe. Omitting `id:` is what the clients
+  // are built for — iOS's SSEParser types the id optional and skips both the dedupe
+  // and the cursor advance when it is absent, web/src/lib/acp.ts only calls setSeq
+  // on a numeric id, and the /raw console only moves on a non-empty lastEventId.
+  sendUnsequenced(frame: Buffer): void {
+    this.writeRaw(`data:${frame.toString("utf8")}\n\n`);
   }
   // SSE comment line; keeps proxies/load-balancers from idling the stream out and
   // surfaces a dead peer on the next write.

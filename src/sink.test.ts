@@ -23,6 +23,16 @@ test("SseSink emits one SSE event per frame with id:=seq", () => {
   assert.deepEqual(res.chunks, ['id:7\ndata:{"jsonrpc":"2.0","method":"session/update"}\n\n']);
 });
 
+test("SseSink.sendUnsequenced emits the frame with no id: line at all", () => {
+  const res = fakeRes();
+  const sink = new SseSink(res);
+  sink.sendUnsequenced(Buffer.from('{"jsonrpc":"2.0","method":"session/update"}'));
+  // Exactly one data: block and no id: — a client must apply the frame without
+  // moving its resume cursor onto a seq that was never assigned.
+  assert.deepEqual(res.chunks, ['data:{"jsonrpc":"2.0","method":"session/update"}\n\n']);
+  assert.equal(res.chunks[0].includes("id:"), false);
+});
+
 test("SseSink keepalive writes an SSE comment", () => {
   const res = fakeRes();
   new SseSink(res).keepalive();
