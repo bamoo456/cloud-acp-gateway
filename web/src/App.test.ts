@@ -11,6 +11,7 @@ describe("App running-task polling", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
   let getRunning: ReturnType<typeof vi.fn>;
+  let getInboxPending: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -24,9 +25,10 @@ describe("App running-task polling", () => {
     document.body.appendChild(container);
     setVisibility("visible");
     getRunning = vi.fn().mockResolvedValue([]);
+    getInboxPending = vi.fn().mockResolvedValue([]);
     vi.doMock("./lib/api.ts", () => ({
       getRunning,
-      getInboxPending: vi.fn().mockResolvedValue([]),
+      getInboxPending,
       answerInbox: vi.fn().mockResolvedValue(true),
       getHistory: vi.fn().mockResolvedValue([]),
       getDiscoveredHistory: vi.fn().mockResolvedValue([]),
@@ -72,5 +74,26 @@ describe("App running-task polling", () => {
     setVisibility("visible");
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
     expect(getRunning).toHaveBeenCalledTimes(2); // immediate refresh on return to foreground
+  });
+
+  test("a failed inbox poll preserves prompt state that changed while it was in flight", async () => {
+    let resolveInbox!: (value: null) => void;
+    getInboxPending.mockReturnValueOnce(new Promise<null>((resolve) => { resolveInbox = resolve; }));
+    await render();
+    expect(getInboxPending).toHaveBeenCalledTimes(1);
+
+    const { useStore } = await import("./store/store.ts");
+    const item = {
+      id: 1, type: "permission", agentName: "claude", sessionId: "S", reqId: "99",
+      title: "Edit", options: [], status: "pending", createdAt: "now",
+    };
+    act(() => { useStore.setState({ inboxItems: [item] }); });
+
+    await act(async () => {
+      resolveInbox(null);
+      await Promise.resolve();
+    });
+
+    expect(useStore.getState().inboxItems).toEqual([item]);
   });
 });

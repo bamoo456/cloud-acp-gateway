@@ -34,7 +34,7 @@ import { IdMux } from "./idmux.ts";
 import { Subscriptions } from "./subscriptions.ts";
 import { OnceGate } from "./oncegate.ts";
 import { SseSink, type ClientSink } from "./sink.ts";
-import { Ledger } from "./ledger.ts";
+import { Ledger, type LedgerEntry } from "./ledger.ts";
 import { basicAuthOk, wsAuthOk } from "./auth.ts";
 import { resolveTls } from "./tls.ts";
 import { accessUrls } from "./access.ts";
@@ -2163,6 +2163,14 @@ function controlSnapshot(result: unknown): {
 // rest is applied on top of the settled list instead of against it.
 const controlRank = (configId: string): number => (configId === "model" ? 0 : configId === "mode" ? 1 : 2);
 
+type PromptRequestMethod = "session/request_permission" | "elicitation/create";
+type PendingPrompt = {
+  sid: string;
+  seq: number;
+  frame: Buffer;
+  method: PromptRequestMethod;
+};
+
 // One running agent + its ledger + the set of connections attached to it.
 // Routes agent↔client frames: notifications broadcast to all conns; responses
 // go point-to-point via id rewriting; agent→client requests (permission) go to
@@ -2211,7 +2219,7 @@ class Channel {
   // client that drops (or reloads) reconnects at cursor=end and never sees the
   // original frame again. Re-delivered after that session's session/load so the
   // prompt survives reconnects; dropped once answered or when the agent exits.
-  private pendingPerms = new Map<number | string, { sid: string; seq: number; frame: Buffer; method: string }>();
+  private pendingPerms = new Map<number | string, PendingPrompt>();
   // The `initialize` handshake is per-PROCESS, but one agent process is shared
   // across every client connection. codex-acp answers `initialize` exactly once
   // and returns -32603 "Already initialized" on any later one, so a reconnect /
@@ -2495,6 +2503,25 @@ class Channel {
   addConn(conn: Conn): void {
     this.conns.set(conn.id, conn);
   }
+
+  replaySince(afterSeq: number): LedgerEntry[] {
+    return this.ledger.since(afterSeq).filter((entry) => {
+      const frame = parse(entry.frame);
+      if (!frame || !isRequest(frame)) return true;
+      if (
+        frame.method !== "session/request_permission" &&
+        frame.method !== "elicitation/create"
+      ) return true;
+
+      const key = frame.id as string | number;
+      const pending = this.pendingPerms.get(key);
+      return pending !== undefined &&
+        pending.seq === entry.seq &&
+        pending.sid === sessionIdOf(frame) &&
+        pending.method === frame.method;
+    });
+  }
+
   removeConn(id: string): void {
     this.conns.delete(id);
     this.idmux.forgetConn(id);
@@ -2510,6 +2537,43 @@ class Channel {
     const ids = connIds ?? [...this.conns.keys()];
     for (const id of ids) this.sendTo(id, seq, buf);
   }
+
+  private resolvePendingPrompt(key: number | string, response: Buffer): boolean {
+    const pending = this.pendingPerms.get(key);
+    if (!pending || !this.permGate.claim(key)) return false;
+
+    const resolved = Buffer.from(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: pending.sid,
+        requestId: key,
+        requestMethod: pending.method,
+      },
+    }));
+
+    let resolutionSeq: number;
+    try {
+      resolutionSeq = this.ledger.append(resolved, pending.sid).seq;
+    } catch (error) {
+      this.permGate.forget(key);
+      throw error;
+    }
+
+    this.pendingPerms.delete(key);
+    const parsed = parse(response);
+    this.store?.resolveInboxItem(
+      this.name,
+      String(key),
+      "answered",
+      new Date().toISOString(),
+      JSON.stringify(parsed?.result ?? parsed?.error ?? null),
+    );
+    this.agent.send(response);
+    this.broadcast(resolutionSeq, resolved, this.subs.viewers(pending.sid));
+    return true;
+  }
+
   // Answer a client `initialize` from the cached handshake result, rewritten to
   // that client's own request id. Like every JSON-RPC response it is point-to-
   // point and must NOT be appended to the ledger (that would replay it to an
@@ -2661,7 +2725,8 @@ class Channel {
       // session/load branch above.
       if (sid && f.id !== undefined && f.id !== null &&
           (f.method === "session/request_permission" || f.method === "elicitation/create")) {
-        this.pendingPerms.set(f.id as string | number, { sid, seq, frame: line, method: f.method });
+        const promptMethod = f.method as PromptRequestMethod;
+        this.pendingPerms.set(f.id as string | number, { sid, seq, frame: line, method: promptMethod });
         // Mirror into the durable inbox so the prompt survives a reload and is
         // visible/answerable across agents via /inbox (pendingPerms stays the
         // in-run, low-latency re-delivery source; the inbox is the audit trail).
@@ -2749,11 +2814,10 @@ class Channel {
       return;
     }
     if (isResponse(f)) {
-      // reply to an agent→client request (permission). First reply wins, and the
-      // prompt is now answered → stop re-delivering it on future reconnects.
-      if (this.permGate.claim(f.id as string | number)) {
-        this.pendingPerms.delete(f.id as string | number);
-        this.store?.resolveInboxItem(this.name, String(f.id), "answered", new Date().toISOString(), JSON.stringify(f.result ?? f.error ?? null));
+      const key = f.id as string | number;
+      if (this.pendingPerms.has(key)) {
+        this.resolvePendingPrompt(key, line);
+      } else if (this.permGate.claim(key)) {
         this.agent.send(line);
       }
       return;
@@ -3018,12 +3082,12 @@ class Channel {
       key = k;
       break;
     }
-    if (key === undefined || !this.permGate.claim(key)) return false;
-    this.pendingPerms.delete(key);
+    if (key === undefined) return false;
     const result = { outcome: { outcome: "selected", optionId } };
-    this.store?.resolveInboxItem(this.name, reqId, "answered", new Date().toISOString(), JSON.stringify(result));
-    this.agent.send(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: key, result })));
-    return true;
+    return this.resolvePendingPrompt(
+      key,
+      Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: key, result })),
+    );
   }
 
   // Trim an interrupted Codex rollout's dangling tail, then forward the
@@ -3173,7 +3237,7 @@ export class Gateway {
       ch.addConn(conn);
       return conn;
     }
-    for (const e of ch.ledger.since(afterSeq)) sink.send(e.seq, e.frame);
+    for (const e of ch.replaySince(afterSeq)) sink.send(e.seq, e.frame);
     ch.addConn(conn);
     return conn;
   }
@@ -3543,11 +3607,43 @@ export function handleSseRpc(
   });
   req.on("end", () => {
     if (tooBig) { res.writeHead(413); res.end(); return; }
-    gateway.fromClient(agentName, conn, Buffer.concat(chunks));
+    try {
+      gateway.fromClient(agentName, conn, Buffer.concat(chunks));
+    } catch (error) {
+      console.error(`failed to route client frame: ${String(error)}`);
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: String(error) }));
+      return;
+    }
     res.writeHead(202);
     res.end();
   });
   req.on("error", () => { res.writeHead(400); res.end(); });
+  return true;
+}
+
+function handleInboxAnswerRequest(
+  gateway: Gateway,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): boolean {
+  const pathname = (req.url ?? "/").split("?")[0];
+  if (pathname !== "/inbox/answer") return false;
+  if (req.method !== "POST") { res.writeHead(405); res.end(); return true; }
+  const q = new URL(req.url ?? "/", "http://x").searchParams;
+  const agent = q.get("agent") ?? "";
+  const reqId = q.get("reqId") ?? "";
+  const optionId = q.get("optionId") ?? "";
+  if (!agent || !reqId || !optionId) { res.writeHead(400); res.end(); return true; }
+  try {
+    const ok = gateway.answerInboxPermission(agent, reqId, optionId);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok }));
+  } catch (error) {
+    console.error(`failed to answer inbox prompt: ${String(error)}`);
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: String(error) }));
+  }
   return true;
 }
 
@@ -3850,18 +3946,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // Answer a pending permission server-side: the gateway routes the chosen option
   // to the live agent, so any device can answer a prompt for any agent without
   // holding that agent's SSE connection.
-  if (consoleEnabled && pathname === "/inbox/answer") {
-    if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
-    const q = new URL(req.url ?? "/", "http://x").searchParams;
-    const agent = q.get("agent") ?? "";
-    const reqId = q.get("reqId") ?? "";
-    const optionId = q.get("optionId") ?? "";
-    if (!agent || !reqId || !optionId) { res.writeHead(400); res.end(); return; }
-    const ok = gateway.answerInboxPermission(agent, reqId, optionId);
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok }));
-    return;
-  }
+  if (consoleEnabled && handleInboxAnswerRequest(gateway, req, res)) return;
   // Rename a conversation (persist a custom title to the per-cwd sidecar).
   if (consoleEnabled && pathname === "/history/rename") {
     if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
@@ -4059,6 +4144,7 @@ export async function makeTestServer(): Promise<{
   sessionLoad: (name: string) => boolean | undefined;
   inbox: (opts?: { status?: InboxStatus; agentName?: string; limit?: number }) => InboxItem[];
   answerInbox: (agentName: string, reqId: string, optionId: string) => boolean;
+  failNextLedgerAppend: () => void;
   // Force an idle-session sweep at the given wall-clock (tests pass a future `now`
   // to make the TTL elapse without waiting).
   reap: (now?: number) => void;
@@ -4089,7 +4175,7 @@ export async function makeTestServer(): Promise<{
   );
   // Pre-create the channel so the fake agent is initialised before the first
   // client connects (the agent factory runs lazily on first channel() call).
-  b.channel("claude");
+  const testChannel = b.channel("claude");
   // Serve the SSE/POST transport through the same production code path so the e2e
   // tests exercise the real handler (auth uses the test "u"/"t" credentials).
   const srv = http.createServer((req, res) => {
@@ -4102,6 +4188,7 @@ export async function makeTestServer(): Promise<{
       authOk: (authorization, user, token) =>
         wsAuthOk({ authorization, user, token, expectedUser: "u", expectedPass: "t" }),
     })) return;
+    if (handleInboxAnswerRequest(b, req, res)) return;
     res.writeHead(404);
     res.end();
   });
@@ -4114,6 +4201,14 @@ export async function makeTestServer(): Promise<{
     sessionLoad: (name: string) => b.sessionLoad(name),
     inbox: (opts) => b.inbox(opts),
     answerInbox: (agentName, reqId, optionId) => b.answerInboxPermission(agentName, reqId, optionId),
+    failNextLedgerAppend: () => {
+      const ledger = testChannel.ledger;
+      const append = ledger.append.bind(ledger);
+      ledger.append = ((frame: Buffer, sid: string | null) => {
+        ledger.append = append;
+        throw new Error("injected ledger append failure");
+      }) as Ledger["append"];
+    },
     reap: (now?: number) => b.reapIdleSessions(now),
     close: () => new Promise<void>((r) => srv.close(() => r())),
   };

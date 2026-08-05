@@ -1,5 +1,7 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
-import { getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, putLockConfig, searchSessions } from "./api.ts";
+import {
+  getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, getInboxPending, putLockConfig, searchSessions,
+} from "./api.ts";
 
 function mockFetch(json: unknown) {
   globalThis.fetch = vi.fn().mockResolvedValue({ json: () => Promise.resolve(json) } as Response);
@@ -95,6 +97,19 @@ describe("api", () => {
   test("getRunning yields no tasks when the gateway is unreachable", async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline"));
     expect(await getRunning()).toEqual([]);
+  });
+
+  test("getInboxPending returns an authoritative empty list on a successful empty response", async () => {
+    mockResponse({ ok: true, json: () => Promise.resolve({ items: [] }) });
+    expect(await getInboxPending()).toEqual([]);
+  });
+
+  test("getInboxPending returns null when pending state is unknown", async () => {
+    mockResponse({ ok: false, status: 503 });
+    expect(await getInboxPending()).toBeNull();
+
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline"));
+    expect(await getInboxPending()).toBeNull();
   });
 
   test("listDir returns the fs payload", async () => {

@@ -55,6 +55,99 @@ test("replayed bytes are exactly the appended bytes", () => {
   assert.equal(l.since(0)[0].frame.toString("utf8"), f.toString("utf8"));
 });
 
+test("a failed append does not publish a phantom replay entry or consume a sequence", async () => {
+  const l = new Ledger(tmpLedger());
+  await l.close();
+
+  assert.throws(() => l.append(FRAME("S", 1), "S"), /EBADF|bad file descriptor/i);
+  assert.equal(l.headSeq(), 0);
+  assert.deepEqual(l.since(0), []);
+});
+
+test("retries short writes before publishing a replay entry", async (t) => {
+  const p = tmpLedger();
+  const l = new Ledger(p);
+  const writeSync = fs.writeSync;
+  let calls = 0;
+  t.mock.method(fs, "writeSync", ((
+    fd: number,
+    data: string | NodeJS.ArrayBufferView,
+    offset?: number | null,
+    length?: number | null,
+    position?: number | null,
+  ) => {
+    const buffer = typeof data === "string" ? Buffer.from(data) : data;
+    const start = typeof data === "string" ? 0 : offset ?? 0;
+    const requested = typeof data === "string" ? buffer.byteLength : length ?? buffer.byteLength - start;
+    const written = calls++ === 0 ? Math.max(1, Math.floor(requested / 2)) : requested;
+    return writeSync(fd, buffer, start, written, position);
+  }) as typeof fs.writeSync);
+
+  assert.equal(l.append(FRAME("S", 1), "S").seq, 1);
+  assert.ok(calls >= 2, `expected a retry after a short write, got ${calls} write call(s)`);
+  t.mock.restoreAll();
+  await l.close();
+
+  const reloaded = new Ledger(p);
+  assert.equal(reloaded.since(0)[0].frame.toString("utf8"), FRAME("S", 1).toString("utf8"));
+});
+
+test("rolls back a partial append before propagating its write error", async (t) => {
+  const p = tmpLedger();
+  const l = new Ledger(p);
+  l.append(FRAME("S", 1), "S");
+  const sizeBefore = fs.statSync(p).size;
+  const writeSync = fs.writeSync;
+  let calls = 0;
+  t.mock.method(fs, "writeSync", ((
+    fd: number,
+    data: string | NodeJS.ArrayBufferView,
+    offset?: number | null,
+    length?: number | null,
+    position?: number | null,
+  ) => {
+    if (calls++ > 0) throw Object.assign(new Error("injected partial write failure"), { code: "EIO" });
+    const buffer = typeof data === "string" ? Buffer.from(data) : data;
+    const start = typeof data === "string" ? 0 : offset ?? 0;
+    const requested = typeof data === "string" ? buffer.byteLength : length ?? buffer.byteLength - start;
+    return writeSync(fd, buffer, start, Math.max(1, Math.floor(requested / 2)), position);
+  }) as typeof fs.writeSync);
+
+  assert.throws(() => l.append(FRAME("S", 2), "S"), /injected partial write failure/);
+  assert.equal(fs.statSync(p).size, sizeBefore);
+  assert.equal(l.headSeq(), 1);
+  assert.deepEqual(l.since(0).map((entry) => entry.seq), [1]);
+
+  t.mock.restoreAll();
+  assert.equal(l.append(FRAME("S", 2), "S").seq, 2);
+  await l.close();
+  const reloaded = new Ledger(p);
+  assert.deepEqual(reloaded.since(0).map((entry) => entry.seq), [1, 2]);
+});
+
+test("does not report a durable append as failed when retention maintenance fails", async (t) => {
+  const p = tmpLedger();
+  const l = new Ledger(p, { maxFrames: 1 });
+  l.append(FRAME("S", 1), "S");
+  const warnings: unknown[][] = [];
+  t.mock.method(fs, "writeFileSync", (() => {
+    throw new Error("injected retention failure");
+  }) as typeof fs.writeFileSync);
+  t.mock.method(console, "warn", (...args: unknown[]) => { warnings.push(args); });
+
+  let appendedSeq: number | undefined;
+  assert.doesNotThrow(() => { appendedSeq = l.append(FRAME("S", 2), "S").seq; });
+  assert.equal(appendedSeq, 2);
+  assert.deepEqual(l.since(0).map((entry) => entry.seq), [2]);
+  assert.equal(warnings.length, 1);
+
+  t.mock.restoreAll();
+  await l.close();
+  const reloaded = new Ledger(p, { maxFrames: 1 });
+  assert.deepEqual(reloaded.since(0).map((entry) => entry.seq), [2]);
+  assert.equal(reloaded.append(FRAME("S", 3), "S").seq, 3);
+});
+
 test("persists v2 and reloads with seqs + index intact; nextSeq continues", async () => {
   const p = tmpLedger();
   const a = new Ledger(p);
