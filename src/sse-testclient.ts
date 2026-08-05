@@ -11,7 +11,7 @@ export type Evt = { id: number | null; event: string; data: string };
 // A minimal SSE client over a raw HTTP GET: parses id:/event:/data: blocks, skips
 // keepalive comments, resolves `conn` from the `ready` event, and lets a test await
 // the next data frame matching a predicate.
-export function sse(port: number, opts: { agent?: string; lastEventId?: string } = {}) {
+export function sse(port: number, opts: { agent?: string; lastEventId?: string; session?: string } = {}) {
   let buf = "";
   const frames: Evt[] = [];
   const waiters: Array<{ pred: (e: Evt) => boolean; resolve: (e: Evt) => void }> = [];
@@ -22,7 +22,8 @@ export function sse(port: number, opts: { agent?: string; lastEventId?: string }
   if (opts.lastEventId !== undefined) headers["last-event-id"] = opts.lastEventId;
 
   const req = http.get(
-    `http://127.0.0.1:${port}/acp/sse?user=${USER}&token=${TOKEN}&agent=${opts.agent ?? "claude"}`,
+    `http://127.0.0.1:${port}/acp/sse?user=${USER}&token=${TOKEN}&agent=${opts.agent ?? "claude"}` +
+      (opts.session !== undefined ? `&session=${encodeURIComponent(opts.session)}` : ""),
     { headers },
     (res) => {
       res.setEncoding("utf8");
