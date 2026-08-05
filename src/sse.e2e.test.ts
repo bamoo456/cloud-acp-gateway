@@ -328,6 +328,106 @@ test("replay keeps only the latest pending occurrence when a request id is reuse
   }
 });
 
+// --- session/load replay is delivered, not persisted --------------------------
+// The transcript an agent streams back during session/load is history the loader
+// already asked for, so it is routed to that one connection and nowhere else. It
+// used to be appended to the ledger first, which wrote a whole extra copy of the
+// conversation on every single load — the bloat that made cursor-based resume
+// replays enormous. Now it is neither appended nor id-tagged.
+
+const replayNo = (e: { data: string }) => (parse(e.data).params as { replay?: number })?.replay;
+
+test("a session/load replay reaches only the loader, id-less, and never enters the ledger", async () => {
+  const { port, agent, close } = await makeTestServer();
+  const clients: Array<ReturnType<typeof sse>> = [];
+  const loader = sse(port);
+  const bystander = sse(port); // attached but not loading
+  clients.push(loader, bystander);
+  try {
+    const conn = await loader.conn;
+    await bystander.conn;
+    assert.equal(await post(port, conn, { jsonrpc: "2.0", id: 5, method: "session/load", params: { sessionId: "S" } }), 202);
+    const load = agent().sent.map(parse).find((o) => o.method === "session/load");
+    assert.ok(load, "the load was forwarded to the agent under a gateway id");
+
+    // The agent replays the conversation while the gate is up.
+    for (let n = 1; n <= 3; n++) {
+      agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", replay: n } })));
+    }
+    await loader.next((e) => !!e.data && replayNo(e) === 3);
+    assert.deepEqual(
+      loader.frames.filter((e) => !!e.data && replayNo(e) !== undefined).map((e) => e.id),
+      [null, null, null],
+      "a gated replay frame has no ledger position, so it must go out with no id:",
+    );
+    assert.equal(
+      bystander.frames.some((e) => !!e.data && replayNo(e) !== undefined),
+      false,
+      "another device must not receive history it already shows",
+    );
+
+    // Load response → the gate clears and appends resume.
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: load!.id, result: {} })));
+    await loader.next((e) => !!e.data && parse(e.data).id === 5);
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", marker: "live" } })));
+    const live = await loader.next((e) => !!e.data && (parse(e.data).params as { marker?: string })?.marker === "live");
+    assert.ok(typeof live.id === "number" && live.id > 0, "a genuine post-load notification still carries its seq");
+
+    // A full replay proves what the ledger actually holds. The live frame is the
+    // barrier: replay is ordered, so once it arrives everything before it was
+    // already decided.
+    const fresh = sse(port, { lastEventId: "0" });
+    clients.push(fresh);
+    await fresh.next((e) => e.id === live.id);
+    assert.equal(
+      fresh.frames.some((e) => !!e.data && replayNo(e) !== undefined),
+      false,
+      "the replay was never appended, so no cursor can ever replay it",
+    );
+  } finally {
+    for (const c of clients) c.close();
+    await close();
+  }
+});
+
+test("a permission request arriving mid-load is still appended, replayable and answerable", async () => {
+  const { port, agent, close } = await makeTestServer();
+  const clients: Array<ReturnType<typeof sse>> = [];
+  const loader = sse(port);
+  clients.push(loader);
+  try {
+    const conn = await loader.conn;
+    await post(port, conn, { jsonrpc: "2.0", id: 5, method: "session/load", params: { sessionId: "S" } });
+    const load = agent().sent.map(parse).find((o) => o.method === "session/load");
+    assert.ok(load);
+
+    // Interleaved with the gated replay, so this pins that the gate keys off the
+    // frame's KIND, not just its session.
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", replay: 1 } })));
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S" } })));
+    const request = await loader.next((e) => !!e.data && parse(e.data).method === "session/request_permission");
+    assert.ok(typeof request.id === "number" && request.id > 0, "a request keeps its ledger seq even mid-load");
+
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: load!.id, result: {} })));
+    await loader.next((e) => !!e.data && parse(e.data).id === 5);
+
+    // The prompt is still outstanding, so a resuming client is shown it — at the
+    // same seq pendingPerms recorded — while the replay around it is simply gone.
+    const fresh = sse(port, { lastEventId: "0" });
+    clients.push(fresh);
+    const replayedRequest = await fresh.next((e) => !!e.data && parse(e.data).method === "session/request_permission");
+    assert.equal(replayedRequest.id, request.id);
+    assert.equal(fresh.frames.some((e) => !!e.data && replayNo(e) !== undefined), false);
+
+    agent().sent.length = 0;
+    assert.equal(await post(port, conn, { jsonrpc: "2.0", id: 99, result: { outcome: "allow" } }), 202);
+    assert.equal(agent().sent.map(parse).filter((o) => o.id === 99 && "result" in o).length, 1, "the mid-load prompt is still answerable");
+  } finally {
+    for (const c of clients) c.close();
+    await close();
+  }
+});
+
 test("POST to an unknown conn is rejected with 409", async () => {
   const { port, close } = await makeTestServer();
   assert.equal(await post(port, "no-such-conn", { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "S" } }), 409);
