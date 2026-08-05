@@ -3,6 +3,13 @@ import assert from "node:assert/strict";
 import { makeTestServer } from "./gateway.ts";
 import { sse, post, sseStatus, parseFrame as parse } from "./sse-testclient.ts";
 
+function withTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(message)), 1000)),
+  ]);
+}
+
 test("SSE rejects a connection without valid credentials", async () => {
   const { port, close } = await makeTestServer();
   assert.equal(await sseStatus(port, "agent=claude"), 401);
@@ -105,14 +112,219 @@ test("permission goes to viewers over SSE; first POST reply wins, the rest are d
     a.next((e) => !!e.data && parse(e.data).id === 99),
     b.next((e) => !!e.data && parse(e.data).id === 99),
   ]);
-  // both answer; only the first reaches the agent
+  const isResolved = (frame: Record<string, unknown>) =>
+    frame.method === "_gateway/prompt_resolved" &&
+    (frame.params as { sessionId?: string } | undefined)?.sessionId === "S";
+  const resolvedA = withTimeout(
+    a.next((e) => !!e.data && isResolved(parse(e.data))),
+    "first viewer did not receive the prompt resolution",
+  );
+  const resolvedB = withTimeout(
+    b.next((e) => !!e.data && isResolved(parse(e.data))),
+    "second viewer did not receive the prompt resolution",
+  );
+
+  // Both answer; only the first reaches the agent and both see one durable
+  // resolution notification carrying the original request-id type.
   await post(port, ca, { jsonrpc: "2.0", id: 99, result: { outcome: "allow" } });
+  const [gotResolvedA, gotResolvedB] = await Promise.all([resolvedA, resolvedB]);
+  assert.deepEqual(parse(gotResolvedA.data), {
+    jsonrpc: "2.0",
+    method: "_gateway/prompt_resolved",
+    params: {
+      sessionId: "S",
+      requestId: 99,
+      requestMethod: "session/request_permission",
+    },
+  });
+  assert.deepEqual(parse(gotResolvedB.data), parse(gotResolvedA.data));
+
   await post(port, cb, { jsonrpc: "2.0", id: 99, result: { outcome: "deny" } });
+  const marker = { jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", marker: "after-losing-answer" } };
+  agent().emit(Buffer.from(JSON.stringify(marker)));
+  await Promise.all([
+    a.next((e) => !!e.data && (parse(e.data).params as { marker?: string })?.marker === "after-losing-answer"),
+    b.next((e) => !!e.data && (parse(e.data).params as { marker?: string })?.marker === "after-losing-answer"),
+  ]);
+  for (const client of [a, b]) {
+    assert.equal(
+      client.frames.filter((e) => !!e.data && isResolved(parse(e.data))).length,
+      1,
+      "a losing answer must not append or broadcast a second tombstone",
+    );
+  }
   const answers = agent().sent.map(parse).filter((o) => o.id === 99 && "result" in o);
   assert.equal(answers.length, 1);
   assert.equal((answers[0].result as { outcome?: string }).outcome, "allow");
   a.close(); b.close();
   await close();
+});
+
+test("a prompt resolution append failure returns 500 and remains retryable over RPC", async () => {
+  const { port, agent, inbox, failNextLedgerAppend, close } = await makeTestServer();
+  const client = sse(port);
+  try {
+    const conn = await client.conn;
+    await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S" } });
+
+    agent().emit(Buffer.from(JSON.stringify({
+      jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S", options: [] },
+    })));
+    await client.next((e) => !!e.data && parse(e.data).id === 99);
+    agent().sent.length = 0;
+
+    failNextLedgerAppend();
+    const url = `http://127.0.0.1:${port}/acp/rpc?user=u&token=t&agent=claude&conn=${encodeURIComponent(conn)}`;
+    const failed = await fetch(url, {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 99, result: { outcome: "allow" } }),
+      signal: AbortSignal.timeout(1000),
+    });
+    assert.equal(failed.status, 500);
+    assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 1);
+    assert.equal(agent().sent.filter((line) => parse(line).id === 99).length, 0);
+
+    assert.equal(await post(port, conn, { jsonrpc: "2.0", id: 99, result: { outcome: "allow" } }), 202);
+    assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 0);
+    assert.equal(agent().sent.filter((line) => parse(line).id === 99).length, 1);
+  } finally {
+    client.close();
+    await close();
+  }
+});
+
+test("replay hides a resolved request while preserving the tombstone in each cursor window", async () => {
+  const { port, agent, close } = await makeTestServer();
+  const clients: Array<ReturnType<typeof sse>> = [];
+  const live = sse(port);
+  clients.push(live);
+  try {
+    const conn = await live.conn;
+    await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S" } });
+
+    agent().emit(Buffer.from(JSON.stringify({
+      jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S" },
+    })));
+    const request = await live.next((event) =>
+      !!event.data && parse(event.data).method === "session/request_permission");
+    assert.notEqual(request.id, null);
+
+    const resolvedPromise = live.next((event) =>
+      !!event.data && parse(event.data).method === "_gateway/prompt_resolved");
+    await post(port, conn, { jsonrpc: "2.0", id: 99, result: { outcome: "allow" } });
+    const resolution = await resolvedPromise;
+    assert.notEqual(resolution.id, null);
+
+    agent().emit(Buffer.from(JSON.stringify({
+      jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", marker: "after-resolution" },
+    })));
+    await live.next((event) =>
+      !!event.data && (parse(event.data).params as { marker?: string })?.marker === "after-resolution");
+
+    const beforeRequest = sse(port, { lastEventId: "0" });
+    clients.push(beforeRequest);
+    await beforeRequest.next((event) =>
+      !!event.data && (parse(event.data).params as { marker?: string })?.marker === "after-resolution");
+    assert.ok(beforeRequest.frames.some((event) =>
+      event.id === resolution.id && !!event.data && parse(event.data).method === "_gateway/prompt_resolved"));
+    assert.equal(beforeRequest.frames.some((event) =>
+      !!event.data && parse(event.data).method === "session/request_permission"), false);
+
+    const between = sse(port, { lastEventId: String(request.id) });
+    clients.push(between);
+    await between.next((event) => event.id === resolution.id);
+    assert.ok(between.frames.some((event) =>
+      !!event.data && parse(event.data).method === "_gateway/prompt_resolved"));
+    assert.equal(between.frames.some((event) =>
+      !!event.data && parse(event.data).method === "session/request_permission"), false);
+
+    const after = sse(port, { lastEventId: String(resolution.id) });
+    clients.push(after);
+    await after.next((event) =>
+      !!event.data && (parse(event.data).params as { marker?: string })?.marker === "after-resolution");
+    assert.equal(after.frames.some((event) => {
+      if (!event.data) return false;
+      const frame = parse(event.data);
+      return frame.method === "session/request_permission" || frame.method === "_gateway/prompt_resolved";
+    }), false);
+  } finally {
+    for (const client of clients) client.close();
+    await close();
+  }
+});
+
+test("an unanswered replayed permission remains visible and answerable", async () => {
+  const { port, agent, inbox, close } = await makeTestServer();
+  agent().emit(Buffer.from(JSON.stringify({
+    jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S" },
+  })));
+  const resumed = sse(port, { lastEventId: "0" });
+  try {
+    const request = await resumed.next((event) =>
+      !!event.data && parse(event.data).method === "session/request_permission");
+    assert.equal(parse(request.data).id, 99);
+
+    const conn = await resumed.conn;
+    agent().sent.length = 0;
+    assert.equal(await post(port, conn, { jsonrpc: "2.0", id: 99, result: { outcome: "allow" } }), 202);
+    assert.equal(agent().sent.filter((line) => parse(line).id === 99).length, 1);
+    assert.equal(inbox({ status: "pending" }).filter((item) => item.reqId === "99").length, 0);
+  } finally {
+    resumed.close();
+    await close();
+  }
+});
+
+test("replay keeps only the latest pending occurrence when a request id is reused", async () => {
+  const { port, agent, close } = await makeTestServer();
+  const clients: Array<ReturnType<typeof sse>> = [];
+  const live = sse(port);
+  clients.push(live);
+  try {
+    const conn = await live.conn;
+    await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S" } });
+
+    agent().emit(Buffer.from(JSON.stringify({
+      jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S", round: 1 },
+    })));
+    const firstRequest = await live.next((event) =>
+      !!event.data && parse(event.data).method === "session/request_permission");
+    const firstResolutionPromise = live.next((event) =>
+      !!event.data && parse(event.data).method === "_gateway/prompt_resolved");
+    await post(port, conn, { jsonrpc: "2.0", id: 99, result: { outcome: "allow" } });
+    const firstResolution = await firstResolutionPromise;
+    assert.notEqual(firstResolution.id, null);
+
+    agent().emit(Buffer.from(JSON.stringify({
+      jsonrpc: "2.0", id: 99, method: "session/request_permission", params: { sessionId: "S", round: 2 },
+    })));
+    const secondRequest = await live.next((event) =>
+      event.id !== firstRequest.id && !!event.data && parse(event.data).method === "session/request_permission");
+    assert.notEqual(secondRequest.id, null);
+
+    agent().emit(Buffer.from(JSON.stringify({
+      jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", marker: "after-reused-request" },
+    })));
+    await live.next((event) =>
+      !!event.data && (parse(event.data).params as { marker?: string })?.marker === "after-reused-request");
+
+    const resumed = sse(port, { lastEventId: "0" });
+    clients.push(resumed);
+    await resumed.next((event) =>
+      !!event.data && (parse(event.data).params as { marker?: string })?.marker === "after-reused-request");
+    const replayedRequests = resumed.frames.filter((event) =>
+      !!event.data && parse(event.data).method === "session/request_permission" && parse(event.data).id === 99);
+    assert.equal(replayedRequests.length, 1);
+    assert.equal(replayedRequests[0].id, secondRequest.id);
+    const resolutionIndex = resumed.frames.findIndex((event) => event.id === firstResolution.id);
+    const secondRequestIndex = resumed.frames.findIndex((event) => event.id === secondRequest.id);
+    assert.notEqual(resolutionIndex, -1);
+    assert.notEqual(secondRequestIndex, -1);
+    assert.ok(resolutionIndex < secondRequestIndex);
+  } finally {
+    for (const client of clients) client.close();
+    await close();
+  }
 });
 
 test("POST to an unknown conn is rejected with 409", async () => {

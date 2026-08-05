@@ -34,7 +34,12 @@ export function App() {
       void getRunning().then((tasks) => { if (alive) useStore.getState().ingestRunningTasks(tasks); });
       // Durable, cross-agent pending permissions — survives reload and surfaces
       // prompts on agents this client has no live SSE connection to.
-      void getInboxPending().then((items) => { if (alive) useStore.setState({ inboxItems: items }); });
+      const promptRevision = useStore.getState().promptStateRevision;
+      void getInboxPending().then((items) => {
+        if (alive && items !== null) {
+          useStore.getState().ingestInboxItems(items, promptRevision);
+        }
+      });
     };
     tick();
     const id = setInterval(tick, 5000);

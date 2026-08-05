@@ -95,13 +95,38 @@ export class Ledger {
     return JSON.stringify({ s: e.seq, sid: e.sid, f: e.frame.toString("utf8") }) + "\n";
   }
 
+  private writeEntry(entry: LedgerEntry): void {
+    const line = Buffer.from(this.serialize(entry), "utf8");
+    const originalSize = fs.fstatSync(this.fd).size;
+    let offset = 0;
+    try {
+      while (offset < line.length) {
+        const written = fs.writeSync(this.fd, line, offset, line.length - offset);
+        if (written <= 0) throw new Error("ledger append write made no progress");
+        offset += written;
+      }
+    } catch (error) {
+      try {
+        fs.ftruncateSync(this.fd, originalSize);
+      } catch (rollbackError) {
+        console.warn(`ledger append rollback failed: ${String(rollbackError)}`);
+      }
+      throw error;
+    }
+  }
+
   // Append an agent→client frame, persist it as a v2 line, and return its entry.
   // `sid` is the session the frame belongs to (null for responses / frames without
   // one), used for the per-session index. Enforces the retention caps afterwards.
   append(frame: Buffer, sid: string | null): LedgerEntry {
-    const entry = this.add(this.nextSeq, sid, frame);
-    fs.writeSync(this.fd, this.serialize(entry));
-    this.enforceLimits();
+    const entry: LedgerEntry = { seq: this.nextSeq, sid, frame };
+    this.writeEntry(entry);
+    this.add(entry.seq, entry.sid, entry.frame);
+    try {
+      this.enforceLimits();
+    } catch (error) {
+      console.warn(`ledger retention maintenance failed: ${String(error)}`);
+    }
     return entry;
   }
 

@@ -458,6 +458,346 @@ describe("store notification routing", () => {
     expect((useStore.getState() as any).inboxItems).toHaveLength(0);
   });
 
+  test("a permission resolved by another client clears every local copy exactly once", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    ws.recv({
+      jsonrpc: "2.0", id: 33, method: "session/request_permission",
+      params: {
+        sessionId: "home-session", toolCall: { title: "Edit a file" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      },
+    });
+    await flush();
+
+    ws.recv({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: "home-session",
+        requestId: 33,
+        requestMethod: "session/request_permission",
+      },
+    });
+    await flush();
+
+    const resolved = useStore.getState() as any;
+    expect(resolved.pendingPermissions).toHaveLength(0);
+    expect(resolved.inboxItems).toHaveLength(0);
+    expect(
+      resolved.sessions["home-session"].items.find(
+        (item: any) => item.kind === "permission" && item.reqId === 33,
+      ),
+    ).toMatchObject({ resolved: true, chosen: "Answered on another device" });
+
+    const revision = resolved.promptStateRevision;
+    ws.recv({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: "home-session",
+        requestId: 33,
+        requestMethod: "session/request_permission",
+      },
+    });
+    await flush();
+    expect((useStore.getState() as any).promptStateRevision).toBe(revision);
+  });
+
+  test("an elicitation tombstone resolves only the matching elicitation", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    ws.recv({
+      jsonrpc: "2.0", id: 64, method: "session/request_permission",
+      params: {
+        sessionId: "home-session", toolCall: { title: "Run a tool" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      },
+    });
+    ws.recv({
+      jsonrpc: "2.0", id: 65, method: "elicitation/create",
+      params: {
+        sessionId: "home-session", mode: "form", message: "Choose an approach",
+        requestedSchema: { type: "object", properties: {} },
+      },
+    });
+    await flush();
+
+    ws.recv({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: "home-session",
+        requestId: "65",
+        requestMethod: "elicitation/create",
+      },
+    });
+    await flush();
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toMatchObject([
+      { agentName: "claude", sessionId: "home-session", reqId: 64 },
+    ]);
+    expect(state.inboxItems).toMatchObject([
+      { agentName: "claude", sessionId: "home-session", reqId: "64", type: "permission" },
+    ]);
+    expect(state.sessions["home-session"].items.find(
+      (item: any) => item.kind === "elicitation" && item.reqId === 65,
+    )).toMatchObject({ resolved: true, chosen: "Answered on another device" });
+    expect(state.sessions["home-session"].items.find(
+      (item: any) => item.kind === "permission" && item.reqId === 64,
+    )).toMatchObject({ resolved: false });
+  });
+
+  test("a prompt tombstone is scoped by agent, session, request id, and method", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    const option = { optionId: "allow", kind: "allow_once", name: "Allow" };
+    const pending = (agentName: string, sessionId: string, reqId: number, elicitation = false) => ({
+      agentName, sessionId, reqId, title: "Prompt", options: elicitation ? [] : [option], createdAt: 1,
+      ...(elicitation ? { elicitation: { message: "Question", fields: [] } } : {}),
+    });
+    const inbox = (id: number, agentName: string, sessionId: string, reqId: number, type = "permission") => ({
+      id, agentName, sessionId, reqId: String(reqId), type, title: "Prompt",
+      options: type === "permission" ? [option] : [], status: "pending", createdAt: "now",
+    });
+    const home = useStore.getState().sessions["home-session"];
+    useStore.setState({
+      sessions: {
+        "home-session": {
+          ...home,
+          items: [
+            { id: "home-session:1", kind: "permission", reqId: 33, title: "Exact", options: [option], resolved: false },
+            { id: "home-session:2", kind: "permission", reqId: 34, title: "Other id", options: [option], resolved: false },
+            { id: "home-session:3", kind: "elicitation", reqId: 33, message: "Other method", fields: [], resolved: false },
+          ],
+        },
+        "other-session": {
+          ...home,
+          id: "other-session",
+          items: [
+            { id: "other-session:1", kind: "permission", reqId: 33, title: "Other session", options: [option], resolved: false },
+          ],
+        },
+      },
+      pendingPermissions: [
+        pending("claude", "home-session", 33),
+        pending("codex", "home-session", 33),
+        pending("claude", "other-session", 33),
+        pending("claude", "home-session", 34),
+        pending("claude", "home-session", 33, true),
+      ],
+      inboxItems: [
+        inbox(1, "claude", "home-session", 33),
+        inbox(2, "codex", "home-session", 33),
+        inbox(3, "claude", "other-session", 33),
+        inbox(4, "claude", "home-session", 34),
+        inbox(5, "claude", "home-session", 33, "elicitation"),
+      ],
+    } as any);
+
+    ws.recv({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: "home-session",
+        requestId: 33,
+        requestMethod: "session/request_permission",
+      },
+    });
+    await flush();
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(4);
+    expect(state.inboxItems).toHaveLength(4);
+    expect(state.pendingPermissions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ agentName: "codex", sessionId: "home-session", reqId: 33 }),
+      expect.objectContaining({ agentName: "claude", sessionId: "other-session", reqId: 33 }),
+      expect.objectContaining({ agentName: "claude", sessionId: "home-session", reqId: 34 }),
+      expect.objectContaining({ agentName: "claude", sessionId: "home-session", reqId: 33, elicitation: expect.anything() }),
+    ]));
+    expect(state.sessions["home-session"].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "permission", reqId: 33, resolved: true }),
+      expect.objectContaining({ kind: "permission", reqId: 34, resolved: false }),
+      expect.objectContaining({ kind: "elicitation", reqId: 33, resolved: false }),
+    ]));
+    expect(state.sessions["other-session"].items[0]).toMatchObject({ resolved: false });
+  });
+
+  test("a tombstone uses the immutable source agent captured by its connection", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    ws.recv({
+      jsonrpc: "2.0", id: 70, method: "session/request_permission",
+      params: {
+        sessionId: "home-session", toolCall: { title: "Run a tool" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      },
+    });
+    await flush();
+    useStore.setState({ agentName: "codex" } as any);
+
+    ws.recv({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: "home-session",
+        requestId: 70,
+        requestMethod: "session/request_permission",
+      },
+    });
+    await flush();
+
+    expect((useStore.getState() as any).pendingPermissions).toHaveLength(0);
+  });
+
+  test("promptStateRevision changes for logical prompt mutations, not duplicate delivery", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    expect((useStore.getState() as any).promptStateRevision).toBe(0);
+    const permission = {
+      jsonrpc: "2.0", id: 80, method: "session/request_permission",
+      params: {
+        sessionId: "home-session", toolCall: { title: "Run a tool" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      },
+    };
+
+    ws.recv(permission);
+    await flush();
+    expect((useStore.getState() as any).promptStateRevision).toBe(1);
+
+    ws.recv(permission);
+    await flush();
+    expect((useStore.getState() as any).promptStateRevision).toBe(1);
+
+    (useStore.getState() as any).answerPermission(80, "allow");
+    expect((useStore.getState() as any).promptStateRevision).toBe(2);
+  });
+
+  test("a successful current inbox snapshot authoritatively resolves missing prompts", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    ws.recv({
+      jsonrpc: "2.0", id: 90, method: "session/request_permission",
+      params: {
+        sessionId: "home-session", toolCall: { title: "Edit a file" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      },
+    });
+    await flush();
+    const revision = (useStore.getState() as any).promptStateRevision;
+
+    (useStore.getState() as any).ingestInboxItems([], revision);
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(0);
+    expect(state.inboxItems).toHaveLength(0);
+    expect(state.sessions["home-session"].items.find(
+      (item: any) => item.kind === "permission" && item.reqId === 90,
+    )).toMatchObject({ resolved: true, chosen: "Answered on another device" });
+    expect(state.promptStateRevision).toBe(revision + 1);
+  });
+
+  test("an inbox snapshot started before a new prompt cannot clear it", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    const oldRevision = (useStore.getState() as any).promptStateRevision;
+    ws.recv({
+      jsonrpc: "2.0", id: 91, method: "session/request_permission",
+      params: {
+        sessionId: "home-session", toolCall: { title: "Edit a file" },
+        options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }],
+      },
+    });
+    await flush();
+
+    (useStore.getState() as any).ingestInboxItems([], oldRevision);
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(1);
+    expect(state.inboxItems).toHaveLength(1);
+    expect(state.sessions["home-session"].items.find(
+      (item: any) => item.kind === "permission" && item.reqId === 91,
+    )).toMatchObject({ resolved: false });
+  });
+
+  test("an inbox snapshot started before a tombstone cannot resurrect its prompt", async () => {
+    const { useStore, ws } = await bootstrapClaude();
+    const options = [{ optionId: "allow", kind: "allow_once", name: "Allow" }];
+    ws.recv({
+      jsonrpc: "2.0", id: 92, method: "session/request_permission",
+      params: { sessionId: "home-session", toolCall: { title: "Edit a file" }, options },
+    });
+    await flush();
+    const oldRevision = (useStore.getState() as any).promptStateRevision;
+    const staleInboxItem = {
+      id: 1, type: "permission", agentName: "claude", sessionId: "home-session",
+      reqId: "92", title: "Edit a file", options, status: "pending", createdAt: "now",
+    };
+
+    ws.recv({
+      jsonrpc: "2.0",
+      method: "_gateway/prompt_resolved",
+      params: {
+        sessionId: "home-session",
+        requestId: 92,
+        requestMethod: "session/request_permission",
+      },
+    });
+    await flush();
+    (useStore.getState() as any).ingestInboxItems([staleInboxItem], oldRevision);
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(0);
+    expect(state.inboxItems).toHaveLength(0);
+    expect(state.sessions["home-session"].items.find(
+      (item: any) => item.kind === "permission" && item.reqId === 92,
+    )).toMatchObject({ resolved: true, chosen: "Answered on another device" });
+  });
+
+  test("an authoritative inbox snapshot retains only exact prompt keys", async () => {
+    const { useStore } = await bootstrapClaude();
+    const option = { optionId: "allow", kind: "allow_once", name: "Allow" };
+    const home = useStore.getState().sessions["home-session"];
+    useStore.setState({
+      sessions: {
+        "home-session": {
+          ...home,
+          items: [
+            { id: "home-session:1", kind: "permission", reqId: 1, title: "Keep", options: [option], resolved: false },
+            { id: "home-session:2", kind: "elicitation", reqId: 1, message: "Resolve", fields: [], resolved: false },
+          ],
+        },
+      },
+      pendingPermissions: [
+        { reqId: 1, sessionId: "home-session", agentName: "claude", title: "Keep", options: [option], createdAt: 1 },
+        {
+          reqId: 1, sessionId: "home-session", agentName: "claude", title: "Resolve", options: [], createdAt: 1,
+          elicitation: { message: "Resolve", fields: [] },
+        },
+      ],
+    } as any);
+    const revision = (useStore.getState() as any).promptStateRevision;
+    const authoritative = [{
+      id: 1, type: "permission", agentName: "claude", sessionId: "home-session", reqId: "1",
+      title: "Keep", options: [option], status: "pending", createdAt: "now",
+    }];
+
+    (useStore.getState() as any).ingestInboxItems(authoritative, revision);
+
+    const state = useStore.getState() as any;
+    expect(state.pendingPermissions).toHaveLength(1);
+    expect(state.pendingPermissions[0]).not.toHaveProperty("elicitation");
+    expect(state.sessions["home-session"].items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "permission", reqId: 1, resolved: false }),
+      expect.objectContaining({ kind: "elicitation", reqId: 1, resolved: true }),
+    ]));
+  });
+
+  test("an unchanged inbox snapshot preserves unaffected session references", async () => {
+    const { useStore } = await bootstrapClaude();
+    const session = useStore.getState().sessions["home-session"];
+    const revision = (useStore.getState() as any).promptStateRevision;
+
+    (useStore.getState() as any).ingestInboxItems([], revision);
+
+    expect(useStore.getState().sessions["home-session"]).toBe(session);
+  });
+
   test("ensureConnected is a no-op while the socket is open", async () => {
     const { useStore } = await bootstrapClaude();
     const before = FakeSse.instances.length;
