@@ -2504,8 +2504,17 @@ class Channel {
     this.conns.set(conn.id, conn);
   }
 
-  replaySince(afterSeq: number): LedgerEntry[] {
+  replaySince(afterSeq: number, session?: string): LedgerEntry[] {
     return this.ledger.since(afterSeq).filter((entry) => {
+      // A session-scoped resume drops other conversations' frames — the bulk of
+      // a stale cursor's replay, and bytes the requesting client would discard
+      // anyway — but keeps channel-scoped frames (sid null: _gateway/agent_restart,
+      // the synthetic agent-death error): those address every client, not one
+      // session. Ledger.since's own sid filter is NOT this: it excludes sid-less
+      // entries, which would eat the restart notification.
+      if (session !== undefined && entry.sid !== null && entry.sid !== session) {
+        return false;
+      }
       const frame = parse(entry.frame);
       if (!frame || !isRequest(frame)) return true;
       if (
@@ -3228,16 +3237,29 @@ export class Gateway {
   // retains, it has missed frames we no longer hold — tell it to full-reload (the
   // client falls back to session/load) before going live. (Inert until Phase 4 bounds
   // the ledger; floorSeq stays 1 while unbounded.)
-  attach(sink: ClientSink, agentName: string, cursor: number): Conn {
+  //
+  // `opts.session` scopes the replay to one conversation (plus channel-scoped
+  // sid-less frames) — a resuming client that only renders one session asks for
+  // exactly that instead of the whole channel's backlog. `opts.greet` runs after
+  // the conn exists but before any reload/replay byte, so the transport can hand
+  // the client its conn id first: the client's connect timeout measures "is the
+  // gateway alive", and a large replay on a slow link must not eat that budget.
+  attach(
+    sink: ClientSink,
+    agentName: string,
+    cursor: number,
+    opts?: { session?: string; greet?: (conn: Conn) => void },
+  ): Conn {
     const ch = this.channel(agentName);
     const conn: Conn = { id: crypto.randomUUID(), sink };
+    opts?.greet?.(conn);
     const afterSeq = Math.min(cursor, ch.ledger.headSeq());
     if (afterSeq < ch.ledger.floorSeq() - 1) {
       sink.send(ch.ledger.headSeq(), RELOAD_FRAME);
       ch.addConn(conn);
       return conn;
     }
-    for (const e of ch.replaySince(afterSeq)) sink.send(e.seq, e.frame);
+    for (const e of ch.replaySince(afterSeq, opts?.session)) sink.send(e.seq, e.frame);
     ch.addConn(conn);
     return conn;
   }
@@ -3571,17 +3593,27 @@ export function handleSseRpc(
       "x-accel-buffering": "no", // tell nginx & friends not to buffer the stream
     });
     const sink = new SseSink(res);
+    // Optional replay scope: ?session=<sid> resumes only that conversation
+    // (channel-scoped frames included). Absent → the whole channel, as before.
+    const session = u.searchParams.get("session") || undefined;
     let conn: Conn;
     try {
-      conn = gateway.attach(sink, agentName, cursor);
+      conn = gateway.attach(sink, agentName, cursor, {
+        session,
+        // Hand the client its connection id so it can address upstream POSTs to
+        // rpcPath — BEFORE the replay, so a client on a slow link learns the
+        // connect succeeded without waiting for the backlog to drain.
+        greet: (c) => res.write(`event: ready\ndata:${JSON.stringify({ conn: c.id })}\n\n`),
+      });
     } catch (e) {
       console.warn(`rejecting SSE connection: ${String(e)}`);
       res.end();
       return true;
     }
-    // Hand the client its connection id so it can address upstream POSTs to rpcPath.
-    res.write(`event: ready\ndata:${JSON.stringify({ conn: conn.id })}\n\n`);
-    console.log(`client: SSE connected agent="${agentName}" conn=${conn.id} cursor=${cursor}`);
+    console.log(
+      `client: SSE connected agent="${agentName}" conn=${conn.id} cursor=${cursor}` +
+        (session ? ` session=${session}` : ""),
+    );
     const ka = setInterval(() => sink.keepalive(), opts.sseKeepaliveMs);
     ka.unref?.();
     res.on("close", () => {
