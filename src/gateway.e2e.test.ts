@@ -604,7 +604,7 @@ test("recent sessions record turn traffic on a prompt, never on merely attaching
     () => shared,
   );
   const ch = gw.channel("claude");
-  const conn: Conn = { id: "c1", sink: { send() {}, close() {}, get alive() { return true; } } };
+  const conn: Conn = { id: "c1", sink: { send() {}, sendUnsequenced() {}, close() {}, get alive() { return true; } } };
 
   ch.fromClient(conn, Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/load", params: { sessionId: "S1", cwd: "/repo" } })));
   assert.deepEqual([...shared.lastMessageAtBySession()], [], "attaching to a conversation is not turn traffic");
