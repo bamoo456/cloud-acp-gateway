@@ -6,7 +6,7 @@ import { readImageFile, imageSrc } from "../lib/images.ts";
 import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.ts";
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
-import { listFiles } from "../lib/api.ts";
+import { listFiles, uploadFile } from "../lib/api.ts";
 import type { MessageImage, MessageFile } from "../types.ts";
 
 // Touch / coarse-pointer devices (phones, tablets) have no Shift key on their
@@ -22,11 +22,13 @@ export function Composer() {
   const menuRef = useRef<HTMLDivElement>(null);
   const slashRef = useRef<HTMLButtonElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const uploadRef = useRef<HTMLInputElement>(null);
   const fileMenuRef = useRef<HTMLDivElement>(null);
   const atRef = useRef<HTMLButtonElement>(null);
   const [text, setText] = useState("");
   const [images, setImages] = useState<MessageImage[]>([]);
-  const [files, setFiles] = useState<MessageFile[]>([]); // "@ file" references
+  const [files, setFiles] = useState<MessageFile[]>([]); // "@ file" references + uploads
+  const [uploading, setUploading] = useState(0); // in-flight /uploads count
   const [dragging, setDragging] = useState(false);
   // slash-command menu: query is null when closed, "" when opened via the button
   // (show all), else the substring typed after "/". `cmdActive` is the keyboard
@@ -42,7 +44,7 @@ export function Composer() {
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
-  const canSend = activeBusy || ((!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady);
+  const canSend = activeBusy || ((!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady && !uploading);
   const placeholder = hasCodexSkin(s) ? "Reply to Codex…" : "Reply to Claude…";
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
@@ -151,6 +153,28 @@ export function Composer() {
     if (added.length) setImages((prev) => [...prev, ...added]);
   }
 
+  // Upload one or more picked files (any type — md, pdf, whatever) to the
+  // gateway and add each as a "files" reference: identical wire shape to an
+  // "@ file" pick (a resource_link the agent reads itself), just sourced from
+  // an upload instead of the project tree. Sequential, like addFiles, so an
+  // earlier failure's tip isn't clobbered by a later one resolving first.
+  async function addUploadedFiles(list: FileList | File[] | null | undefined) {
+    if (!canReferenceFiles || !list) return;
+    const picks = Array.from(list);
+    if (!picks.length) return;
+    for (const f of picks) {
+      setUploading((n) => n + 1);
+      try {
+        const uploaded = await uploadFile(f);
+        setFiles((prev) => (prev.some((p) => p.uri === uploaded.uri) ? prev : [...prev, uploaded]));
+      } catch (e) {
+        s.setTip(e instanceof Error ? e.message : "Couldn't upload the file.");
+      } finally {
+        setUploading((n) => n - 1);
+      }
+    }
+  }
+
   function removeImage(i: number) { setImages((prev) => prev.filter((_, idx) => idx !== i)); }
   function removeFile(i: number) { setFiles((prev) => prev.filter((_, idx) => idx !== i)); }
 
@@ -185,6 +209,10 @@ export function Composer() {
 
   function submit() {
     if (activeBusy) { s.cancel(); return; }
+    // Enter bypasses the Send button's `disabled={!canSend}`, so it needs its own
+    // guard: sending mid-upload would clear `files` out from under the pending
+    // upload, and the file would land as a chip on the *next* message instead.
+    if (uploading) return;
     const t = text; const imgs = images; const refs = files;
     if (!t.trim() && !imgs.length && !refs.length) return;
     setText(""); setImages([]); setFiles([]); setFileQuery(null); setCmdQuery(null);
@@ -291,6 +319,12 @@ export function Composer() {
           )}
           <input ref={fileRef} type="file" accept="image/*" multiple hidden
             onChange={(e) => { void addFiles(e.target.files); e.target.value = ""; }} />
+          {canReferenceFiles && (
+            <button className="cbtn" title="Attach file" disabled={uploading > 0}
+              onClick={() => uploadRef.current?.click()}><IconFile /></button>
+          )}
+          <input ref={uploadRef} type="file" multiple hidden
+            onChange={(e) => { void addUploadedFiles(e.target.files); e.target.value = ""; }} />
           <span className="spacer" />
           <button className={"send" + (activeBusy ? " stop" : "")} title="Send" disabled={!canSend} onClick={submit}>
             {activeBusy ? <IconStop /> : <IconSend />}
