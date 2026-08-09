@@ -1,6 +1,7 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, getInboxPending, putLockConfig, searchSessions,
+  uploadFile,
 } from "./api.ts";
 
 function mockFetch(json: unknown) {
@@ -117,6 +118,23 @@ describe("api", () => {
     const r = await listDir("/r/a");
     expect(r.path).toBe("/r/a");
     expect(r.dirs[0]).toEqual({ name: "x", git: true });
+  });
+
+  test("uploadFile posts the raw file body with the name in the query string", async () => {
+    mockFetch({ name: "notes.md", uri: "file:///data/uploads/ab12-notes.md" });
+    const file = new File([new Uint8Array([1, 2, 3])], "notes.md", { type: "text/markdown" });
+    const r = await uploadFile(file);
+    expect(r).toEqual({ name: "notes.md", uri: "file:///data/uploads/ab12-notes.md" });
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/uploads?name=notes.md"),
+      { method: "POST", body: file },
+    );
+  });
+
+  test("uploadFile surfaces the server's error text on failure", async () => {
+    mockResponse({ ok: false, status: 413, text: () => Promise.resolve("file too large") });
+    const file = new File([new Uint8Array([1])], "big.pdf");
+    await expect(uploadFile(file)).rejects.toThrow("file too large");
   });
 
   test("putLockConfig keeps lock preference writes alive across refresh", async () => {

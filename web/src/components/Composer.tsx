@@ -1,12 +1,12 @@
 import { useRef, useState, useEffect } from "react";
 import { hasCodexSkin, useStore } from "../store/store.ts";
 import { Menu } from "./Menu.tsx";
-import { IconSlash, IconSend, IconStop, IconImage, IconAt, IconFile } from "../lib/icons.tsx";
+import { IconSlash, IconSend, IconStop, IconAt, IconFile } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
 import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.ts";
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
-import { listFiles } from "../lib/api.ts";
+import { listFiles, uploadFile } from "../lib/api.ts";
 import type { MessageImage, MessageFile } from "../types.ts";
 
 // Touch / coarse-pointer devices (phones, tablets) have no Shift key on their
@@ -26,7 +26,8 @@ export function Composer() {
   const atRef = useRef<HTMLButtonElement>(null);
   const [text, setText] = useState("");
   const [images, setImages] = useState<MessageImage[]>([]);
-  const [files, setFiles] = useState<MessageFile[]>([]); // "@ file" references
+  const [files, setFiles] = useState<MessageFile[]>([]); // "@ file" references + uploads
+  const [uploading, setUploading] = useState(0); // in-flight /uploads count
   const [dragging, setDragging] = useState(false);
   // slash-command menu: query is null when closed, "" when opened via the button
   // (show all), else the substring typed after "/". `cmdActive` is the keyboard
@@ -42,7 +43,7 @@ export function Composer() {
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
-  const canSend = activeBusy || ((!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady);
+  const canSend = activeBusy || ((!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady && !uploading);
   const placeholder = hasCodexSkin(s) ? "Reply to Codex…" : "Reply to Claude…";
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
@@ -151,6 +152,50 @@ export function Composer() {
     if (added.length) setImages((prev) => [...prev, ...added]);
   }
 
+  // Upload one or more picked files (any type — md, pdf, whatever) to the
+  // gateway and add each as a "files" reference: identical wire shape to an
+  // "@ file" pick (a resource_link the agent reads itself), just sourced from
+  // an upload instead of the project tree. Sequential, like addFiles, so an
+  // earlier failure's tip isn't clobbered by a later one resolving first.
+  async function addUploadedFiles(list: FileList | File[] | null | undefined) {
+    if (!canReferenceFiles || !list) return;
+    const picks = Array.from(list);
+    if (!picks.length) return;
+    for (const f of picks) {
+      setUploading((n) => n + 1);
+      try {
+        const uploaded = await uploadFile(f);
+        setFiles((prev) => (prev.some((p) => p.uri === uploaded.uri) ? prev : [...prev, uploaded]));
+      } catch (e) {
+        s.setTip(e instanceof Error ? e.message : "Couldn't upload the file.");
+      } finally {
+        setUploading((n) => n - 1);
+      }
+    }
+  }
+
+  // One picker for everything, because two were indistinguishable on the
+  // devices this gateway is actually driven from: iOS shows the same "Take
+  // Photo / Photo Library / Choose File" sheet for an accept="image/*" input
+  // as for an unrestricted one, so a separate image button bought nothing but
+  // a second identical sheet. What comes back decides the route instead —
+  // images keep the zero-round-trip inline path (thumbnail preview, an ACP
+  // image block), everything else is uploaded and referenced as a
+  // resource_link. Both sub-handlers re-check their own capability, so this
+  // only has to explain the drop.
+  async function addAttachments(list: FileList | File[] | null | undefined) {
+    if (!list) return;
+    const picks = Array.from(list);
+    const imgs = picks.filter((f) => f.type.startsWith("image/"));
+    const rest = picks.filter((f) => !f.type.startsWith("image/"));
+    if (imgs.length && !canAttachImages) s.setTip("This agent doesn't accept image attachments.");
+    else if (rest.length && !canReferenceFiles) s.setTip("This agent doesn't accept file attachments.");
+    // Concurrently: they touch disjoint state (images vs files), and serializing
+    // would park a document upload behind a FileReader pass over a large photo
+    // for no reason.
+    await Promise.all([addFiles(imgs), addUploadedFiles(rest)]);
+  }
+
   function removeImage(i: number) { setImages((prev) => prev.filter((_, idx) => idx !== i)); }
   function removeFile(i: number) { setFiles((prev) => prev.filter((_, idx) => idx !== i)); }
 
@@ -185,6 +230,10 @@ export function Composer() {
 
   function submit() {
     if (activeBusy) { s.cancel(); return; }
+    // Enter bypasses the Send button's `disabled={!canSend}`, so it needs its own
+    // guard: sending mid-upload would clear `files` out from under the pending
+    // upload, and the file would land as a chip on the *next* message instead.
+    if (uploading) return;
     const t = text; const imgs = images; const refs = files;
     if (!t.trim() && !imgs.length && !refs.length) return;
     setText(""); setImages([]); setFiles([]); setFileQuery(null); setCmdQuery(null);
@@ -286,11 +335,12 @@ export function Composer() {
           {canReferenceFiles && (
             <button ref={atRef} className="cbtn" title="Reference a file" onClick={openFileMenu}><IconAt /></button>
           )}
-          {canAttachImages && (
-            <button className="cbtn" title="Attach image" onClick={() => fileRef.current?.click()}><IconImage /></button>
+          {(canAttachImages || canReferenceFiles) && (
+            <button className="cbtn" title="Attach" disabled={uploading > 0}
+              onClick={() => fileRef.current?.click()}><IconFile /></button>
           )}
-          <input ref={fileRef} type="file" accept="image/*" multiple hidden
-            onChange={(e) => { void addFiles(e.target.files); e.target.value = ""; }} />
+          <input ref={fileRef} type="file" multiple hidden
+            onChange={(e) => { void addAttachments(e.target.files); e.target.value = ""; }} />
           <span className="spacer" />
           <button className={"send" + (activeBusy ? " stop" : "")} title="Send" disabled={!canSend} onClick={submit}>
             {activeBusy ? <IconStop /> : <IconSend />}
