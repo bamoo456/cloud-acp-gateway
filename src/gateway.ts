@@ -4104,7 +4104,13 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     return;
   }
   if (consoleEnabled && (pathname === "/" || pathname === "/console")) {
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    // no-store, because this is the one document that must never be stale: it
+    // names the content-hashed asset bundle, which is served `immutable`. With
+    // no cache directive at all a browser is free to reuse it heuristically
+    // (iOS Safari does), and a cached index.html pins the old hash — whose
+    // asset then legitimately never revalidates. That combination survives a
+    // reload and makes a deploy look like it silently didn't happen.
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     res.end(loadChatHtml() || CONSOLE_HTML); // per-request; fall back to raw poker if file missing
     return;
   }
