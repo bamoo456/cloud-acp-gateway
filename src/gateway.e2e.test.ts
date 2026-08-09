@@ -48,6 +48,23 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
   ]);
 }
 
+test("the SPA index is served no-store, so a deploy can't be pinned by a cached asset hash", async () => {
+  // index.html names the content-hashed asset bundle, and /assets/* is served
+  // `immutable`. Shipping index.html with no cache directive at all let iOS
+  // Safari reuse it heuristically; the stale copy then pointed at the previous
+  // hash, whose asset legitimately never revalidates — so a redeployed console
+  // kept rendering the old UI through reloads, looking like a failed deploy.
+  const { authed, close } = await startHttpServer();
+  try {
+    const r = await authed("/");
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get("cache-control") ?? "", /no-store/);
+    await r.arrayBuffer();
+  } finally {
+    await close();
+  }
+});
+
 test("SSE connection requires account credentials for remote clients", async () => {
   const { port, close } = await makeTestServer();
   try {
