@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import { hasCodexSkin, useStore } from "../store/store.ts";
 import { Menu } from "./Menu.tsx";
-import { IconSlash, IconSend, IconStop, IconImage, IconAt, IconFile } from "../lib/icons.tsx";
+import { IconSlash, IconSend, IconStop, IconAt, IconFile } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
 import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.ts";
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
@@ -22,7 +22,6 @@ export function Composer() {
   const menuRef = useRef<HTMLDivElement>(null);
   const slashRef = useRef<HTMLButtonElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const uploadRef = useRef<HTMLInputElement>(null);
   const fileMenuRef = useRef<HTMLDivElement>(null);
   const atRef = useRef<HTMLButtonElement>(null);
   const [text, setText] = useState("");
@@ -175,6 +174,28 @@ export function Composer() {
     }
   }
 
+  // One picker for everything, because two were indistinguishable on the
+  // devices this gateway is actually driven from: iOS shows the same "Take
+  // Photo / Photo Library / Choose File" sheet for an accept="image/*" input
+  // as for an unrestricted one, so a separate image button bought nothing but
+  // a second identical sheet. What comes back decides the route instead —
+  // images keep the zero-round-trip inline path (thumbnail preview, an ACP
+  // image block), everything else is uploaded and referenced as a
+  // resource_link. Both sub-handlers re-check their own capability, so this
+  // only has to explain the drop.
+  async function addAttachments(list: FileList | File[] | null | undefined) {
+    if (!list) return;
+    const picks = Array.from(list);
+    const imgs = picks.filter((f) => f.type.startsWith("image/"));
+    const rest = picks.filter((f) => !f.type.startsWith("image/"));
+    if (imgs.length && !canAttachImages) s.setTip("This agent doesn't accept image attachments.");
+    else if (rest.length && !canReferenceFiles) s.setTip("This agent doesn't accept file attachments.");
+    // Concurrently: they touch disjoint state (images vs files), and serializing
+    // would park a document upload behind a FileReader pass over a large photo
+    // for no reason.
+    await Promise.all([addFiles(imgs), addUploadedFiles(rest)]);
+  }
+
   function removeImage(i: number) { setImages((prev) => prev.filter((_, idx) => idx !== i)); }
   function removeFile(i: number) { setFiles((prev) => prev.filter((_, idx) => idx !== i)); }
 
@@ -314,17 +335,12 @@ export function Composer() {
           {canReferenceFiles && (
             <button ref={atRef} className="cbtn" title="Reference a file" onClick={openFileMenu}><IconAt /></button>
           )}
-          {canAttachImages && (
-            <button className="cbtn" title="Attach image" onClick={() => fileRef.current?.click()}><IconImage /></button>
+          {(canAttachImages || canReferenceFiles) && (
+            <button className="cbtn" title="Attach" disabled={uploading > 0}
+              onClick={() => fileRef.current?.click()}><IconFile /></button>
           )}
-          <input ref={fileRef} type="file" accept="image/*" multiple hidden
-            onChange={(e) => { void addFiles(e.target.files); e.target.value = ""; }} />
-          {canReferenceFiles && (
-            <button className="cbtn" title="Attach file" disabled={uploading > 0}
-              onClick={() => uploadRef.current?.click()}><IconFile /></button>
-          )}
-          <input ref={uploadRef} type="file" multiple hidden
-            onChange={(e) => { void addUploadedFiles(e.target.files); e.target.value = ""; }} />
+          <input ref={fileRef} type="file" multiple hidden
+            onChange={(e) => { void addAttachments(e.target.files); e.target.value = ""; }} />
           <span className="spacer" />
           <button className={"send" + (activeBusy ? " stop" : "")} title="Send" disabled={!canSend} onClick={submit}>
             {activeBusy ? <IconStop /> : <IconSend />}
