@@ -101,6 +101,18 @@ export async function listFiles(cwd: string, query = ""): Promise<string[]> {
   }
 }
 
+// Upload a generic (non-image) file attachment: the file's raw bytes as the
+// POST body, its original name in ?name=. The response shape ({name, uri})
+// drops straight into a MessageFile — identical to what makeMessageFile()
+// builds for an "@ file" pick.
+export async function uploadFile(file: File): Promise<{ name: string; uri: string }> {
+  const url = base() + "/uploads?name=" + encodeURIComponent(file.name);
+  const r = await fetch(url, { method: "POST", body: file });
+  const j = await readJson(r, "Couldn't upload the file.");
+  if (!j?.uri) throw new Error("Couldn't upload the file.");
+  return { name: String(j.name || file.name), uri: String(j.uri) };
+}
+
 // Pinned ("favorite") folders live on the server (shared across devices/IPs),
 // not in this browser's localStorage. Both calls return the updated list.
 export async function getPinnedFolders(): Promise<string[]> {

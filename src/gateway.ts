@@ -41,6 +41,7 @@ import { accessUrls } from "./access.ts";
 import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.ts";
 import Database from "better-sqlite3";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
+import { handleUpload } from "./uploads.ts";
 import { buildClientConfig } from "./client-config.ts";
 import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
@@ -190,6 +191,16 @@ const cfg = {
   maxPayload: (() => {
     const n = Number(process.env.ACPG_MAX_PAYLOAD ?? "16777216");
     return Number.isFinite(n) && n > 0 ? n : 16777216;
+  })(),
+  // Cap on a single /uploads POST body. Independent of maxPayload: that cap
+  // bounds a JSON-RPC frame buffered fully in memory before parsing, but an
+  // upload streams straight to disk (uploads.ts), so its constraint is disk
+  // usage/transfer time rather than peak memory — sized generously enough for
+  // real documents (a scanned/image-heavy PDF can comfortably exceed 16 MiB).
+  // Invalid/non-positive values fall back.
+  uploadMaxBytes: (() => {
+    const n = Number(process.env.ACPG_UPLOAD_MAX_BYTES ?? "52428800");
+    return Number.isFinite(n) && n > 0 ? n : 52428800;
   })(),
 };
 if (!cfg.authUser) {
@@ -454,6 +465,11 @@ const FS_ROOT = (() => {
   const r = process.env.ACPG_FS_ROOT || os.homedir();
   try { return fs.realpathSync(r); } catch { return path.resolve(r); }
 })();
+
+// Where uploaded (non-image) composer attachments live — the gateway's own
+// private storage, deliberately NOT under FS_ROOT (that's the user's browsable
+// project tree; an "uploads" folder in it would pollute their repo).
+const UPLOADS_DIR = path.join(cfg.ledgerDir, "uploads");
 function resolveWithinRootBase(p: string, root: string): string | null {
   if (!p) return null;
   let safeRoot: string;
@@ -3785,6 +3801,20 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         res.end(JSON.stringify({ root: FS_ROOT, cwd, files }));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Generic (non-image) file attachments: raw POST body, ?name= carries the
+  // original filename. See uploads.ts for the full route.
+  if (consoleEnabled && pathname === "/uploads") {
+    handleUpload(req, res, { uploadsDir: UPLOADS_DIR, maxBytes: cfg.uploadMaxBytes })
+      // Same shape as the sibling handlers above, but headersSent-guarded:
+      // handleUpload answers 200/413/... itself, so a late rejection would hit
+      // an already-answered res and throw ERR_HTTP_HEADERS_SENT out of the very
+      // catch meant to contain it.
+      .catch((e) => {
+        console.error(`upload route failed: ${String(e)}`);
+        if (!res.headersSent) { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); }
+      });
     return;
   }
   // Pinned ("favorite") folders, persisted server-side so they survive a client
