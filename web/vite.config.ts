@@ -18,6 +18,7 @@ export default defineConfig({
       "/acp": { target: GATEWAY, ws: true, changeOrigin: true },
       "/history": { target: GATEWAY, changeOrigin: true },
       "/fs": { target: GATEWAY, changeOrigin: true },
+      "/uploads": { target: GATEWAY, changeOrigin: true },
       "/healthz": { target: GATEWAY, changeOrigin: true },
     },
   },

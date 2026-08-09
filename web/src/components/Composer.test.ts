@@ -46,6 +46,9 @@ describe("Composer session busy state", () => {
       root = null;
     }
     vi.unstubAllGlobals();
+    // Restore what the touch-detection test deletes, so later tests in this
+    // file still see jsdom's default (touch-looking) window.
+    if (!("ontouchstart" in window)) (window as unknown as { ontouchstart: null }).ontouchstart = null;
   });
 
   test("does not show stop state for another session's in-flight prompt", async () => {
@@ -75,7 +78,10 @@ describe("Composer session busy state", () => {
     expect(send).toBeDisabled();
   });
 
-  test("hides the attach-image button when the agent can't accept images", async () => {
+  // One button now covers images and files alike (iOS renders the same picker
+  // sheet for both, so two were indistinguishable), which makes it a union of
+  // the two capabilities rather than a match on either one.
+  test("hides the attach button when the agent takes neither images nor embedded context", async () => {
     const { Composer } = await import("./Composer.tsx");
     const { useStore } = await import("../store/store.ts");
 
@@ -86,10 +92,10 @@ describe("Composer session busy state", () => {
       root.render(React.createElement(Composer));
     });
 
-    expect(container.querySelector('button[title="Attach image"]')).toBeNull();
+    expect(container.querySelector('button[title="Attach"]')).toBeNull();
   });
 
-  test("shows the attach-image button when the agent reports image support", async () => {
+  test("shows the attach button for an image-only agent", async () => {
     const { Composer } = await import("./Composer.tsx");
     const { useStore } = await import("../store/store.ts");
 
@@ -100,7 +106,7 @@ describe("Composer session busy state", () => {
       root.render(React.createElement(Composer));
     });
 
-    expect(container.querySelector('button[title="Attach image"]')).not.toBeNull();
+    expect(container.querySelector('button[title="Attach"]')).not.toBeNull();
   });
 
   test("hides the @ file button when the agent can't take embedded context", async () => {
@@ -129,6 +135,191 @@ describe("Composer session busy state", () => {
     });
 
     expect(container.querySelector('button[title="Reference a file"]')).not.toBeNull();
+  });
+
+  test("shows the attach button for a file-only agent (no image support)", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    useStore.setState({ agentReady: true, promptCapabilities: { embeddedContext: true } } as any);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Composer));
+    });
+
+    expect(container.querySelector('button[title="Attach"]')).not.toBeNull();
+  });
+
+  test("one picker, two routes: an image goes inline, a document gets uploaded", async () => {
+    // The whole point of merging the two buttons — the picked file's MIME type,
+    // not which button was pressed, decides the path. An image must NOT hit
+    // /uploads (it keeps the zero-round-trip inline base64 route), and a
+    // document must, in the same selection.
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    useStore.setState({
+      agentReady: true,
+      promptCapabilities: { image: true, embeddedContext: true },
+    } as any);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ name: "spec.pdf", uri: "file:///data/uploads/cd34-spec.pdf" }),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Composer));
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const png = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "shot.png", { type: "image/png" });
+    const pdf = new File(["%PDF-1.4"], "spec.pdf", { type: "application/pdf" });
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [png, pdf], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+
+    // Exactly one upload, and it's the PDF — the PNG never touched the network.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain("/uploads?name=spec.pdf");
+    // The PDF is a file chip; the image took the inline path instead (a thumb,
+    // not a chip), so it must not show up as one.
+    const chips = Array.from(container.querySelectorAll(".file-chip .nm")).map((e) => e.textContent);
+    expect(chips).toEqual(["spec.pdf"]);
+    // …and it really did land inline, rather than being silently dropped —
+    // without this, the test would pass just as happily if addFiles never ran.
+    // FileReader resolves on a macrotask, so this needs a real-timer wait that
+    // the microtask drain above can't cover.
+    await vi.waitFor(() => expect(container.querySelectorAll(".attachments .thumb")).toHaveLength(1));
+  });
+
+  test("picking a file uploads it and renders a removable chip", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    useStore.setState({ agentReady: true, promptCapabilities: { embeddedContext: true } } as any);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ name: "notes.md", uri: "file:///data/uploads/ab12-notes.md" }),
+    } as Response));
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Composer));
+    });
+
+    const attachFile = container.querySelector<HTMLButtonElement>('button[title="Attach"]');
+    expect(attachFile).not.toBeNull();
+
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    expect(input).not.toBeUndefined();
+
+    const file = new File(["# hi"], "notes.md", { type: "text/markdown" });
+    // uploadFile()'s fetch -> json -> setFiles chain needs a few microtask hops to
+    // settle; draining them inside the same act() call (rather than polling with
+    // a real-timer vi.waitFor, which crosses a macrotask boundary act() doesn't
+    // track) is what lets React commit the update without an "outside of act()" warning.
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    expect(container.querySelector(".file-chip .nm")?.textContent).toBe("notes.md");
+
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/uploads?name=notes.md"),
+      { method: "POST", body: file },
+    );
+    // The upload settled, so it's no longer holding the button disabled.
+    expect(container.querySelector<HTMLButtonElement>('button[title="Attach"]')).not.toBeDisabled();
+  });
+
+  test("Enter doesn't submit while a file upload is still in flight", async () => {
+    // Composer treats Enter as submit only on desktop (isTouchDevice, computed
+    // once at module import from "ontouchstart" in window). jsdom defines that
+    // as an own property unconditionally, regardless of real touch support, so
+    // it must be deleted before importing a fresh Composer instance here, or
+    // Enter exercises the (already-covered) newline path instead of submit.
+    expect("ontouchstart" in window).toBe(true);
+    delete (window as any).ontouchstart;
+
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    // Send is wired separately from the Send button's disabled state (Enter
+    // calls submit() directly via the editor keymap), so this exercises that
+    // path specifically rather than the button's `disabled` attribute.
+    const sendPrompt = vi.fn();
+    useStore.setState({ agentReady: true, promptCapabilities: { embeddedContext: true }, sendPrompt } as any);
+    // A fetch that never resolves keeps `uploading` pinned at 1 so the guard is
+    // exercised deterministically instead of racing a real upload's completion.
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Composer));
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["# hi"], "notes.md", { type: "text/markdown" });
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(container.querySelector<HTMLButtonElement>('button[title="Attach"]')).toBeDisabled();
+
+    const view = cmView(container);
+    await act(async () => { cmSet(view, "hello"); });
+    await act(async () => { cmKey(view, "Enter"); });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  test("Stop still cancels a running turn while a file upload is in flight", async () => {
+    // The upload guard sits *below* submit()'s cancel branch on purpose: while
+    // the agent is busy the same button is Stop, and an in-flight upload must
+    // not take away the user's only way to interrupt a running turn. Ordering
+    // those two guards the other way round silently breaks Stop, which nothing
+    // else here would catch (the sibling test only asserts send *doesn't* fire).
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    const cancel = vi.fn();
+    const sendPrompt = vi.fn();
+    useStore.setState({
+      agentReady: true,
+      promptCapabilities: { embeddedContext: true },
+      activeId: "s1",
+      busySessionIds: { s1: true },
+      cancel,
+      sendPrompt,
+    } as any);
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Composer));
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [new File(["# hi"], "notes.md")], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    const stop = container.querySelector<HTMLButtonElement>("button.send.stop")!;
+    expect(stop).toBeEnabled(); // canSend short-circuits on activeBusy, upload or not
+    await act(async () => { stop.click(); });
+
+    expect(cancel).toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
   });
 
   test("the slash button opens the command menu listing every command", async () => {
