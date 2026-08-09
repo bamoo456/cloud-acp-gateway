@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { safeUploadBasename, handleUpload } from "./uploads.ts";
 import { handleRequest } from "./gateway.ts";
 
@@ -136,7 +137,7 @@ test("handleUpload writes the body to disk and returns {name, uri}", async () =>
   assert.equal(status(), 200);
   const j = JSON.parse(body());
   assert.equal(j.name, "notes.md");
-  const onDisk = j.uri.slice("file://".length);
+  const onDisk = fileURLToPath(j.uri);
   assert.equal(fs.readFileSync(onDisk, "utf8"), "# hello");
   assert.ok(path.dirname(onDisk) === uploadsDir);
 });
@@ -150,6 +151,25 @@ test("a filename with spaces/parens gets an ASCII-safe on-disk URI but keeps the
   assert.equal(j.name, "My Report (final).pdf");
   assert.doesNotMatch(j.uri, /[ ()]/);
   assert.match(j.uri, /\.pdf$/);
+});
+
+test("an uploads dir containing spaces still yields a valid, round-trippable URI", async () => {
+  // The macOS default ledger dir is "~/Library/Application Support/acp-gateway",
+  // so the uploads dir routinely has a space in it — and the directory half of
+  // the path is operator-supplied, so sanitizing only the filename can't help.
+  // Concatenating "file://" + dest left that space raw, which truncates the
+  // target of the `[@name](uri)` markdown link claude-agent-acp renders for a
+  // resource_link. Every other test here uses mkdtemp, which never produces a
+  // space, so the whole suite was blind to it until a real deploy hit it.
+  const uploadsDir = path.join(freshDir(), "Application Support", "acpg");
+  const { res, status, body } = fakeRes();
+  await handleUpload(fakeUploadReq("%PDF-1.4 stub", "/uploads?name=report.pdf"), res, { uploadsDir, maxBytes: 1000 });
+  assert.equal(status(), 200);
+  const { uri } = JSON.parse(body());
+  assert.doesNotMatch(uri, / /);
+  assert.match(uri, /Application%20Support/);
+  // The URI must still name the file that was actually written.
+  assert.equal(fs.readFileSync(fileURLToPath(uri), "utf8"), "%PDF-1.4 stub");
 });
 
 test("two uploads of the same filename don't collide on disk", async () => {
@@ -201,7 +221,7 @@ test("POST /uploads round-trips a real file under the gateway's ledgerDir", asyn
     assert.equal(r.status, 200);
     const j = await r.json();
     assert.equal(j.name, "notes.md");
-    const onDisk = j.uri.slice("file://".length);
+    const onDisk = fileURLToPath(j.uri);
     assert.equal(fs.readFileSync(onDisk, "utf8"), "# hello from a real request");
     assert.ok(onDisk.startsWith(path.join(process.env.ACPG_LEDGER_DIR ?? "", "uploads")));
   } finally {
