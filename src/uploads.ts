@@ -12,6 +12,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const MAX_NAME_LEN = 200;
 
@@ -41,11 +42,12 @@ export function safeUploadBasename(raw: string): string | null {
 }
 
 // The sanitized basename above still allows spaces/unicode/parens — kept for
-// the human-readable chip label (the `name` field in the response). Those
-// characters would corrupt an unencoded file:// URI: claude-agent-acp renders
-// a resource_link as a markdown link `[@name](uri)`, so a raw space in the
-// path breaks the link target. Restrict *only* the on-disk filename to an
-// ASCII-safe charset so the URI is always valid with no percent-encoding.
+// the human-readable chip label (the `name` field in the response). Restrict
+// *only* the on-disk filename to an ASCII-safe charset, so what lands in the
+// uploads dir stays predictable for an operator clearing it out by hand (there
+// is no reaper — see the header). URI correctness is not this function's job:
+// the directory half of the path is operator-supplied and can contain anything,
+// so encoding is handled wholesale by pathToFileURL at the response site.
 function diskSafeName(name: string): string {
   return name.replace(/[^A-Za-z0-9._-]/g, "_");
 }
@@ -180,7 +182,12 @@ export async function handleUpload(req: IncomingMessage, res: ServerResponse, op
       if (size === 0) { reject(400, "empty file\n"); return; }
       answered = true;
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ name: displayName, uri: "file://" + dest }));
+      // pathToFileURL, not "file://" + dest: the uploads dir is operator-supplied
+      // (ACPG_LEDGER_DIR) and routinely contains spaces — the macOS default is
+      // "~/Library/Application Support/acp-gateway". Concatenating leaves those
+      // raw, and claude-agent-acp renders a resource_link as a markdown link
+      // `[@name](uri)`, where a raw space truncates the target.
+      res.end(JSON.stringify({ name: displayName, uri: pathToFileURL(dest).href }));
       resolve();
     });
     req.pipe(ws);
