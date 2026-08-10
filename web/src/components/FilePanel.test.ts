@@ -140,6 +140,36 @@ describe("FilePanel", () => {
     expect(container.querySelector("pre.wf-text")?.textContent).toBe("line one\nline two\n");
   });
 
+  test("Download fetches the bytes — it never links the page at an attachment", async () => {
+    // A plain <a href download> is a top-level navigation, and the native
+    // client's WKWebView answers an attachment response by killing the frame
+    // (WebKitErrorDomain 102) and replacing the console with "Can't reach
+    // gateway". So there must be no anchor here, and the click must go through
+    // the blob helper instead.
+    const downloadFile = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("../lib/download.ts", () => ({ downloadFile }));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/docs/report.pdf", path: "docs/report.pdf", mode: "file" });
+    });
+    await act(async () => { await flush(); });
+
+    expect(container.querySelector("a[download]")).toBeNull();
+    expect(container.querySelector("a[href*='/workspace/raw']")).toBeNull();
+
+    const dl = container.querySelector<HTMLButtonElement>("button.wf-dl");
+    expect(dl).not.toBeNull();
+    await act(async () => { dl?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(downloadFile).toHaveBeenCalledWith(
+      "/workspace/raw?cwd=/repo&path=/repo/docs/report.pdf",
+      "report.pdf",
+    );
+    vi.doUnmock("../lib/download.ts");
+  });
+
   test("an image preview renders as a picture rather than as decoded bytes", async () => {
     getFilePreview.mockResolvedValue({
       path: "docs/shot.png", abs: "/repo/docs/shot.png", kind: "image",
@@ -157,6 +187,15 @@ describe("FilePanel", () => {
     const img = container.querySelector<HTMLImageElement>(".wf-image img");
     expect(img?.getAttribute("src")).toBe("/workspace/raw?cwd=/repo&path=/repo/docs/shot.png");
     expect(getFileDiff).not.toHaveBeenCalled();
+
+    // Full size opens in-app. target="_blank" has nowhere to go in the native
+    // client's webview — dropped silently at best, navigating away at worst.
+    expect(container.querySelector('a[target="_blank"]')).toBeNull();
+    expect(document.querySelector(".wf-lightbox")).toBeNull();
+    const zoom = container.querySelector<HTMLButtonElement>(".wf-image button");
+    await act(async () => { zoom?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(container.querySelector(".wf-lightbox img")?.getAttribute("src"))
+      .toBe("/workspace/raw?cwd=/repo&path=/repo/docs/shot.png");
   });
 
   test("the Session tab lists files the conversation touched", async () => {
