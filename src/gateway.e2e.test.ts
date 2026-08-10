@@ -1171,6 +1171,48 @@ test("/history/search answers with the search envelope", async () => {
   }
 });
 
+// A rename has to land in TWO places. The sidecar is what the conversation lists
+// derive titles from; the recents table is what /prefs hands every device on load,
+// and its rows are snapshots of the title at the time each row was written. The
+// renaming client rewrites only the row it holds, so leaving the rest to it is
+// what made a renamed conversation come back wearing its old name.
+test("/history/rename writes the sidecar AND retitles every recency row for the conversation", async () => {
+  const { base, authed, close } = await startHttpServer();
+  // Must be inside FS_ROOT (the home dir here) for the route to accept it.
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), ".acpg-rename-test-")));
+  const sid = "11111111-2222-3333-4444-555555555555";
+  const enc = encodeURIComponent;
+  const authedPost = (p: string) => fetch(base + p, {
+    method: "POST",
+    headers: { authorization: authHeader(process.env.ACPG_AUTH_USER ?? "", process.env.ACPG_AUTH_TOKEN ?? "") },
+  });
+  try {
+    // One conversation, two recency rows — the shapes a real cache holds: a second
+    // agent sharing the provider, and another spelling of the same folder.
+    for (const [agent, folder] of [["claude", cwd], ["claude-infra", "/private" + cwd]] as const) {
+      const seeded = await authedPost(
+        `/prefs/recent-session?agent=${agent}&cwd=${enc(folder)}&session=${sid}&title=${enc("old name")}&at=2026-07-20T01:00:00.000Z`);
+      assert.equal(seeded.status, 200);
+    }
+
+    const renamed = await authedPost(`/history/rename?agent=claude&cwd=${enc(cwd)}&session=${sid}&title=${enc("My renamed chat")}`);
+    assert.equal(renamed.status, 200);
+
+    const sidecar = path.join(process.env.CLAUDE_CONFIG_DIR ?? "", "projects",
+      cwd.replace(/[^a-zA-Z0-9]/g, "-"), ".acpb-titles.json");
+    assert.deepEqual(JSON.parse(fs.readFileSync(sidecar, "utf8")), { [sid]: "My renamed chat" },
+      "the listing's source of truth");
+
+    const prefs = await (await authed("/prefs")).json() as { recentSessions: Array<{ sessionId: string; title: string }> };
+    assert.deepEqual(prefs.recentSessions.filter((r) => r.sessionId === sid).map((r) => r.title),
+      ["My renamed chat", "My renamed chat"],
+      "no row is left rehydrating the old name onto the next device that loads");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+    await close();
+  }
+});
+
 // The three tests below lock in the security properties the route is solely
 // responsible for (search-core.ts and searchTranscripts have no way to enforce
 // them — see the route's own comments in gateway.ts). Without these, a future

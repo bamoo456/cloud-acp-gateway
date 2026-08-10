@@ -204,6 +204,18 @@ export class Db {
     return this.recentSessions();
   }
 
+  // Apply a rename to a conversation's recency rows. Keyed on the session id
+  // alone for the reasons spelled out above deleteRecentSession — the cwd and
+  // agent columns record where a conversation was SEEN from, so the same
+  // conversation legitimately holds several rows and a rename belongs to all of
+  // them. A missed row is what makes a renamed conversation show its old name
+  // again after /prefs rehydrates the list. Idempotent; inserts nothing (a
+  // conversation with no recency row has no snapshot to correct).
+  renameRecentSession(sessionId: string, title: string): RecentSession[] {
+    this.db.prepare("UPDATE recent_sessions SET title = ? WHERE session_id = ?").run(title, sessionId);
+    return this.recentSessions();
+  }
+
   private trimRecentSessions(): void {
     this.db.prepare(`DELETE FROM recent_sessions WHERE rowid NOT IN (
       SELECT rowid FROM recent_sessions ORDER BY last_active_at DESC LIMIT ${MAX_RECENT_SESSIONS}

@@ -166,8 +166,29 @@ describe("Sidebar recent conversations", () => {
     // The gateway title wins for the current-folder session…
     expect(recent!.textContent).toContain("Fix session scoped busy state");
     expect(recent!.textContent).not.toContain("<local-command-caveat>");
-    // …but a recent entry from another folder keeps its own cached title.
+    // …and an entry no fetched list covers (another folder, discovery empty here)
+    // falls back to its cached title.
     expect(recent!.textContent).toContain("Cross folder work");
+  });
+
+  test("a renamed conversation in another folder shows the gateway's title, not the cached one", async () => {
+    // The rename was made from another device/folder, so this browser's recents row
+    // still holds the title from when it last touched the conversation. Discovery
+    // spans folders and carries renames, so it — not the snapshot — is the answer.
+    getDiscoveredHistory.mockResolvedValue([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "My renamed chat", updatedAt: "2026-06-10T03:59:00.000Z", source: "claude-cli" },
+    ]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "the first prompt it ever saw", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+    ]);
+    await renderSidebar();
+
+    const recent = container.querySelector(".recent-section");
+    expect(recent).not.toBeNull();
+    // Still ONE row — the recents row, retitled, not a second discovered copy.
+    const row = recent!.querySelector(".sess-item");
+    expect(row!.textContent).toContain("My renamed chat");
+    expect(recent!.textContent).not.toContain("the first prompt it ever saw");
   });
 
   test("folds discovered Claude CLI sessions into Recent (no separate section) and opens them with their recovered cwd", async () => {
