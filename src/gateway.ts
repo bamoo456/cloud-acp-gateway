@@ -355,13 +355,29 @@ async function deleteClaudeSession(sessionId: string, opts?: DeleteHistoryOpts):
   return true;
 }
 
-// Locate the project dir for a cwd: the computed name when it exists, else the
-// dir whose newest transcript records this cwd (realpath-compared, since all
-// transcripts in one project dir share the same cwd). Covers listing sessions
-// for a cwd whose encoded name the CLI truncated.
+// Session transcripts only — `agent-` files are sidechains, and a project dir can
+// also hold gateway sidecars (.acpb-titles.json), which say nothing about where
+// the conversations are.
+async function hasClaudeTranscripts(dir: string): Promise<boolean> {
+  try {
+    return (await fs.promises.readdir(dir)).some((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"));
+  } catch { return false; }
+}
+
+// Locate the project dir for a cwd: the computed name when it holds this cwd's
+// transcripts, else the dir whose newest transcript records this cwd (realpath-
+// compared, since all transcripts in one project dir share the same cwd). Covers
+// listing sessions for a cwd whose encoded name the CLI truncated.
+//
+// The computed name has to be judged on its CONTENTS, not merely on existing: a
+// rename writes its sidecar to that path and creates the directory, so an
+// exists() test lets an empty gateway-made folder shadow the CLI's real one and
+// report a folder full of conversations as empty. Callers treat null as "use the
+// computed name anyway", so a folder with no transcripts at all still behaves
+// exactly as before.
 export async function findClaudeProjectDir(cwd: string, projectsRoot = claudeProjectsRoot()): Promise<string | null> {
   const primary = path.join(projectsRoot, encodeProjectPath(cwd));
-  if (fs.existsSync(primary)) return primary;
+  if (await hasClaudeTranscripts(primary)) return primary;
   const want = await realpathOr(cwd);
   let dirs: fs.Dirent[];
   try { dirs = await fs.promises.readdir(projectsRoot, { withFileTypes: true }); } catch { return null; }
@@ -439,14 +455,28 @@ async function readTitlesIn(dir: string): Promise<Record<string, string>> {
     return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, string>) : {};
   } catch { return {}; }
 }
-const readTitles = (cwd: string) => readTitlesIn(projectDirFor(cwd));
-async function writeTitle(cwd: string, sessionId: string, title: string): Promise<void> {
+// `projectsRoot` is the caller's store root when it has one (the discovery walk
+// carries it, and tests inject a temp root); without it the sidecar is addressed
+// under the real CLAUDE_DIR, which is the same path in production. Either way the
+// encoding matches writeTitle's, so every listing sees the file a rename wrote.
+const readTitles = (cwd: string, projectsRoot?: string) =>
+  readTitlesIn(projectsRoot ? path.join(projectsRoot, encodeProjectPath(cwd)) : projectDirFor(cwd));
+// Persists the custom title and returns the one now in effect — "" when the
+// rename cleared it (the derived title takes over again). Callers need that
+// value: the sidecar is not the only place a title is cached.
+async function writeTitle(cwd: string, sessionId: string, title: string): Promise<string> {
   const t = await readTitles(cwd);
   const trimmed = title.trim().slice(0, 120);
   if (trimmed) t[sessionId] = trimmed; else delete t[sessionId]; // empty title reverts to the derived one
   await fs.promises.mkdir(projectDirFor(cwd), { recursive: true });
   await fs.promises.writeFile(titlesFile(cwd), JSON.stringify(t));
+  return trimmed;
 }
+// How deep /history/rename looks when re-deriving the title a CLEARED rename
+// falls back to. The listing's own ceiling: past it a conversation has no recency
+// row worth correcting either, since the recents table caps at 50 across every
+// folder.
+const RENAME_DERIVE_LIMIT = 200;
 // Drop a deleted session's custom title. Takes the sidecar's directory rather
 // than a cwd: deletion resolves a session by id, and for claude the transcript's
 // own directory is the authoritative one — projectDirFor(cwd) can point somewhere
@@ -943,6 +973,14 @@ export async function discoverClaudeHistory(opts?: { projectsRoot?: string; fsRo
       source: "claude-cli",
     });
   }
+  // Renames override the derived title here exactly as they do in
+  // listClaudeHistory — one sidecar read per surviving folder, after the limit
+  // cut. Leaving this out was a real bug, not a missing nicety: discovery feeds
+  // the sidebar's cross-folder Recent list, so a conversation the user had
+  // renamed came back wearing the first-prompt title it was renamed away from.
+  const customByCwd = new Map<string, Record<string, string>>();
+  for (const cwd of new Set(out.map((s) => s.cwd))) customByCwd.set(cwd, await readTitles(cwd, projectsRoot));
+  for (const s of out) s.title = customByCwd.get(s.cwd)?.[s.sessionId] ?? s.title;
   return out;
 }
 
@@ -965,7 +1003,7 @@ async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: stri
     }),
   )).filter((m): m is NonNullable<typeof m> => !!m);
   const top = metas.sort(byClaudeRecency).slice(0, limit);
-  const custom = await readTitles(cwd); // custom (renamed) titles override the derived one
+  const custom = await readTitles(cwd, projectsRoot); // custom (renamed) titles override the derived one
   return top.map((m) => ({
     sessionId: m.sessionId,
     title: custom[m.sessionId] ?? m.title,
@@ -4039,7 +4077,23 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     const session = q.get("session");
     if (!cwd || !session) { res.writeHead(400); res.end(); return; }
     writeTitle(cwd, session, q.get("title") ?? "")
-      .then(() => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true })); })
+      // The sidecar is only half the story: every device also reads titles from
+      // the recents table, whose rows are snapshots taken when the conversation
+      // was last touched. The renaming client updates its own row by POSTing
+      // /prefs/recent-session, but a conversation can hold several rows (a second
+      // agent sharing the provider, a raw-vs-realpath'd spelling of the folder),
+      // and any row missed here rehydrates the OLD name on the next /prefs load.
+      //
+      // A CLEARED rename needs the same treatment, or the rows keep serving a
+      // custom title the user just deleted — so re-derive what the listing now
+      // calls this conversation and store that instead. Only the cleared path pays
+      // for the listing, and a rename is a rare, explicit action.
+      .then(async (title) => {
+        const effective = title || (await listAgentHistory(prof?.cmd ?? "", cwd, RENAME_DERIVE_LIMIT))
+          .find((s) => s.sessionId === session)?.title;
+        if (effective) db().renameRecentSession(session, effective);
+        res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true }));
+      })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
   }

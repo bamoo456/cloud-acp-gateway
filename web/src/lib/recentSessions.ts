@@ -66,6 +66,20 @@ export function removeRecentSession(sessionId: string): RecentSession[] {
   return cache;
 }
 
+// Apply a rename to every cached row for a conversation. Matched on the session
+// id alone, exactly like removeRecentSession and for the same reason: one
+// conversation can sit in the cache under several spellings of its folder and
+// under several agent names, and touchRecentSession only ever rewrites the one
+// row it is given. The rows this catches are the ones that would otherwise keep
+// rendering the old name in Recent. No POST — the gateway rewrites its own rows
+// when it persists the rename.
+export function renameRecentSession(sessionId: string, title: string): RecentSession[] {
+  const t = title.trim();
+  if (!t) return cache; // cleared rename: the derived title is the gateway's to supply
+  cache = cache.map((it) => (it.sessionId === sessionId ? { ...it, title: t } : it));
+  return cache;
+}
+
 export function touchRecentSession(session: RecentSession): RecentSession[] {
   const title = session.title.trim() || "Untitled";
   const entry: RecentSession = { ...session, title };

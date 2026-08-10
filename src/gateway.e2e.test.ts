@@ -1171,6 +1171,64 @@ test("/history/search answers with the search envelope", async () => {
   }
 });
 
+// A rename has to land in TWO places. The sidecar is what the conversation lists
+// derive titles from; the recents table is what /prefs hands every device on load,
+// and its rows are snapshots of the title at the time each row was written. The
+// renaming client rewrites only the row it holds, so leaving the rest to it is
+// what made a renamed conversation come back wearing its old name.
+test("/history/rename writes the sidecar AND retitles every recency row for the conversation", async () => {
+  const { base, authed, close } = await startHttpServer();
+  // Must be inside FS_ROOT (the home dir here) for the route to accept it.
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.homedir(), ".acpg-rename-test-")));
+  const sid = "11111111-2222-3333-4444-555555555555";
+  const enc = encodeURIComponent;
+  const authedPost = (p: string) => fetch(base + p, {
+    method: "POST",
+    headers: { authorization: authHeader(process.env.ACPG_AUTH_USER ?? "", process.env.ACPG_AUTH_TOKEN ?? "") },
+  });
+  const projectDir = path.join(process.env.CLAUDE_CONFIG_DIR ?? "", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+  const titles = () => JSON.parse(fs.readFileSync(path.join(projectDir, ".acpb-titles.json"), "utf8")) as Record<string, string>;
+  const recentTitles = async () => {
+    const prefs = await (await authed("/prefs")).json() as { recentSessions: Array<{ sessionId: string; title: string }> };
+    return prefs.recentSessions.filter((r) => r.sessionId === sid).map((r) => r.title);
+  };
+  try {
+    // A real transcript, so clearing the rename has a derived title to fall back to.
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(path.join(projectDir, sid + ".jsonl"), JSON.stringify({
+      type: "user", cwd, sessionId: sid, timestamp: "2026-07-20T01:00:00.000Z", isSidechain: false,
+      message: { role: "user", content: "the first prompt it ever saw" },
+    }) + "\n");
+    // One conversation, two recency rows — the shapes a real cache holds: a second
+    // agent sharing the provider, and another spelling of the same folder.
+    for (const [agent, folder] of [["claude", cwd], ["claude-infra", "/private" + cwd]] as const) {
+      const seeded = await authedPost(
+        `/prefs/recent-session?agent=${agent}&cwd=${enc(folder)}&session=${sid}&title=${enc("old name")}&at=2026-07-20T01:00:00.000Z`);
+      assert.equal(seeded.status, 200);
+    }
+
+    const renamed = await authedPost(`/history/rename?agent=claude&cwd=${enc(cwd)}&session=${sid}&title=${enc("My renamed chat")}`);
+    assert.equal(renamed.status, 200);
+
+    assert.deepEqual(titles(), { [sid]: "My renamed chat" }, "the listing's source of truth");
+    assert.deepEqual(await recentTitles(), ["My renamed chat", "My renamed chat"],
+      "no row is left rehydrating the old name onto the next device that loads");
+
+    // Clearing the rename hands the conversation back to its derived title — and
+    // the rows have to follow, or they keep serving a name the user just deleted.
+    const cleared = await authedPost(`/history/rename?agent=claude&cwd=${enc(cwd)}&session=${sid}&title=`);
+    assert.equal(cleared.status, 200);
+
+    assert.deepEqual(titles(), {}, "the custom title is gone from the sidecar");
+    assert.deepEqual(await recentTitles(), ["the first prompt it ever saw", "the first prompt it ever saw"],
+      "and the rows carry what the listing now derives, not the cleared name");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    await close();
+  }
+});
+
 // The three tests below lock in the security properties the route is solely
 // responsible for (search-core.ts and searchTranscripts have no way to enforce
 // them — see the route's own comments in gateway.ts). Without these, a future
