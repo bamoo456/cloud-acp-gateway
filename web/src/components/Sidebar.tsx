@@ -184,13 +184,17 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const mark = (agentName: string) => (multiAgent ? <AgentMark agent={agentByName.get(agentName)} /> : null);
 
   const allItems = items || [];
-  // Conversations only ever lists the current folder, so the one place a session
-  // can show up in both lists is the current folder. Recent caches its own title
-  // in localStorage (derived client-side), which drifts from the gateway's title
-  // (renames, agent thread names, JSONL-derived). Mirror the gateway title here so
-  // the same session never wears two different labels across the two lists. Keyed
-  // by agent + id so a cross-agent id collision can't borrow the wrong title.
-  const historyTitleById = new Map(allItems.map((it) => [it.agentName + "\n" + it.sessionId, it.title] as const));
+  // A Recent row carries the title that was current when the conversation was last
+  // touched — a snapshot, which drifts from the gateway's title (renames, agent
+  // thread names, JSONL-derived) and is the stalest thing on this panel. Both
+  // freshly-fetched lists are authoritative, so mirror them here: discovery spans
+  // every folder (and now carries renames too), the current folder's own list is
+  // laid over it as the more specific answer. Keyed by agent + id — NOT by folder,
+  // since a recents row can spell the same cwd differently than the gateway does —
+  // so a cross-agent id collision still can't borrow the wrong title.
+  const historyTitleById = new Map<string, string | null>();
+  for (const it of discovered || []) historyTitleById.set(it.agentName + "\n" + it.sessionId, it.title);
+  for (const it of allItems) historyTitleById.set(it.agentName + "\n" + it.sessionId, it.title);
   // Running tasks (polled from the gateway across agents/devices) get their own
   // pinned section at the top of Recent. `active` are live tasks in stable start
   // order — the /running array order is the gateway task-map insertion order (≈ when
@@ -277,12 +281,11 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   };
   const renderRecentItem = (it: RecentSession) => {
     const active = s.cwd === it.cwd && s.agentName === it.agentName && !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
-    // Same folder + same agent + present in the freshly-fetched history → defer to
-    // the gateway title (matching renderItem's fallback exactly, including null).
+    // Present in a freshly-fetched list → defer to the gateway title (matching
+    // renderItem's fallback exactly, including null); otherwise the cached snapshot.
     const histKey = it.agentName + "\n" + it.sessionId;
-    const title = it.cwd === s.cwd && historyTitleById.has(histKey)
-      ? historyTitleById.get(histKey) || it.sessionId.slice(0, 8)
-      : it.title || it.sessionId.slice(0, 8);
+    const title = (historyTitleById.has(histKey) ? historyTitleById.get(histKey) : it.title)
+      || it.sessionId.slice(0, 8);
     return (
       <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"recent:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
         onClick={() => { void s.openRecentSession(it); onClose(); }}>

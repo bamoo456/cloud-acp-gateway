@@ -3,7 +3,7 @@ import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
 import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, type RunningTask, type InboxItem } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
-import { readRecentSessions, touchRecentSession, removeRecentSession, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
+import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
 import { isLockEnabled, hydrateLock } from "../lib/lock.ts";
 import {
@@ -999,6 +999,11 @@ export const useStore = create<State>((set, get) => {
       const t = title.trim();
       patch(sid, (s) => ({ ...s, title: t || s.title }));
       touchSessionActivity(sid, t || get().sessions[sid]?.title);
+      // touchSessionActivity rewrites ONE recents row (this agent + this session's
+      // folder). The same conversation can be cached under other spellings of that
+      // folder or under a second agent sharing the provider, and those rows are
+      // what put the old name back in the Recent list — so rename them all.
+      set({ recentSessions: renameRecentCache(sid, t) });
       // persist, then nudge the sidebar to re-pull its list so the entry updates
       apiRename(get().agentName, get().sessions[sid]?.cwd || get().cwd, sid, t)
         .then(() => set((st) => ({ historyNonce: st.historyNonce + 1 })))

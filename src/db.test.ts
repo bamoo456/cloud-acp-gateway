@@ -106,6 +106,32 @@ test("deleting a conversation drops its recency rows under every agent and cwd",
   db.close();
 });
 
+test("renaming a conversation retitles its recency rows under every agent and cwd", () => {
+  const db = new Db(":memory:");
+  const mk = (agentName: string, cwd: string, id: string) => ({
+    agentName, cwd, sessionId: id, title: "old name", lastActiveAt: "2026-07-20T01:00:00.000Z",
+  });
+  // Same several-rows-per-conversation shape as the deletion case above: the
+  // renaming client only ever POSTs the one row it holds, and a row left with the
+  // old title is what /prefs rehydrates into the sidebar on the next load.
+  db.touchRecentSession(mk("claude", "/tmp/repo", "s1"));
+  db.touchRecentSession(mk("claude", "/private/tmp/repo", "s1"));
+  db.touchRecentSession(mk("claude-infra", "/tmp/repo", "s1"));
+  db.touchRecentSession(mk("claude", "/tmp/repo", "s2")); // a different conversation
+
+  const after = db.renameRecentSession("s1", "My renamed chat");
+  assert.deepEqual(
+    after.filter((r) => r.sessionId === "s1").map((r) => r.title),
+    ["My renamed chat", "My renamed chat", "My renamed chat"],
+    "every row for the id carries the new name",
+  );
+  assert.deepEqual(after.filter((r) => r.sessionId === "s2").map((r) => r.title), ["old name"],
+    "other conversations are untouched");
+  assert.deepEqual(db.renameRecentSession("s-unknown", "nobody"), after,
+    "a conversation with no recency row is a no-op, not an insert");
+  db.close();
+});
+
 test("recent folders upsert newest-first and cap at 20", () => {
   const db = new Db(":memory:");
   db.touchRecentFolder("/a", "2026-06-10T01:00:00.000Z");

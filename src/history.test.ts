@@ -590,6 +590,59 @@ test("turn traffic the gateway pumped outranks a stale transcript tail", async (
   store.close();
 });
 
+// A rename is stored in a per-folder sidecar, and discovery — the walk behind the
+// sidebar's cross-folder Recent list — used to ignore it entirely: the renamed
+// conversation listed under the first-prompt title it had been renamed away from,
+// while the SAME conversation showed the new name in its own folder's list.
+test("discovery applies a renamed conversation's custom title, like the per-folder listing does", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(fsRoot, "repo-")));
+  const at = "2026-07-24T16:00:00.000Z";
+  writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), "s-named",
+    [turn(cwd, "s-named", "user", "derived from the first prompt", at)], Date.parse(at));
+  writeClaudeProjectTranscript(projectsRoot, encodeProject(cwd), "s-plain",
+    [turn(cwd, "s-plain", "user", "never renamed", at)], Date.parse(at));
+  // The sidecar rename writes: keyed by session id, next to that folder's transcripts.
+  fs.writeFileSync(path.join(projectsRoot, encodeProject(cwd), ".acpb-titles.json"),
+    JSON.stringify({ "s-named": "My renamed chat" }));
+
+  const discovered = await discoverClaudeHistory({ projectsRoot, fsRoot, limit: 10, store: memStore() });
+  assert.deepEqual(
+    discovered.map((s) => [s.sessionId, s.title]).sort(),
+    [["s-named", "My renamed chat"], ["s-plain", "never renamed"]],
+    "the custom title overrides the derived one; untouched conversations keep theirs",
+  );
+
+  const listed = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot, store: memStore() });
+  assert.deepEqual(
+    listed.map((s) => [s.sessionId, s.title]).sort(),
+    discovered.map((s) => [s.sessionId, s.title]).sort(),
+    "and the two lists agree — the same conversation never wears two names",
+  );
+});
+
+// Renaming writes a sidecar under the derivable project name, creating that
+// directory — which is NOT where the CLI put the transcripts when it truncated
+// the encoded name (or when the cwd is symlinked). Resolving the project dir by
+// mere existence then handed the listing that empty gateway-made folder, so one
+// rename made every conversation in the folder disappear.
+test("a rename's sidecar folder never shadows the project dir the CLI actually used", async () => {
+  const projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-claude-projects-"));
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpb-repo-")));
+  const at = "2026-07-24T16:00:00.000Z";
+  writeClaudeProjectTranscript(projectsRoot, "-truncated-xyz789", "s-named",
+    [turn(cwd, "s-named", "user", "derived from the first prompt", at)], Date.parse(at));
+  // What a rename leaves behind: the derivable name, holding only the sidecar.
+  fs.mkdirSync(path.join(projectsRoot, encodeProject(cwd)), { recursive: true });
+  fs.writeFileSync(path.join(projectsRoot, encodeProject(cwd), ".acpb-titles.json"),
+    JSON.stringify({ "s-named": "My renamed chat" }));
+
+  const listed = await listAgentHistory(CLAUDE_CMD, cwd, 10, { projectsRoot, store: memStore() });
+  assert.deepEqual(listed.map((s) => [s.sessionId, s.title]), [["s-named", "My renamed chat"]],
+    "the transcript is still found, wearing its new name");
+});
+
 // --------------------------------------------------------------- deletion ----
 // Deleting a conversation removes it from the agent's OWN store, so each
 // provider needs its own primitive. All three are exercised against temp stores
