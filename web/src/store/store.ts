@@ -998,12 +998,17 @@ export const useStore = create<State>((set, get) => {
       if (!sid || sid.startsWith("pending-")) return;
       const t = title.trim();
       patch(sid, (s) => ({ ...s, title: t || s.title }));
-      touchSessionActivity(sid, t || get().sessions[sid]?.title);
-      // touchSessionActivity rewrites ONE recents row (this agent + this session's
-      // folder). The same conversation can be cached under other spellings of that
-      // folder or under a second agent sharing the provider, and those rows are
-      // what put the old name back in the Recent list — so rename them all.
-      set({ recentSessions: renameRecentCache(sid, t) });
+      // Only a real rename touches recents. touchSessionActivity rewrites ONE row
+      // (this agent + this session's folder), so the same conversation cached under
+      // another spelling of that folder — or under a second agent sharing the
+      // provider — is renamed here too; those are the rows that would otherwise put
+      // the old name back in the Recent list. CLEARING a rename deliberately does
+      // neither: the title this session falls back to is the gateway's to derive,
+      // and posting the name being cleared would just persist it again.
+      if (t) {
+        touchSessionActivity(sid, t);
+        set({ recentSessions: renameRecentCache(sid, t) });
+      }
       // persist, then nudge the sidebar to re-pull its list so the entry updates
       apiRename(get().agentName, get().sessions[sid]?.cwd || get().cwd, sid, t)
         .then(() => set((st) => ({ historyNonce: st.historyNonce + 1 })))

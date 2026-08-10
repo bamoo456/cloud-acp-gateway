@@ -477,6 +477,11 @@ async function writeTitle(cwd: string, sessionId: string, title: string): Promis
   await fs.promises.writeFile(titlesFile(cwd), JSON.stringify(t));
   return trimmed;
 }
+// How deep /history/rename looks when re-deriving the title a CLEARED rename
+// falls back to. The listing's own ceiling: past it a conversation has no recency
+// row worth correcting either, since the recents table caps at 50 across every
+// folder.
+const RENAME_DERIVE_LIMIT = 200;
 // Drop a deleted session's custom title. Takes the sidecar's directory rather
 // than a cwd: deletion resolves a session by id, and for claude the transcript's
 // own directory is the authoritative one — projectDirFor(cwd) can point somewhere
@@ -4088,16 +4093,21 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     const session = q.get("session");
     if (!cwd || !session) { res.writeHead(400); res.end(); return; }
     writeTitle(cwd, session, q.get("title") ?? "")
-      .then((title) => {
-        // The sidecar is only half the story: every device also reads titles from
-        // the recents table, whose rows are snapshots taken when the conversation
-        // was last touched. The renaming client updates its own row by POSTing
-        // /prefs/recent-session, but a conversation can hold several rows (a second
-        // agent sharing the provider, a raw-vs-realpath'd spelling of the folder),
-        // and any row missed here rehydrates the OLD name on the next /prefs load.
-        // Clearing a rename is not applied: nothing here knows the derived title
-        // that takes over, and the client's list refresh re-mirrors it anyway.
-        if (title) db().renameRecentSession(session, title);
+      // The sidecar is only half the story: every device also reads titles from
+      // the recents table, whose rows are snapshots taken when the conversation
+      // was last touched. The renaming client updates its own row by POSTing
+      // /prefs/recent-session, but a conversation can hold several rows (a second
+      // agent sharing the provider, a raw-vs-realpath'd spelling of the folder),
+      // and any row missed here rehydrates the OLD name on the next /prefs load.
+      //
+      // A CLEARED rename needs the same treatment, or the rows keep serving a
+      // custom title the user just deleted — so re-derive what the listing now
+      // calls this conversation and store that instead. Only the cleared path pays
+      // for the listing, and a rename is a rare, explicit action.
+      .then(async (title) => {
+        const effective = title || (await listAgentHistory(prof?.cmd ?? "", cwd, RENAME_DERIVE_LIMIT))
+          .find((s) => s.sessionId === session)?.title;
+        if (effective) db().renameRecentSession(session, effective);
         res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true }));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
