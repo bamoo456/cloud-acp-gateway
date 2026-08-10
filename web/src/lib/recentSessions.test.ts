@@ -4,6 +4,7 @@ import {
   readRecentSessions,
   touchRecentSession,
   removeRecentSession,
+  renameRecentSession,
 } from "./recentSessions.ts";
 
 describe("recent session storage", () => {
@@ -74,6 +75,30 @@ describe("recent session storage", () => {
     expect(left.map((it) => it.sessionId)).toEqual(["s2"]);
     expect(readRecentSessions()).toEqual(left);
     expect(removeRecentSession("s1")).toEqual(left);
+  });
+
+  test("renaming a conversation retitles it under every agent and cwd", () => {
+    const mk = (agentName: string, cwd: string, sessionId: string, n: number) => ({
+      agentName, cwd, sessionId, title: "old name",
+      lastActiveAt: `2026-06-10T0${n}:00:00.000Z`,
+    });
+    // Same several-rows-per-conversation shape as the removal case above.
+    // touchRecentSession rewrites exactly one of them, so a rename that stopped
+    // there left the others showing the old name in Recent.
+    touchRecentSession(mk("claude", "/tmp/repo", "s1", 1));
+    touchRecentSession(mk("claude", "/private/tmp/repo", "s1", 2));
+    touchRecentSession(mk("claude-infra", "/tmp/repo", "s1", 3));
+    touchRecentSession(mk("claude", "/tmp/repo", "s2", 4)); // a different conversation
+
+    const after = renameRecentSession("s1", "  My renamed chat  ");
+
+    expect(after.filter((it) => it.sessionId === "s1").map((it) => it.title))
+      .toEqual(["My renamed chat", "My renamed chat", "My renamed chat"]);
+    expect(after.filter((it) => it.sessionId === "s2").map((it) => it.title)).toEqual(["old name"]);
+    expect(readRecentSessions()).toEqual(after);
+    // Clearing a rename hands the title back to the gateway's derived one, so the
+    // cache is left alone rather than blanked.
+    expect(renameRecentSession("s1", "   ")).toEqual(after);
   });
 
   test("hydrating ignores corrupt payloads", () => {
