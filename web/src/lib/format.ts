@@ -2,6 +2,20 @@ export function basename(p: string): string {
   return (p || "").replace(/\/+$/, "").split("/").pop() || p || "/";
 }
 
+// Everything above the directory in a path ("src/lib/api.ts" -> "src/lib"), for
+// the second line of a file row. Empty for a file at the root.
+export function dirname(p: string): string {
+  const i = (p || "").replace(/\/+$/, "").lastIndexOf("/");
+  return i > 0 ? p.slice(0, i) : "";
+}
+
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10 * 1024 ? 1 : 0) + " KB";
+  return (n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + " MB";
+}
+
 // Capitalize an agent name for display (e.g. "codex" -> "Codex").
 export function displayName(name: string): string {
   return name ? name[0].toUpperCase() + name.slice(1) : name;

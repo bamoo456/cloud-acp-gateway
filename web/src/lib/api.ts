@@ -113,6 +113,80 @@ export async function uploadFile(file: File): Promise<{ name: string; uri: strin
   return { name: String(j.name || file.name), uri: String(j.uri) };
 }
 
+// ---- workspace file preview ----
+// The agent writes files on the gateway host; these read them back so the panel
+// can show what it produced instead of only what it said about it. Every path
+// travels as the absolute path the gateway itself reported (ChangedFile.abs),
+// with `cwd` supplying the git context — the gateway re-checks both against
+// ACPG_FS_ROOT, so a client can't widen its own reach by rewriting them.
+export type ChangeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
+export interface ChangedFile {
+  path: string;   // repo-root-relative, for display
+  abs: string;    // how every other call addresses this file
+  status: ChangeStatus;
+  staged: boolean;
+  oldPath?: string;
+  additions?: number;
+  deletions?: number;
+  binary?: boolean;
+}
+// `repo: null` means the folder isn't a git checkout (or git isn't installed) —
+// `reason` distinguishes those so the panel can say which.
+export interface ChangesResult { repo: string | null; files: ChangedFile[]; truncated: boolean; reason?: string }
+export interface FileDiffResult { path: string; status: ChangeStatus; diff: string; binary: boolean; truncated: boolean }
+export interface FilePreviewResult {
+  path: string; abs: string;
+  kind: "text" | "image" | "binary";
+  size: number; modifiedAt: string;
+  mimeType?: string; text?: string; truncated?: boolean;
+}
+
+export async function getWorkspaceChanges(cwd: string): Promise<ChangesResult> {
+  const url = base() + "/workspace/changes?cwd=" + encodeURIComponent(cwd);
+  const r = await readJson(await fetch(url), "File changes aren't available on this gateway.");
+  return {
+    repo: typeof r?.repo === "string" ? r.repo : null,
+    files: Array.isArray(r?.files) ? r.files : [],
+    truncated: !!r?.truncated,
+    reason: typeof r?.reason === "string" ? r.reason : undefined,
+  };
+}
+
+export async function getFileDiff(cwd: string, filePath: string): Promise<FileDiffResult> {
+  const url = base() + "/workspace/diff?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+  const r = await readJson(await fetch(url), "Couldn't read this file's diff.");
+  return {
+    path: String(r?.path ?? filePath),
+    status: (r?.status ?? "modified") as ChangeStatus,
+    diff: typeof r?.diff === "string" ? r.diff : "",
+    binary: !!r?.binary,
+    truncated: !!r?.truncated,
+  };
+}
+
+export async function getFilePreview(cwd: string, filePath: string): Promise<FilePreviewResult> {
+  const url = base() + "/workspace/file?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+  const r = await readJson(await fetch(url), "Couldn't open this file.");
+  return {
+    path: String(r?.path ?? filePath),
+    abs: String(r?.abs ?? filePath),
+    kind: r?.kind === "image" || r?.kind === "binary" ? r.kind : "text",
+    size: typeof r?.size === "number" ? r.size : 0,
+    modifiedAt: String(r?.modifiedAt ?? ""),
+    mimeType: typeof r?.mimeType === "string" ? r.mimeType : undefined,
+    text: typeof r?.text === "string" ? r.text : undefined,
+    truncated: !!r?.truncated,
+  };
+}
+
+// The <img> source for an image preview, and the href behind "Download" for
+// everything else. A URL rather than a fetch: the browser sends the console's
+// Basic credentials with a subresource load on the same origin, so an <img>
+// works without pulling megabytes of base64 through JSON first.
+export function rawFileUrl(cwd: string, filePath: string): string {
+  return base() + "/workspace/raw?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+}
+
 // Pinned ("favorite") folders live on the server (shared across devices/IPs),
 // not in this browser's localStorage. Both calls return the updated list.
 export async function getPinnedFolders(): Promise<string[]> {

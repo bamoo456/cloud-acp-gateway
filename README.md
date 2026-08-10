@@ -15,6 +15,8 @@ available on the same host or inside the same container as the gateway.
 - Browser chat UI at `/`, protected by HTTP Basic auth.
 - SSE downstream + POST upstream ACP transport for remote clients.
 - Multiple named agents via `agents.json`, with runtime agent switching.
+- File preview side panel: changed files, per-file diffs, and image previews of
+  what the agent produced.
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
 - History browsing for supported agents: Claude Code, Codex, and opencode.
@@ -129,6 +131,31 @@ used, then the gateway user's home directory.
 
 The gateway skips agent entries whose command does not exist, so one shared
 `agents.json` can include optional agents. It exits if no usable agents remain.
+
+## File Preview
+
+An agent working through the gateway writes real files on the gateway host —
+edited modules, generated reports, screenshots. The **Files** button in the top
+bar opens a side panel for reading them back:
+
+| View | What it shows |
+|---|---|
+| Changes | `git status` for the conversation's folder: modified, added, deleted, and untracked files, with `+`/`−` line counts. |
+| Session | Files this conversation touched, taken from its own tool calls — including ones only read, and ones changed and then reverted. |
+| Diff | A file's unified diff against `HEAD`, staged and unstaged work together. A new file diffs as entirely added. |
+| File | The file itself: text, or an inline image, or a download for anything binary. |
+
+A file path in a tool card is also a link into the panel, and the Changes list
+refreshes itself when a turn finishes.
+
+The panel is read-only — it never stages, writes, or reverts anything. It reads
+through four authenticated endpoints (`/workspace/changes`, `/workspace/diff`,
+`/workspace/file`, `/workspace/raw`), all scoped to `ACPG_FS_ROOT` by the same
+guard the folder picker uses. `/workspace/raw` serves common raster image types
+with their real content type and everything else as an opaque download, so a
+generated `.html` or `.svg` in the checkout can never run as script in the
+console's origin. Listing changed files requires `git` on the gateway host; a
+folder that isn't a checkout simply shows nothing to compare.
 
 ## Deployment
 
