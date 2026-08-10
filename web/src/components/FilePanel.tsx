@@ -6,9 +6,10 @@ import {
   type ChangeStatus, type ChangedFile, type ChangesResult, type FileDiffResult, type FilePreviewResult,
 } from "../lib/api.ts";
 import { touchedFiles } from "../lib/touchedFiles.ts";
+import { downloadFile } from "../lib/download.ts";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
 import { basename, dirname, formatBytes, timeAgo } from "../lib/format.ts";
-import { IconBack, IconX, IconRefresh, IconDownload } from "../lib/icons.tsx";
+import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner } from "../lib/icons.tsx";
 
 // The file preview panel: what the agent actually produced, rather than what it
 // said about it. Two lists and one viewer.
@@ -251,10 +252,7 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
         <button className={mode === "file" ? "active" : ""} onClick={() => setMode("file")}>File</button>
         <span className="sp" />
         {file && <span className="wf-meta">{formatBytes(file.size)}{file.modifiedAt ? " · " + timeAgo(file.modifiedAt) : ""}</span>}
-        {/* A plain link, not a fetch: the browser attaches the console's Basic
-            credentials to a same-origin navigation, so the download works
-            without pulling the bytes through JS first. */}
-        <a className="icon-btn wf-dl" href={raw} download title="Download this file"><IconDownload /></a>
+        <DownloadButton raw={raw} name={basename(target.path)} />
       </div>
       <div className="wf-body">
         {err && <div className="wf-empty">{err}</div>}
@@ -270,20 +268,58 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
   );
 }
 
+// Saves through a blob rather than linking straight at /workspace/raw. An
+// <a href download> is a top-level navigation, and the native client hosts this
+// console in a WKWebView that answers an attachment response by killing the
+// frame (WebKitErrorDomain 102) and showing "Can't reach gateway" — so the
+// Download button used to throw you out of the UI. See lib/download.ts.
+function DownloadButton({ raw, name }: { raw: string; name: string }) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const save = () => {
+    if (busy) return;
+    setBusy(true);
+    setFailed(false);
+    downloadFile(raw, name)
+      .catch(() => setFailed(true))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <button type="button" className="icon-btn wf-dl" onClick={save} disabled={busy}
+      title={failed ? "Couldn't download this file — tap to retry" : "Download this file"}>
+      {busy ? <IconSpinner /> : <IconDownload />}
+    </button>
+  );
+}
+
 function FileContents({ file, raw }: { file: FilePreviewResult; raw: string }) {
+  // Full-size viewing is an overlay inside the app, not target="_blank". The
+  // panel is narrow and a screenshot is the thing you most want to zoom into,
+  // but a new-window request in the native client's WKWebView has nowhere to go
+  // — it is silently dropped when the host app implements no UI delegate, and
+  // navigates away from the console when it does.
+  const [zoom, setZoom] = useState(false);
   if (file.kind === "image") {
     return (
-      <div className="wf-image">
-        {/* Tapping opens it full-size in a new tab — the panel is narrow, and a
-            screenshot is usually the thing you most want to zoom into. */}
-        <a href={raw} target="_blank" rel="noreferrer"><img src={raw} alt={file.path} /></a>
-      </div>
+      <>
+        <div className="wf-image">
+          <button type="button" onClick={() => setZoom(true)} title="View full size">
+            <img src={raw} alt={file.path} />
+          </button>
+        </div>
+        {zoom && (
+          <div className="wf-lightbox" role="dialog" aria-label={file.path} onClick={() => setZoom(false)}>
+            <img src={raw} alt={file.path} />
+            <button type="button" className="icon-btn" title="Close" onClick={() => setZoom(false)}><IconX /></button>
+          </div>
+        )}
+      </>
     );
   }
   if (file.kind === "binary") {
     return (
       <div className="wf-empty">
-        Binary file ({formatBytes(file.size)}). <a href={raw} download>Download it</a> to open it locally.
+        Binary file ({formatBytes(file.size)}). Use the download button above to open it locally.
       </div>
     );
   }
