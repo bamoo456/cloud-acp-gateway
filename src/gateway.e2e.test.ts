@@ -1186,7 +1186,19 @@ test("/history/rename writes the sidecar AND retitles every recency row for the 
     method: "POST",
     headers: { authorization: authHeader(process.env.ACPG_AUTH_USER ?? "", process.env.ACPG_AUTH_TOKEN ?? "") },
   });
+  const projectDir = path.join(process.env.CLAUDE_CONFIG_DIR ?? "", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+  const titles = () => JSON.parse(fs.readFileSync(path.join(projectDir, ".acpb-titles.json"), "utf8")) as Record<string, string>;
+  const recentTitles = async () => {
+    const prefs = await (await authed("/prefs")).json() as { recentSessions: Array<{ sessionId: string; title: string }> };
+    return prefs.recentSessions.filter((r) => r.sessionId === sid).map((r) => r.title);
+  };
   try {
+    // A real transcript, so clearing the rename has a derived title to fall back to.
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(path.join(projectDir, sid + ".jsonl"), JSON.stringify({
+      type: "user", cwd, sessionId: sid, timestamp: "2026-07-20T01:00:00.000Z", isSidechain: false,
+      message: { role: "user", content: "the first prompt it ever saw" },
+    }) + "\n");
     // One conversation, two recency rows — the shapes a real cache holds: a second
     // agent sharing the provider, and another spelling of the same folder.
     for (const [agent, folder] of [["claude", cwd], ["claude-infra", "/private" + cwd]] as const) {
@@ -1198,17 +1210,21 @@ test("/history/rename writes the sidecar AND retitles every recency row for the 
     const renamed = await authedPost(`/history/rename?agent=claude&cwd=${enc(cwd)}&session=${sid}&title=${enc("My renamed chat")}`);
     assert.equal(renamed.status, 200);
 
-    const sidecar = path.join(process.env.CLAUDE_CONFIG_DIR ?? "", "projects",
-      cwd.replace(/[^a-zA-Z0-9]/g, "-"), ".acpb-titles.json");
-    assert.deepEqual(JSON.parse(fs.readFileSync(sidecar, "utf8")), { [sid]: "My renamed chat" },
-      "the listing's source of truth");
-
-    const prefs = await (await authed("/prefs")).json() as { recentSessions: Array<{ sessionId: string; title: string }> };
-    assert.deepEqual(prefs.recentSessions.filter((r) => r.sessionId === sid).map((r) => r.title),
-      ["My renamed chat", "My renamed chat"],
+    assert.deepEqual(titles(), { [sid]: "My renamed chat" }, "the listing's source of truth");
+    assert.deepEqual(await recentTitles(), ["My renamed chat", "My renamed chat"],
       "no row is left rehydrating the old name onto the next device that loads");
+
+    // Clearing the rename hands the conversation back to its derived title — and
+    // the rows have to follow, or they keep serving a name the user just deleted.
+    const cleared = await authedPost(`/history/rename?agent=claude&cwd=${enc(cwd)}&session=${sid}&title=`);
+    assert.equal(cleared.status, 200);
+
+    assert.deepEqual(titles(), {}, "the custom title is gone from the sidecar");
+    assert.deepEqual(await recentTitles(), ["the first prompt it ever saw", "the first prompt it ever saw"],
+      "and the rows carry what the listing now derives, not the cleared name");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(projectDir, { recursive: true, force: true });
     await close();
   }
 });
