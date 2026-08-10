@@ -6,6 +6,7 @@ import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/running
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
 import { isLockEnabled, hydrateLock } from "../lib/lock.ts";
+import { basename } from "../lib/format.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
 } from "./reducers.ts";
@@ -17,6 +18,15 @@ import { parseElicitationFields } from "../lib/elicitation.ts";
 
 type ConnState = "connecting" | "connected" | "offline";
 export type TextSize = "small" | "default" | "large" | "xl";
+
+// Which view of a file the preview pane opens in. "diff" is the default for
+// anything the agent changed — that's the question being asked — and it falls
+// back to the contents view on its own when there is no diff to show (an
+// untouched file, a binary, an image).
+export type PreviewMode = "diff" | "file";
+// `abs` is the gateway-side absolute path (how the API addresses a file);
+// `path` is the short label shown in the panel's title bar.
+export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode }
 
 type PromptRequestMethod = "session/request_permission" | "elicitation/create";
 
@@ -90,6 +100,15 @@ interface State {
   inboxItems: InboxItem[]; // polled from the gateway: pending permission prompts, durable and across all agents
   locked: boolean; // screen lock engaged — the SSE stream is torn down until unlocked
   lockEnabled: boolean; // a PIN is configured (mirrors lib/lock for UI reactivity)
+  // ---- file preview panel ----
+  // The panel that shows what the agent actually wrote: the folder's changed
+  // files, and one file at a time as a diff, as text, or as an image. It lives
+  // in the store rather than in App's local state because the things that open
+  // it are scattered through the thread (a tool card's file path), not just the
+  // header button.
+  filesOpen: boolean;
+  // Which file the preview pane is showing; null means the file list.
+  filePreview: FilePreviewTarget | null;
   // actions
   bootstrap: () => void;
   setAgent: (name: string) => void;
@@ -122,6 +141,12 @@ interface State {
   lock: () => void;
   unlock: () => void;
   refreshLockSettings: () => void;
+  toggleFiles: () => void;
+  closeFiles: () => void;
+  // Opens the panel *and* the file — the one entry point for "show me this
+  // file", wherever the path was clicked.
+  openFilePreview: (file: { abs: string; path?: string; mode?: PreviewMode }) => void;
+  clearFilePreview: () => void;
 }
 
 type SkinState = Pick<State, "cfg" | "agentName">;
@@ -915,6 +940,8 @@ export const useStore = create<State>((set, get) => {
     // lock is enabled it engages the local lock first and waits for unlock().
     locked: false,
     lockEnabled: isLockEnabled(),
+    filesOpen: false,
+    filePreview: null,
 
     bootstrap() {
       // Pull the account's shared prefs (text size, screen-lock config, recent
@@ -1477,6 +1504,29 @@ export const useStore = create<State>((set, get) => {
     // settings UI, so lockEnabled stays in sync.
     refreshLockSettings() {
       set({ lockEnabled: isLockEnabled() });
+    },
+
+    // Closing the panel deliberately keeps `filePreview`: reopening it should
+    // land back on the file you were reading, not throw you to the top of the
+    // list. Only the panel's own back button clears it.
+    toggleFiles() {
+      set((st) => ({ filesOpen: !st.filesOpen }));
+    },
+
+    closeFiles() {
+      set({ filesOpen: false });
+    },
+
+    openFilePreview(file) {
+      if (!file.abs) return;
+      set({
+        filesOpen: true,
+        filePreview: { abs: file.abs, path: file.path || basename(file.abs), mode: file.mode ?? "diff" },
+      });
+    },
+
+    clearFilePreview() {
+      set({ filePreview: null });
     },
   };
 });

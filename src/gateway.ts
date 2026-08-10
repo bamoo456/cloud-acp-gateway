@@ -42,6 +42,10 @@ import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.
 import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleUpload } from "./uploads.ts";
+import {
+  changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
+  inlineImageType, MAX_RAW_BYTES,
+} from "./workspace.ts";
 import { buildClientConfig } from "./client-config.ts";
 import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
@@ -575,6 +579,63 @@ export async function listFiles(dir: string, query = "", limit = FILE_WALK_MAX_R
     });
   }
   return out;
+}
+
+// Resolve a /workspace/* request's target file. `cwd` supplies the git and
+// relative-path context and must itself sit inside FS_ROOT; `path` is either
+// absolute (how /workspace/changes addresses every file it lists) or
+// cwd-relative. The resolved file is re-checked against FS_ROOT, so neither a
+// "../" chain nor a symlink pointing out of the tree widens what this serves.
+function resolveWorkspaceTarget(q: URLSearchParams): { cwd: string; abs: string; display: string } | null {
+  const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+  if (!cwd) return null;
+  const raw = q.get("path") ?? "";
+  if (!raw) return null;
+  const abs = resolveWithinRoot(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw));
+  if (!abs) return null;
+  const rel = path.relative(cwd, abs);
+  // Files under cwd read better by their short path; anything else (a sibling
+  // package elsewhere in the same repo) keeps its absolute path rather than
+  // being shown as a "../../" chain nobody can parse at a glance.
+  const display = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : abs;
+  return { cwd, abs, display };
+}
+
+// Raw bytes for one file: the <img> source behind an image preview, and the
+// download fallback for everything else.
+//
+// The content-type is an allowlist, never a guess: this route serves files
+// whose contents an agent (or the repo) chose, from the console's *own* origin
+// — the origin holding the gateway credential injected into the SPA config. So
+// anything that isn't a plain raster image goes out as application/octet-stream
+// with an attachment disposition. That, plus nosniff and a deny-everything CSP,
+// is what stops an .html or .svg sitting in the checkout from executing script
+// against that origin. Text-ish files are still readable — /workspace/file
+// returns them as escaped text, which is the view you want anyway.
+function serveWorkspaceRaw(res: http.ServerResponse, abs: string): void {
+  let st: fs.Stats;
+  try { st = fs.statSync(abs); } catch { res.writeHead(404); res.end(); return; }
+  if (!st.isFile()) { res.writeHead(404); res.end(); return; }
+  if (st.size > MAX_RAW_BYTES) { res.writeHead(413); res.end(); return; }
+  const image = inlineImageType(abs);
+  const base = path.basename(abs);
+  // Header values are latin1: a filename with CJK or emoji (routine for
+  // agent-generated screenshots) would throw ERR_INVALID_CHAR from writeHead.
+  // Send an ASCII-folded name for old parsers and the real one via RFC 5987.
+  const ascii = base.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  res.writeHead(200, {
+    "content-type": image ?? "application/octet-stream",
+    "content-length": String(st.size),
+    "content-disposition": `${image ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(base)}`,
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "default-src 'none'; sandbox",
+    "cache-control": "no-store",
+  });
+  const stream = fs.createReadStream(abs);
+  // Headers are already out, so a mid-read failure can't become a status code —
+  // dropping the connection is the only way left to signal a partial body.
+  stream.on("error", () => res.destroy());
+  stream.pipe(res);
 }
 
 // Server-side state shared across all clients/IPs (favorite folders today).
@@ -3869,6 +3930,56 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         console.error(`upload route failed: ${String(e)}`);
         if (!res.headersSent) { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); }
       });
+    return;
+  }
+  // ---- workspace file preview ----
+  // Read-only views of the project the agent is working in, so its output can be
+  // inspected from the browser instead of only read about in the transcript:
+  //   /workspace/changes  git status + line counts for the folder's checkout
+  //   /workspace/diff     one file's unified diff (untracked files included)
+  //   /workspace/file     one file's content as text / image metadata / binary
+  //   /workspace/raw      one file's bytes (the <img> source, and downloads)
+  // Every one of them resolves its target through resolveWithinRoot, so
+  // ACPG_FS_ROOT is the boundary here exactly as it is for the folder picker.
+  if (consoleEnabled && pathname === "/workspace/changes") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root" })); return; }
+    workspaceChanges(cwd)
+      .then((r) => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(r));
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  if (consoleEnabled && pathname === "/workspace/diff") {
+    const target = resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams);
+    if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root" })); return; }
+    workspaceFileDiff(target.cwd, target.abs)
+      .then((r) => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(r));
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  if (consoleEnabled && pathname === "/workspace/file") {
+    const target = resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams);
+    if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root" })); return; }
+    workspacePreview(target.abs, target.display)
+      .then((r) => {
+        if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable file" })); return; }
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(r));
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  if (consoleEnabled && pathname === "/workspace/raw") {
+    const target = resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams);
+    if (!target) { res.writeHead(400); res.end(); return; }
+    serveWorkspaceRaw(res, target.abs);
     return;
   }
   // Pinned ("favorite") folders, persisted server-side so they survive a client
