@@ -15,6 +15,7 @@ const base = () => location.protocol + "//" + location.host;
 // choose and stays fixable without touching the gateway.
 const ERROR_TEXT: Record<string, string> = {
   "outside-root": "This file is outside the conversation's project, so the gateway won't read it. Add its folder to ACPG_PREVIEW_ROOTS to allow it.",
+  "not-found": "This file no longer exists — it may have been moved, renamed, or deleted since the list was loaded.",
 };
 
 async function readJson(r: Response, unavailableMessage: string): Promise<any> {
