@@ -25,10 +25,13 @@ export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void
       <span className={connClass}><span className="dot" />{connText}</span>
       <RunningTasks />
       <PendingPermissions />
-      <button className={"icon-btn files-btn" + (s.filesOpen ? " on" : "")} title="Files and changes"
-        aria-pressed={s.filesOpen} onClick={s.toggleFiles}><IconPanel /></button>
       <button className="icon-btn" title="Conversation menu" onClick={() => setMenu((v) => !v)}><IconDots /></button>
       <button className="icon-btn" title="New chat" onClick={() => { if (s.agentReady) s.newSession(); }}><IconPlus /></button>
+      {/* Last, against the edge the panel it opens slides out from — the same
+          place every editor puts its right-panel toggle, and the glyph is that
+          toggle's own. */}
+      <button className={"icon-btn files-btn" + (s.filesOpen ? " on" : "")} title="Files and changes"
+        aria-pressed={s.filesOpen} onClick={s.toggleFiles}><IconPanel /></button>
       <ActionMenu open={menu} onClose={() => setMenu(false)} />
     </header>
   );
