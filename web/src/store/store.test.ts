@@ -2320,3 +2320,31 @@ describe("store notification routing", () => {
     expect(useStore.getState().tip).toContain("earlier messages");
   });
 });
+
+describe("filesOpen default", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "token": "test-token",
+      "defaultAgent": "claude",
+      "agents": [{ "name": "claude", "cwd": "/old" }],
+      "fsRoot": "/"
+    }</script>`;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("opens by default on a desktop-width screen", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true }));
+    const { useStore } = await import("./store.ts");
+    expect(useStore.getState().filesOpen).toBe(true);
+  });
+
+  test("stays closed by default on a phone-width screen", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    const { useStore } = await import("./store.ts");
+    expect(useStore.getState().filesOpen).toBe(false);
+  });
+});

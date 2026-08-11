@@ -142,12 +142,11 @@ export function IconFile() {
 
 // The file-preview panel's header toggle: a document with a diff's +/- on it,
 // so it reads as "the files that changed" rather than "attach a file".
-export function IconFileDiff() {
+export function IconPanel() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z" />
-      <path d="M14 3v5h5" />
-      <path d="M12 11v4M10 13h4M10 18h4" />
+      <rect x="3" y="4" width="7.5" height="16" rx="2" />
+      <rect x="13.5" y="4" width="7.5" height="16" rx="2" />
     </svg>
   );
 }

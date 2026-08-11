@@ -1,7 +1,7 @@
-import { describe, expect, test, beforeEach } from "vitest";
+import { describe, expect, test, beforeEach, vi } from "vitest";
 import {
-  clampPanelWidth, readPanelWidth, savePanelWidth,
-  DEFAULT_PANEL_WIDTH, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH,
+  clampPanelWidth, readPanelWidth, savePanelWidth, isDesktopPanelWidth,
+  DEFAULT_PANEL_WIDTH, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH, DESKTOP_PANEL_QUERY,
 } from "./panelWidth.ts";
 
 describe("clampPanelWidth", () => {
@@ -46,5 +46,23 @@ describe("readPanelWidth", () => {
   test("junk in storage doesn't break the panel", () => {
     localStorage.setItem("acpg.filePanelWidth", "not a number");
     expect(readPanelWidth()).toBe(DEFAULT_PANEL_WIDTH);
+  });
+});
+
+describe("isDesktopPanelWidth", () => {
+  test("true at the column breakpoint, false below it", () => {
+    const mq = vi.fn((query: string) => ({ matches: query === DESKTOP_PANEL_QUERY }));
+    vi.stubGlobal("matchMedia", mq);
+    expect(isDesktopPanelWidth()).toBe(true);
+
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    expect(isDesktopPanelWidth()).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  test("no matchMedia (older embedder) reads as not-desktop", () => {
+    vi.stubGlobal("matchMedia", undefined);
+    expect(isDesktopPanelWidth()).toBe(false);
+    vi.unstubAllGlobals();
   });
 });
