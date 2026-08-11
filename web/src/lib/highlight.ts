@@ -5,9 +5,9 @@ import type { DiffRow } from "./unified-diff.ts";
 // Syntax colour for the file preview and diff views — GitHub's own Light/Dark
 // hljs theme, wired up in styles.css under .wf-hl. Extension -> hljs grammar
 // id, scoped to the languages an agent actually writes (mirrors fileKind's
-// BY_EXT) plus a few structured-data formats worth colouring. hljs bundles
-// every grammar these ids name; unknown extensions render as plain text, same
-// as before this existed.
+// BY_EXT) plus a few structured-data and doc formats worth colouring. hljs
+// bundles every grammar these ids name; unknown extensions render as plain
+// text, same as before this existed.
 const EXT_TO_LANG: Record<string, string> = {
   ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
   js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
@@ -20,6 +20,7 @@ const EXT_TO_LANG: Record<string, string> = {
   sql: "sql", css: "css", scss: "scss", less: "less", html: "xml", htm: "xml",
   json: "json", jsonl: "json", ndjson: "json", yaml: "yaml", yml: "yaml",
   toml: "ini", ini: "ini", xml: "xml",
+  md: "markdown", markdown: "markdown", mdx: "markdown",
 };
 const NAME_TO_LANG: Record<string, string> = { dockerfile: "dockerfile", makefile: "makefile" };
 
