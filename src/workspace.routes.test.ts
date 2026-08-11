@@ -236,6 +236,14 @@ test("/workspace/find matches on the whole relative path, dotfiles included, and
     assert.equal((await hit("nested")).files[0].path, "src/deep/nested.ts");
     // An empty query is not "match everything".
     assert.deepEqual((await hit("  ")).files, []);
+
+    // A conversation running in a subdirectory searches from THERE. git answers
+    // in repo-relative paths whatever it is asked about, so without re-basing
+    // every row would be labelled with a prefix that isn't in this tree.
+    const sub = await get(q("/workspace/find", { cwd: path.join(TREE, "src"), q: "nested" }));
+    const body = await sub.json() as { files: Array<{ path: string; abs: string }> };
+    assert.deepEqual(body.files.map((f) => f.path), ["deep/nested.ts"]);
+    assert.equal(body.files[0].abs, path.join(TREE, "src", "deep", "nested.ts"));
   } finally {
     await close();
   }
