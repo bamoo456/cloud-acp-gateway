@@ -486,27 +486,73 @@ describe("FilePanel", () => {
     await render();
 
     const sections = [...container.querySelectorAll(".wf-sec-head")].map((h) => h.getAttribute("data-section"));
-    expect(sections).toEqual(["progress", "outputs", "context", "files"]);
+    expect(sections).toEqual(["progress", "outputs", "context"]);
     const progress = section("progress")?.textContent ?? "";
     expect(progress).toContain("Gather the tickets");
     expect(progress).toContain("Draft the deck");
     expect(progress).not.toContain("stale");
   });
 
-  test("the Files section starts folded, and lists nothing until it is opened", async () => {
-    // The other three lists are built from state the panel already holds. This
-    // one is a request per level, so a folded tree must cost none of them.
+  const switchTo = async (label: string) => {
+    const btn = [...container.querySelectorAll<HTMLButtonElement>(".wf-switch button")]
+      .find((b) => b.textContent === label);
+    await act(async () => { btn?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+  };
+
+  test("opens on Session, and asks for no tree until Project is chosen", async () => {
+    // Session's lists are built from state the panel already holds; the tree is
+    // a request per level, so the default mode must cost none of them.
     const { useStore } = await import("../store/store.ts");
     useStore.setState({ filesOpen: true, cwd: "/repo" });
     await render();
 
-    expect(section("files")?.querySelector(".wf-sec-body")).toBeNull();
+    expect(container.querySelector(".wf-switch button.active")?.textContent).toBe("Session");
     expect(getWorkspaceTree).not.toHaveBeenCalled();
 
-    await toggleSection("files");
+    await switchTo("Project");
     // No path: the tree's root is the conversation's own folder.
     expect(getWorkspaceTree).toHaveBeenCalledWith("/repo", undefined);
-    expect(section("files")?.textContent).toContain("src");
+    // Project is the whole panel — the conversation's lists are gone, not
+    // pushed below a tree.
+    expect(section("outputs")).toBeUndefined();
+    expect(container.textContent).toContain("src");
+
+    await switchTo("Session");
+    expect(section("outputs")).toBeDefined();
+  });
+
+  test("Back from a file opened in Project returns to Project, not to the lists", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await switchTo("Project");
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/app.ts", path: "src/app.ts", mode: "file" });
+    });
+    await act(async () => { await flush(); });
+    // The viewer takes over, and the switch goes with it — Back is the one way out.
+    expect(container.querySelector(".wf-switch")).toBeNull();
+
+    await act(async () => { useStore.getState().clearFilePreview(); });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-switch button.active")?.textContent).toBe("Project");
+    expect(section("outputs")).toBeUndefined();
+  });
+
+  test("a different folder is a different project, so the panel returns to Session", async () => {
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await switchTo("Project");
+
+    await act(async () => {
+      useStore.setState({ activeId: "s2", sessions: { s2: { ...makeSession("s2"), cwd: "/other" } } });
+    });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-switch button.active")?.textContent).toBe("Session");
   });
 
   test("no plan, no Progress section", async () => {

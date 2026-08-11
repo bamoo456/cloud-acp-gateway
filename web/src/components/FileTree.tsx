@@ -153,8 +153,10 @@ export function FileTree({ cwd, reloadKey, onOpenFile }: {
   // A new folder is a new tree: dropping the old one's expansions is the point.
   useEffect(() => { setQuery(""); }, [cwd]);
 
+  // The find box is pinned and the rows scroll under it: this fills the panel
+  // below the mode switch, so a deep tree must not push the box off the top.
   return (
-    <div className="wf-tree">
+    <>
       <div className="wf-find">
         <input
           type="search"
@@ -164,10 +166,12 @@ export function FileTree({ cwd, reloadKey, onOpenFile }: {
           aria-label="Find files by name"
         />
       </div>
-      {query.trim()
-        ? <Results cwd={cwd} query={query.trim()} onOpenFile={onOpenFile} />
-        : <Level key={cwd + ":" + reloadKey} cwd={cwd} depth={0}
-            onOpenFile={(e) => onOpenFile({ abs: e.abs, name: e.name })} />}
-    </div>
+      <div className="wf-body">
+        {query.trim()
+          ? <Results cwd={cwd} query={query.trim()} onOpenFile={onOpenFile} />
+          : <Level key={cwd + ":" + reloadKey} cwd={cwd} depth={0}
+              onOpenFile={(e) => onOpenFile({ abs: e.abs, name: e.name })} />}
+      </div>
+    </>
   );
 }
