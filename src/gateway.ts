@@ -44,7 +44,7 @@ import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleUpload } from "./uploads.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
-  inlineImageType, MAX_RAW_BYTES,
+  inlineImageType, repoRoot, MAX_RAW_BYTES,
 } from "./workspace.ts";
 import { buildClientConfig } from "./client-config.ts";
 import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
@@ -515,6 +515,21 @@ function resolveWithinRootBase(p: string, root: string): string | null {
 export function resolveWithinRoot(p: string): string | null {
   return resolveWithinRootBase(p, FS_ROOT);
 }
+
+// Directories the file-preview panel may read OUTSIDE the conversation's own
+// project. Colon-separated, PATH-style: ACPG_PREVIEW_ROOTS=/tmp:/var/exports
+//
+// It exists because an agent's output does not always land in the checkout —
+// "write the screenshot to /tmp" is an ordinary instruction, and a viewer that
+// then refuses to show the file is reporting its own configuration rather than
+// the work. Making that an explicit list rather than the default keeps the
+// panel's reach something a deployment states out loud: the credential does not
+// silently become a read-any-file capability.
+const PREVIEW_ROOTS: string[] = (process.env.ACPG_PREVIEW_ROOTS ?? "")
+  .split(":")
+  .map((p) => p.trim())
+  .filter(Boolean)
+  .map((p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } });
 async function listDirs(dir: string) {
   const ents = await fs.promises.readdir(dir, { withFileTypes: true });
   const out: Array<{ name: string; git: boolean }> = [];
@@ -576,17 +591,42 @@ export async function listFiles(dir: string, query = "", limit = FILE_WALK_MAX_R
   return out;
 }
 
+// What the preview panel may read, given the conversation's `cwd`:
+//
+//   1. anything under `cwd` itself — the project being worked in
+//   2. anything under an ACPG_PREVIEW_ROOTS entry — the explicit escape hatch
+//   3. anything under the git repo `cwd` sits in — because /workspace/changes
+//      lists the whole checkout, so a conversation opened on a subdirectory
+//      would otherwise show repo-wide rows it then refused to open
+//
+// `cwd` is not the client's to choose freely: it is checked against FS_ROOT
+// first, exactly as the folder picker is. Without that, a request could name
+// `cwd=/` and rule 1 would hand back the filesystem.
+//
+// Rule 3 costs a `git rev-parse`, so it is only consulted when 1 and 2 have
+// already failed — the ordinary case (a file inside the project) never pays for
+// it. `resolveWithinRootBase` realpaths both sides, so neither a "../" chain nor
+// a symlink out of the tree widens any of the three.
+async function allowedPreviewPath(abs: string, cwd: string): Promise<string | null> {
+  const direct = resolveWithinRootBase(abs, cwd) ?? PREVIEW_ROOTS.reduce<string | null>(
+    (hit, root) => hit ?? resolveWithinRootBase(abs, root), null,
+  );
+  if (direct) return direct;
+  const repo = await repoRoot(cwd);
+  return repo ? resolveWithinRootBase(abs, repo) : null;
+}
+
 // Resolve a /workspace/* request's target file. `cwd` supplies the git and
 // relative-path context and must itself sit inside FS_ROOT; `path` is either
 // absolute (how /workspace/changes addresses every file it lists) or
-// cwd-relative. The resolved file is re-checked against FS_ROOT, so neither a
-// "../" chain nor a symlink pointing out of the tree widens what this serves.
-function resolveWorkspaceTarget(q: URLSearchParams): { cwd: string; abs: string; display: string } | null {
+// cwd-relative. Null means "refuse" — a missing parameter or a path outside
+// everything allowedPreviewPath permits.
+async function resolveWorkspaceTarget(q: URLSearchParams): Promise<{ cwd: string; abs: string; display: string } | null> {
   const cwd = resolveWithinRoot(q.get("cwd") ?? "");
   if (!cwd) return null;
   const raw = q.get("path") ?? "";
   if (!raw) return null;
-  const abs = resolveWithinRoot(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw));
+  const abs = await allowedPreviewPath(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw), cwd);
   if (!abs) return null;
   const rel = path.relative(cwd, abs);
   // Files under cwd read better by their short path; anything else (a sibling
@@ -649,6 +689,10 @@ export type ViewBlock = {
   type: "text" | "thought" | "tool" | "tool_result" | "image";
   text?: string; name?: string;
   toolCallId?: string; status?: "completed" | "failed"; output?: string;
+  // tool blocks: the files the call acted on, and which ACP kind of act it was.
+  // A live turn gets both straight from ACP; a replayed transcript has to have
+  // them recovered here, or a resumed conversation shows no files at all.
+  locations?: string[]; kind?: string;
   // image blocks: raw base64 in `data` (+ `mimeType`) or a link in `uri`
   mimeType?: string; data?: string; uri?: string;
 };
@@ -777,6 +821,39 @@ export function stripCommandMarkup(text: string): string {
   return text.replace(COMMAND_WRAPPER_BLOCK, "").replace(COMMAND_CAVEAT, "").trim();
 }
 
+// A live turn's tool call arrives over ACP already carrying `kind` and
+// `locations`. A transcript carries neither — only the CLI's own tool name and
+// its raw input — so replaying one has to recover both, or a resumed
+// conversation reports that it touched no files at all.
+//
+// Mapping the name to the ACP kind here rather than in the client keeps one
+// vocabulary on the wire: every consumer downstream sees "edit"/"read", never
+// "Edit"/"Read".
+const CLAUDE_TOOL_KINDS: Record<string, string> = {
+  Edit: "edit", Write: "edit", MultiEdit: "edit", NotebookEdit: "edit",
+  Read: "read", NotebookRead: "read",
+  Glob: "search", Grep: "search", WebSearch: "search",
+  Bash: "execute", BashOutput: "execute", KillShell: "execute",
+  WebFetch: "fetch",
+  Task: "think", TodoWrite: "think",
+};
+// The input keys Claude's file tools name their target with. Deliberately a
+// fixed list: a tool whose input merely *contains* a path-looking string (Bash's
+// `command`) has not told us which file it touched, and guessing one would put
+// files in the panel that the agent never wrote.
+const TOOL_PATH_KEYS = ["file_path", "notebook_path", "path"];
+
+function toolInputLocations(input: unknown): string[] {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const rec = input as Record<string, unknown>;
+  const out: string[] = [];
+  for (const key of TOOL_PATH_KEYS) {
+    const v = rec[key];
+    if (typeof v === "string" && v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
 function normalizeContent(content: unknown): ViewBlock[] {
   const out: ViewBlock[] = [];
   if (typeof content === "string") {
@@ -790,7 +867,15 @@ function normalizeContent(content: unknown): ViewBlock[] {
     if (b.type === "text" && typeof b.text === "string" && b.text) { const t = stripCommandMarkup(b.text); if (t) out.push({ type: "text", text: t }); }
     else if (b.type === "image") { const img = claudeImageBlock(b.source); if (img) out.push(img); }
     else if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking) out.push({ type: "thought", text: b.thinking });
-    else if (b.type === "tool_use") out.push({ type: "tool", name: typeof b.name === "string" ? b.name : "tool", toolCallId: typeof b.id === "string" ? b.id : undefined });
+    else if (b.type === "tool_use") {
+      const name = typeof b.name === "string" ? b.name : "tool";
+      const locations = toolInputLocations(b.input);
+      out.push({
+        type: "tool", name, toolCallId: typeof b.id === "string" ? b.id : undefined,
+        kind: CLAUDE_TOOL_KINDS[name] ?? "other",
+        ...(locations.length ? { locations } : {}),
+      });
+    }
     else if (b.type === "tool_result") out.push({ type: "tool_result", toolCallId: typeof b.tool_use_id === "string" ? b.tool_use_id : undefined, status: b.is_error ? "failed" : "completed", output: toolResultText(b.content) });
   }
   return out;
@@ -3923,12 +4008,13 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   //   /workspace/diff     one file's unified diff (untracked files included)
   //   /workspace/file     one file's content as text / image metadata / binary
   //   /workspace/raw      one file's bytes (the <img> source, and downloads)
-  // Every one of them resolves its target through resolveWithinRoot, so
-  // ACPG_FS_ROOT is the boundary here exactly as it is for the folder picker.
+  // What each may read is allowedPreviewPath's decision: the conversation's cwd,
+  // its repo, and ACPG_PREVIEW_ROOTS. They stay read-only regardless — nothing
+  // here writes, stages or reverts.
   if (consoleEnabled && pathname === "/workspace/changes") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
     const cwd = resolveWithinRoot(q.get("cwd") ?? "");
-    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root" })); return; }
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
     workspaceChanges(cwd)
       .then((r) => {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -3938,32 +4024,37 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     return;
   }
   if (consoleEnabled && pathname === "/workspace/diff") {
-    const target = resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams);
-    if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root" })); return; }
-    workspaceFileDiff(target.cwd, target.abs)
-      .then((r) => {
-        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify(r));
+    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        return workspaceFileDiff(target.cwd, target.abs).then((r) => {
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify(r));
+        });
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
   }
   if (consoleEnabled && pathname === "/workspace/file") {
-    const target = resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams);
-    if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root" })); return; }
-    workspacePreview(target.abs, target.display)
-      .then((r) => {
-        if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable file" })); return; }
-        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-        res.end(JSON.stringify(r));
+    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        return workspacePreview(target.abs, target.display).then((r) => {
+          if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable file" })); return; }
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify(r));
+        });
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
   }
   if (consoleEnabled && pathname === "/workspace/raw") {
-    const target = resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams);
-    if (!target) { res.writeHead(400); res.end(); return; }
-    serveWorkspaceRaw(res, target.abs);
+    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(); return; }
+        serveWorkspaceRaw(res, target.abs);
+      })
+      .catch(() => { res.writeHead(500); res.end(); });
     return;
   }
   // Pinned ("favorite") folders, persisted server-side so they survive a client

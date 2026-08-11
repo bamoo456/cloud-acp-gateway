@@ -1275,3 +1275,49 @@ test("search excludes Codex subagents before scanning their transcripts", async 
     assert.equal(results.scanned.files, 1);
   });
 });
+
+test("a replayed transcript carries the files each tool touched, and what kind of touch it was", async () => {
+  // Without this the panel's Outputs/Context lists are empty for every resumed
+  // conversation: ACP hands a live turn `kind` + `locations`, but a transcript
+  // records only the CLI's tool name and its raw input.
+  const file = writeTranscript([
+    { type: "user", sessionId: "S", message: { role: "user", content: "fix the parser" } },
+    { type: "assistant", sessionId: "S", message: { role: "assistant", content: [
+      { type: "tool_use", id: "t1", name: "Read", input: { file_path: "/repo/src/parse.ts", limit: 50 } },
+      { type: "tool_use", id: "t2", name: "Edit", input: { file_path: "/repo/src/parse.ts", old_string: "a", new_string: "b" } },
+      { type: "tool_use", id: "t3", name: "NotebookEdit", input: { notebook_path: "/repo/nb.ipynb" } },
+      // A shell call names no file it wrote — the Changes tab is what covers it.
+      { type: "tool_use", id: "t4", name: "Bash", input: { command: "rm /repo/gone.ts" } },
+    ] } },
+  ]);
+
+  const { messages } = await readClaudeHistoryMessages(file, "S", 0);
+  const tools = messages.flatMap((m) => m.blocks.filter((b) => b.type === "tool"));
+
+  assert.deepEqual(tools.map((b) => [b.name, b.kind, b.locations]), [
+    ["Read", "read", ["/repo/src/parse.ts"]],
+    ["Edit", "edit", ["/repo/src/parse.ts"]],
+    ["NotebookEdit", "edit", ["/repo/nb.ipynb"]],
+    ["Bash", "execute", undefined],
+  ]);
+});
+
+test("an unknown tool replays as `other` and contributes no path", async () => {
+  const file = writeTranscript([
+    { type: "assistant", sessionId: "S", message: { role: "assistant", content: [
+      { type: "tool_use", id: "t1", name: "mcp__acme__do_thing", input: { url: "https://example.com/x.ts" } },
+      // A malformed input must not throw its way out of a transcript read.
+      { type: "tool_use", id: "t2", name: "Edit", input: "not an object" },
+      { type: "tool_use", id: "t3", name: "Write", input: { file_path: "" } },
+    ] } },
+  ]);
+
+  const { messages } = await readClaudeHistoryMessages(file, "S", 0);
+  const tools = messages.flatMap((m) => m.blocks.filter((b) => b.type === "tool"));
+
+  assert.deepEqual(tools.map((b) => [b.kind, b.locations]), [
+    ["other", undefined],
+    ["edit", undefined],
+    ["edit", undefined],
+  ]);
+});

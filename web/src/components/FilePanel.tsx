@@ -3,26 +3,92 @@ import { useStore } from "../store/store.ts";
 import type { FilePreviewTarget, PreviewMode } from "../store/store.ts";
 import {
   getWorkspaceChanges, getFileDiff, getFilePreview, rawFileUrl,
-  type ChangeStatus, type ChangedFile, type ChangesResult, type FileDiffResult, type FilePreviewResult,
+  type ChangeStatus, type ChangesResult, type FileDiffResult, type FilePreviewResult,
 } from "../lib/api.ts";
 import { touchedFiles } from "../lib/touchedFiles.ts";
+import { mergePanelFiles, type PanelFile } from "../lib/panelFiles.ts";
+import { fileKind } from "../lib/fileKind.ts";
 import { downloadFile } from "../lib/download.ts";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
-import { basename, dirname, formatBytes, timeAgo } from "../lib/format.ts";
-import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner } from "../lib/icons.tsx";
+import { Plan } from "./Plan.tsx";
+import { basename, dirname, formatBytes, relativeTo, timeAgo } from "../lib/format.ts";
+import { clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH } from "../lib/panelWidth.ts";
+import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, fileIcon } from "../lib/icons.tsx";
 
 // The file preview panel: what the agent actually produced, rather than what it
-// said about it. Two lists and one viewer.
+// said about it. Three lists and one viewer.
 //
-//   Changes — git's view of the conversation's folder. Answers "what is
-//             different in my checkout now", including files the agent created
-//             (untracked) and ones it deleted.
-//   Session — files this conversation touched, read back out of the thread's
-//             own tool calls. Includes files only *read*, and files changed and
-//             then reverted, which git can no longer see.
+//   Outputs — files this conversation WROTE, read back out of the thread's own
+//             tool calls. The default: "show me what it made" is the question
+//             the panel exists to answer.
+//   Context — files it only consulted. Same source, other half of the split.
+//   Changes — git's view of the conversation's folder. Last, because it answers
+//             a different question ("what is dirty in my checkout"), but not
+//             optional: an agent that writes through a shell names no path in
+//             any tool call, so for those turns — and for every codex and
+//             opencode conversation, whose transcripts record no paths at all —
+//             this is the ONLY list that shows the work.
 //
 // Opening a row shows its diff; a binary, an image, or an unchanged file falls
 // through to the contents view on its own.
+
+type Section = "Progress" | "Outputs" | "Context";
+
+// The width below which the panel is an overlay sheet rather than a column —
+// the same 1100px the stylesheet uses. Resizing only means anything in column
+// mode, and an inline width would fight the sheet's own layout.
+const DESKTOP = "(min-width: 1100px)";
+
+// Drag the panel's left edge to set its width. A separator rather than a bare
+// div: it is focusable and answers the arrow keys, so the panel is resizable
+// without a pointer.
+function ResizeHandle({ width, onWidth, onCommit }: {
+  width: number; onWidth: (px: number) => void; onCommit: (px: number) => void;
+}) {
+  const latest = useRef(width);
+  latest.current = width;
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = width;
+    // Dragging over the chat would otherwise select its text, and the cursor
+    // would flicker back to a caret the moment it left the 6px handle.
+    document.body.classList.add("resizing");
+    const move = (ev: PointerEvent) => {
+      const next = clampPanelWidth(startW + (startX - ev.clientX));
+      latest.current = next;
+      onWidth(next);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.classList.remove("resizing");
+      onCommit(latest.current);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 60 : 12;
+    // Left widens: the panel is anchored to the right edge, so its border moving
+    // left is the panel growing.
+    const delta = e.key === "ArrowLeft" ? step : e.key === "ArrowRight" ? -step : 0;
+    if (!delta) return;
+    e.preventDefault();
+    const next = clampPanelWidth(width + delta);
+    onWidth(next);
+    onCommit(next);
+  };
+
+  return (
+    <div className="wf-resize" role="separator" aria-orientation="vertical" tabIndex={0}
+      aria-label="Resize the files panel" aria-valuenow={width}
+      aria-valuemin={MIN_PANEL_WIDTH} aria-valuemax={MAX_PANEL_WIDTH}
+      onPointerDown={onPointerDown} onKeyDown={onKeyDown} />
+  );
+}
 
 const STATUS_MARK: Record<ChangeStatus, string> = {
   added: "A", modified: "M", deleted: "D", renamed: "R", untracked: "U",
@@ -31,19 +97,85 @@ const STATUS_LABEL: Record<ChangeStatus, string> = {
   added: "Added", modified: "Modified", deleted: "Deleted", renamed: "Renamed", untracked: "New file",
 };
 
-function FileRow({ mark, markClass, markTitle, name, dir, right, onClick }: {
-  mark: string; markClass: string; markTitle: string;
+function FileRow({ lead, leadClass, leadTitle, name, dir, right, onClick }: {
+  lead: React.ReactNode; leadClass: string; leadTitle: string;
   name: string; dir: string; right?: React.ReactNode; onClick: () => void;
 }) {
   return (
     <button className="wf-row" onClick={onClick} title={dir ? dir + "/" + name : name}>
-      <span className={"wf-mark " + markClass} title={markTitle}>{mark}</span>
+      <span className={"wf-mark " + leadClass} title={leadTitle}>{lead}</span>
       <span className="wf-name">
         <span className="wf-nm">{name}</span>
         {dir && <span className="wf-dir">{dir}</span>}
       </span>
       {right}
     </button>
+  );
+}
+
+// A collapsible band in the panel. Vertical sections rather than tabs because
+// the three lists answer one question between them — "what happened to files
+// here" — and tabs made the reader guess which of them knew about a given file
+// before they could look for it.
+function Section({ title, count, open, onToggle, children }: {
+  title: string; count?: number; open: boolean; onToggle: () => void; children: React.ReactNode;
+}) {
+  return (
+    <section className={"wf-sec" + (open ? " open" : "")}>
+      <button className="wf-sec-head" onClick={onToggle} aria-expanded={open} data-section={title.toLowerCase()}>
+        <span className="wf-chev">{open ? <IconChevronDown /> : <IconChevronRight />}</span>
+        <span className="wf-sec-title">{title}</span>
+        {count !== undefined && count > 0 && <span className="wf-sec-count">{count}</span>}
+      </button>
+      {open && <div className="wf-sec-body">{children}</div>}
+    </section>
+  );
+}
+
+// One file row. Its lead glyph is the whole answer to "does git know about
+// this": a tracked-and-changed file gets git's own status letter, in git's own
+// colours, and everything else — a file outside the repo, one written and
+// reverted, one already committed — falls back to its type icon.
+//
+// Tool calls report absolute paths, and in a column this narrow the folder
+// prefix every row shares would push the part that distinguishes them off the
+// end. Show the path as it reads from the conversation's own folder.
+function PanelRow({ file, cwd, onOpen }: { file: PanelFile; cwd: string; onOpen: () => void }) {
+  const kind = fileKind(file.label);
+  const git = file.git;
+  const counts = git && ((git.additions ?? 0) + (git.deletions ?? 0) > 0 || git.binary);
+  return (
+    <FileRow
+      lead={git ? STATUS_MARK[git.status] : fileIcon(kind.icon)}
+      leadClass={git ? "wf-git " + git.status : "wf-kind"}
+      leadTitle={git ? STATUS_LABEL[git.status] + (git.staged ? " (staged)" : "") : kind.category}
+      name={file.label}
+      dir={dirname(relativeTo(file.abs, cwd))}
+      onClick={onOpen}
+      right={counts ? (
+        <span className="wf-counts">
+          {git!.binary
+            ? <span className="bin">bin</span>
+            : <>
+                {(git!.additions ?? 0) > 0 && <span className="add">+{git!.additions}</span>}
+                {(git!.deletions ?? 0) > 0 && <span className="del">−{git!.deletions}</span>}
+              </>}
+        </span>
+      ) : undefined}
+    />
+  );
+}
+
+// Context rows never carry git status — the question there is "what did the
+// agent read", and whether that file also happens to be dirty is someone else's
+// business.
+function ContextRow({ path, label, cwd, onOpen }: {
+  path: string; label: string; cwd: string; onOpen: () => void;
+}) {
+  const kind = fileKind(label);
+  return (
+    <FileRow lead={fileIcon(kind.icon)} leadClass="wf-kind" leadTitle={kind.category}
+      name={label} dir={dirname(relativeTo(path, cwd))} onClick={onOpen} />
   );
 }
 
@@ -61,7 +193,11 @@ export function FilePanel() {
   // would silently show an unrelated repo's changes.
   const cwd = session?.cwd || storeCwd;
 
-  const [tab, setTab] = useState<"changes" | "session">("changes");
+  // Sections, not tabs — all three are on screen at once, and each remembers
+  // whether it is folded. Progress leads because it is the answer to "where is
+  // the agent up to", which is the question you open this panel mid-turn to ask.
+  const [folded, setFolded] = useState<Partial<Record<Section, boolean>>>({});
+  const toggle = (name: Section) => setFolded((f) => ({ ...f, [name]: !f[name] }));
   const [changes, setChanges] = useState<ChangesResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -78,10 +214,10 @@ export function FilePanel() {
       .finally(() => { if (mine === gen.current) setLoading(false); });
   }
 
-  // Fetch when the panel opens and whenever the folder changes. Gated on `open`
-  // on purpose: unlike the sessions sidebar this panel is never a persistent
-  // column, and a `git status` on every folder switch with the panel shut would
-  // be a cold walk of the whole tree for something nobody is looking at.
+  // Fetched whenever the panel is open, because Outputs now depends on it: git
+  // is what supplies a row's status letter and line counts, and what surfaces
+  // the files an agent wrote through a shell (which name no path in any tool
+  // call). Still gated on `open` — with the panel shut, nobody is looking.
   useEffect(() => {
     if (!open) return;
     loadChanges();
@@ -101,15 +237,37 @@ export function FilePanel() {
     if (justFinished && open) loadChanges();
   }, [working, open]);
 
+  // Width is applied inline, so it must only exist in column mode — below the
+  // breakpoint the panel is a right-anchored sheet whose width the stylesheet
+  // owns, and an inline value would override it.
+  const [width, setWidth] = useState(readPanelWidth);
+  const [desktop, setDesktop] = useState(() => window.matchMedia?.(DESKTOP).matches ?? false);
+  useEffect(() => {
+    const mq = window.matchMedia?.(DESKTOP);
+    if (!mq) return;
+    // Re-clamp on resize too: a width chosen on a wide window would otherwise
+    // leave no room for the chat after the window shrinks.
+    const sync = () => { setDesktop(mq.matches); setWidth((w) => clampPanelWidth(w)); };
+    mq.addEventListener("change", sync);
+    window.addEventListener("resize", sync);
+    return () => { mq.removeEventListener("change", sync); window.removeEventListener("resize", sync); };
+  }, []);
+
   const touched = touchedFiles(session?.items ?? []);
-  const files = changes?.files ?? [];
+  const context = touched.filter((f) => f.role === "context");
+  const outputs = mergePanelFiles(touched.filter((f) => f.role === "output"), changes?.files ?? []);
+  // The agent's current plan, if it has published one. The last plan update wins
+  // — ACP re-sends the whole list every time an entry changes.
+  const plan = [...(session?.items ?? [])].reverse().find((it) => it.kind === "plan");
 
   return (
     <>
       {/* Mobile only (CSS): on desktop the panel is a column and dimming the
           chat behind it would be wrong. */}
       <div id="files-scrim" className={open ? "open" : ""} onClick={closeFiles} />
-      <aside id="files" className={open ? "open" : ""} aria-hidden={!open}>
+      <aside id="files" className={open ? "open" : ""} aria-hidden={!open}
+        style={desktop ? { width, maxWidth: width } : undefined}>
+        {desktop && <ResizeHandle width={width} onWidth={setWidth} onCommit={savePanelWidth} />}
         <div className="wf-head">
           {target && (
             <button className="icon-btn" title="Back to file list" onClick={clearFilePreview}><IconBack /></button>
@@ -126,79 +284,55 @@ export function FilePanel() {
         {target && <FileView cwd={cwd} target={target} />}
 
         {!target && (
-          <>
-            <div className="wf-tabs" role="tablist">
-              <button className={"wf-tab" + (tab === "changes" ? " active" : "")} data-tab="changes"
-                role="tab" aria-selected={tab === "changes"} onClick={() => setTab("changes")}>
-                Changes{files.length > 0 ? ` (${files.length})` : ""}
-              </button>
-              <button className={"wf-tab" + (tab === "session" ? " active" : "")} data-tab="session"
-                role="tab" aria-selected={tab === "session"} onClick={() => setTab("session")}>
-                Session{touched.length > 0 ? ` (${touched.length})` : ""}
-              </button>
-            </div>
-            <div className="wf-body">
-              {tab === "changes" && (
-                <>
-                  {err && <div className="wf-empty">{err}</div>}
-                  {!err && loading && !changes && <div className="wf-empty">Reading changes…</div>}
-                  {!err && changes?.repo === null && (
-                    <div className="wf-empty">
-                      {changes.reason === "git-missing"
-                        ? "git isn't installed on the gateway host, so file changes can't be listed."
-                        : "This folder isn't a git repository, so there's nothing to compare against."}
-                    </div>
-                  )}
-                  {!err && changes?.repo && files.length === 0 && (
-                    <div className="wf-empty">No changes in this folder.</div>
-                  )}
-                  {files.map((f) => (
-                    <ChangeRow key={f.path} file={f} onOpen={() => openFilePreview({ abs: f.abs, path: f.path, mode: "diff" })} />
-                  ))}
-                  {changes?.truncated && <div className="wf-note">Showing the first {files.length} changed files.</div>}
-                </>
+          <div className="wf-body">
+            {plan && plan.kind === "plan" && plan.entries.length > 0 && (
+              <Section title="Progress" open={!folded.Progress} onToggle={() => toggle("Progress")}>
+                <Plan entries={plan.entries} heading={false} />
+              </Section>
+            )}
+
+            <Section title="Outputs" count={outputs.length}
+              open={!folded.Outputs} onToggle={() => toggle("Outputs")}>
+              {err && <div className="wf-empty">{err}</div>}
+              {!err && loading && !changes && outputs.length === 0 && (
+                <div className="wf-empty">Reading changes…</div>
               )}
-              {tab === "session" && (
-                <>
-                  {touched.length === 0 && (
-                    <div className="wf-empty">No files touched in this conversation yet.</div>
-                  )}
-                  {touched.map((f) => (
-                    <FileRow key={f.path} mark="" markClass="file" markTitle="File"
-                      name={f.label} dir={dirname(f.path)}
-                      onClick={() => openFilePreview({ abs: f.path, path: f.label, mode: "diff" })} />
-                  ))}
-                </>
+              {!err && outputs.length === 0 && !loading && (
+                <div className="wf-empty">Nothing written in this conversation yet.</div>
               )}
-            </div>
-          </>
+              {outputs.map((f) => (
+                <PanelRow key={f.abs} file={f} cwd={cwd}
+                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })} />
+              ))}
+              {/* Without git the list is only what tool calls named — no
+                  shell-written file, nothing another conversation changed. Say
+                  so rather than letting a short list read as a quiet turn. */}
+              {!err && changes?.repo === null && (
+                <div className="wf-note">
+                  {changes.reason === "git-missing"
+                    ? "git isn't installed on the gateway host, so only files this conversation named are listed."
+                    : "This folder isn't a git checkout, so only files this conversation named are listed."}
+                </div>
+              )}
+              {changes?.truncated && (
+                <div className="wf-note">Showing the first {changes.files.length} changed files.</div>
+              )}
+            </Section>
+
+            <Section title="Context" count={context.length}
+              open={!folded.Context} onToggle={() => toggle("Context")}>
+              {context.length === 0 && (
+                <div className="wf-empty">No files consulted in this conversation yet.</div>
+              )}
+              {context.map((f) => (
+                <ContextRow key={f.path} path={f.path} label={f.label} cwd={cwd}
+                  onOpen={() => openFilePreview({ abs: f.path, path: relativeTo(f.path, cwd), mode: "file" })} />
+              ))}
+            </Section>
+          </div>
         )}
       </aside>
     </>
-  );
-}
-
-function ChangeRow({ file, onOpen }: { file: ChangedFile; onOpen: () => void }) {
-  const counts = (file.additions ?? 0) + (file.deletions ?? 0) > 0 || file.binary;
-  return (
-    <FileRow
-      mark={STATUS_MARK[file.status]}
-      markClass={file.status}
-      markTitle={STATUS_LABEL[file.status] + (file.staged ? " (staged)" : "")}
-      name={basename(file.path)}
-      dir={dirname(file.path)}
-      onClick={onOpen}
-      right={counts ? (
-        <span className="wf-counts">
-          {file.binary
-            ? <span className="bin">bin</span>
-            : <>
-                {(file.additions ?? 0) > 0 && <span className="add">+{file.additions}</span>}
-                {(file.deletions ?? 0) > 0 && <span className="del">−{file.deletions}</span>}
-              </>}
-        </span>
-      ) : undefined}
-    />
   );
 }
 
@@ -285,7 +419,7 @@ function DownloadButton({ raw, name }: { raw: string; name: string }) {
       .finally(() => setBusy(false));
   };
   return (
-    <button type="button" className="icon-btn wf-dl" onClick={save} disabled={busy}
+    <button type="button" className={"icon-btn wf-dl" + (failed ? " failed" : "")} onClick={save} disabled={busy}
       title={failed ? "Couldn't download this file — tap to retry" : "Download this file"}>
       {busy ? <IconSpinner /> : <IconDownload />}
     </button>

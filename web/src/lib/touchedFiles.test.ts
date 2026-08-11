@@ -2,8 +2,8 @@ import { describe, expect, test } from "vitest";
 import { touchedFiles, toLocalPath } from "./touchedFiles.ts";
 import type { ThreadItem } from "../types.ts";
 
-function tool(id: string, locations: string[], content: ThreadItem extends never ? never : any[] = []): ThreadItem {
-  return { id, kind: "tool", toolCallId: id, title: "Edit", toolKind: "edit", status: "completed", locations, content };
+function tool(id: string, locations: string[], content: ThreadItem extends never ? never : any[] = [], toolKind = "edit"): ThreadItem {
+  return { id, kind: "tool", toolCallId: id, title: "Edit", toolKind, status: "completed", locations, content };
 }
 
 describe("toLocalPath", () => {
@@ -53,5 +53,47 @@ describe("touchedFiles", () => {
       tool("t1", ["https://example.com/x.ts", "file:///repo/ok.ts"]),
     ];
     expect(touchedFiles(items).map((f) => f.path)).toEqual(["/repo/ok.ts"]);
+  });
+
+  test("splits what the agent wrote from what it only consulted", () => {
+    const items: ThreadItem[] = [
+      tool("t1", ["/repo/read.ts"], [], "read"),
+      tool("t2", ["/repo/found.ts"], [], "search"),
+      tool("t3", ["/repo/gone.ts"], [], "delete"),
+      tool("t4", ["/repo/written.ts"], [], "edit"),
+    ];
+    expect(touchedFiles(items).map((f) => [f.label, f.role])).toEqual([
+      ["written.ts", "output"],
+      ["gone.ts", "output"],
+      ["found.ts", "context"],
+      ["read.ts", "context"],
+    ]);
+  });
+
+  test("a file read and later edited is an output, not context", () => {
+    const items: ThreadItem[] = [
+      tool("t1", ["/repo/a.ts"], [], "read"),
+      tool("t2", ["/repo/a.ts"], [], "edit"),
+    ];
+    expect(touchedFiles(items).map((f) => f.role)).toEqual(["output"]);
+  });
+
+  test("an edit re-read afterwards stays an output", () => {
+    const items: ThreadItem[] = [
+      tool("t1", ["/repo/a.ts"], [], "edit"),
+      tool("t2", ["/repo/a.ts"], [], "read"),
+    ];
+    expect(touchedFiles(items).map((f) => f.role)).toEqual(["output"]);
+  });
+
+  test("a diff block makes the file an output whatever the tool kind claims", () => {
+    const items: ThreadItem[] = [
+      tool("t1", [], [{ type: "diff", path: "/repo/b.ts", oldText: "x", newText: "y" }], "other"),
+    ];
+    expect(touchedFiles(items).map((f) => f.role)).toEqual(["output"]);
+  });
+
+  test("a shell call contributes nothing — it names a command, not a file", () => {
+    expect(touchedFiles([tool("t1", [], [], "execute")])).toEqual([]);
   });
 });
