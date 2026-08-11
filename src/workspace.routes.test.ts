@@ -6,11 +6,19 @@ import path from "node:path";
 import http from "node:http";
 import { execFileSync } from "node:child_process";
 
-// FS_ROOT is read once, at gateway.ts import time, from ACPG_FS_ROOT — and these
-// routes are largely *about* what that root does and doesn't allow. So the
-// fixture tree is built and pointed at before the module is loaded.
+// FS_ROOT and PREVIEW_ROOTS are read once, at gateway.ts import time — and these
+// routes are largely *about* what those roots do and don't allow. So the fixture
+// tree is built and pointed at before the module is loaded.
 const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-wsroot-")));
 process.env.ACPG_FS_ROOT = ROOT;
+// Stands in for the real /tmp: somewhere an agent writes that is nowhere near
+// the project, reachable only because the deployment opted in.
+const SCRATCH = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-scratch-")));
+process.env.ACPG_PREVIEW_ROOTS = SCRATCH;
+fs.writeFileSync(path.join(SCRATCH, "note.txt"), "written outside the project on purpose\n");
+fs.writeFileSync(path.join(SCRATCH, "shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d]));
+fs.mkdirSync(SCRATCH + "-other", { recursive: true });
+fs.writeFileSync(path.join(SCRATCH + "-other", "note.txt"), "a sibling of an allowed root\n");
 const REPO = path.join(ROOT, "project");
 fs.mkdirSync(REPO);
 const run = (...args: string[]) => execFileSync("git", args, { cwd: REPO, stdio: "pipe" });
@@ -138,15 +146,73 @@ test("anything else is served as an opaque download, never as active content", a
   }
 });
 
-test("paths outside ACPG_FS_ROOT are refused, however they are spelled", async () => {
+test("a path outside the project and outside ACPG_PREVIEW_ROOTS is refused, however it is spelled", async () => {
   const { get, close } = await startHttpServer();
   try {
     for (const route of ["/workspace/file", "/workspace/diff", "/workspace/raw"]) {
       assert.equal((await get(q(route, { cwd: REPO, path: "/etc/passwd" }))).status, 400, route + " absolute");
       assert.equal((await get(q(route, { cwd: REPO, path: "../../../../etc/passwd" }))).status, 400, route + " traversal");
+      // cwd is not the client's to choose freely either — otherwise cwd=/ would
+      // make every file "inside the project".
       assert.equal((await get(q(route, { cwd: "/etc", path: "passwd" }))).status, 400, route + " cwd");
     }
     assert.equal((await get(q("/workspace/changes", { cwd: "/etc" }))).status, 400);
+  } finally {
+    await close();
+  }
+});
+
+// ACPG_PREVIEW_ROOTS is the escape hatch for exactly this: "write the screenshot
+// to /tmp" is an ordinary instruction, and the viewer should be able to show
+// what the agent produced. It is opt-in so a deployment states its reach out loud.
+test("a file under an ACPG_PREVIEW_ROOTS entry is served, project or not", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const r = await get(q("/workspace/file", { cwd: REPO, path: path.join(SCRATCH, "note.txt") }));
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).text, "written outside the project on purpose\n");
+
+    const raw = await get(q("/workspace/raw", { cwd: REPO, path: path.join(SCRATCH, "shot.png") }));
+    assert.equal(raw.status, 200);
+    assert.equal(raw.headers.get("content-type"), "image/png");
+    await raw.arrayBuffer();
+
+    // A sibling of an allowed root is not itself allowed.
+    assert.equal((await get(q("/workspace/file", { cwd: REPO, path: SCRATCH + "-other/note.txt" }))).status, 400);
+  } finally {
+    await close();
+  }
+});
+
+// /workspace/changes lists the whole checkout, so a conversation opened on a
+// subdirectory would otherwise show repo-wide rows it then refused to open.
+test("a conversation running in a subdirectory can still open the rest of its repo", async () => {
+  const sub = path.join(REPO, "web");
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(sub, "app.ts"), "export const a = 1;\n");
+  const { get, close } = await startHttpServer();
+  try {
+    // kept.txt lives ABOVE cwd, at the repo root.
+    const r = await get(q("/workspace/file", { cwd: sub, path: path.join(REPO, "kept.txt") }));
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).path, path.join(REPO, "kept.txt"), "shown by absolute path, not a ../ chain");
+    // And its own file still reads by the short relative path.
+    const own = await get(q("/workspace/file", { cwd: sub, path: "app.ts" }));
+    assert.equal((await own.json()).path, "app.ts");
+  } finally {
+    await close();
+  }
+});
+
+test("a request missing cwd or path is a 400, not a read of the process's own directory", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    for (const route of ["/workspace/file", "/workspace/diff"]) {
+      assert.equal((await get(q(route, { cwd: REPO, path: "" }))).status, 400, route + " no path");
+      assert.equal((await get(q(route, { cwd: "", path: "kept.txt" }))).status, 400, route + " no cwd");
+    }
+    assert.equal((await get(q("/workspace/raw", { cwd: REPO, path: "" }))).status, 400);
+    assert.equal((await get(q("/workspace/changes", { cwd: "" }))).status, 400);
   } finally {
     await close();
   }

@@ -16,6 +16,8 @@ jobs:
       - run: npm install
       - run: npm run typecheck
       - run: npm run build
+      - name: backend unit tests
+        run: npm test
       - name: web unit tests
         run: npm --prefix web run test
       - name: smoke test (gateway boots and validates config)

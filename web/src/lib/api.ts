@@ -2,7 +2,7 @@ import type { PermissionOption } from "../types.ts";
 
 export interface HistorySession { sessionId: string; title: string | null; updatedAt: string; }
 export interface DiscoveredHistorySession extends HistorySession { cwd: string; source: "claude-cli"; }
-export interface ViewBlock { type: "text" | "thought" | "tool" | "image"; text?: string; name?: string; toolCallId?: string; status?: string; output?: string; mimeType?: string; data?: string; uri?: string; }
+export interface ViewBlock { type: "text" | "thought" | "tool" | "image"; text?: string; name?: string; toolCallId?: string; status?: string; output?: string; locations?: string[]; kind?: string; mimeType?: string; data?: string; uri?: string; }
 export interface ViewMessage { role: "user" | "assistant"; blocks: ViewBlock[]; }
 export interface MessagesResult { messages: ViewMessage[]; total: number; start: number; truncated: boolean; }
 export interface DirEntry { name: string; git: boolean; }
@@ -10,10 +10,25 @@ export interface FsResult { root: string; path: string; parent: string | null; d
 
 const base = () => location.protocol + "//" + location.host;
 
+// Prose for the failures a person can act on. Keyed on a `code` the server
+// sends rather than on its English message, so the wording is the client's to
+// choose and stays fixable without touching the gateway.
+const ERROR_TEXT: Record<string, string> = {
+  "outside-root": "This file is outside the conversation's project, so the gateway won't read it. Add its folder to ACPG_PREVIEW_ROOTS to allow it.",
+};
+
 async function readJson(r: Response, unavailableMessage: string): Promise<any> {
   if (r.ok === false) {
     let body = "";
     try { body = (await r.text()).trim(); } catch { /* ignore */ }
+    // A JSON error body is written for a program, not for a reader — rendering
+    // it raw put a literal {"error":"path outside root"} in the panel. Use the
+    // mapped text, or the caller's own message, but never the payload.
+    if (body.startsWith("{")) {
+      let code = "";
+      try { code = String((JSON.parse(body) as { code?: unknown }).code ?? ""); } catch { /* not our shape */ }
+      throw new Error(ERROR_TEXT[code] || unavailableMessage);
+    }
     throw new Error(body || unavailableMessage);
   }
   try {
@@ -116,9 +131,13 @@ export async function uploadFile(file: File): Promise<{ name: string; uri: strin
 // ---- workspace file preview ----
 // The agent writes files on the gateway host; these read them back so the panel
 // can show what it produced instead of only what it said about it. Every path
-// travels as the absolute path the gateway itself reported (ChangedFile.abs),
-// with `cwd` supplying the git context — the gateway re-checks both against
-// ACPG_FS_ROOT, so a client can't widen its own reach by rewriting them.
+// travels as the absolute path the gateway itself reported (ChangedFile.abs, or
+// a tool call's own location), with `cwd` supplying the git context.
+//
+// The gateway serves what is inside the conversation's project (its cwd and the
+// repo around it) plus whatever ACPG_PREVIEW_ROOTS names — see
+// allowedPreviewPath in src/gateway.ts. A path outside all of those comes back
+// as `outside-root`, which readJson turns into the prose above.
 export type ChangeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
 export interface ChangedFile {
   path: string;   // repo-root-relative, for display

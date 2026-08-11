@@ -75,10 +75,43 @@ describe("FilePanel", () => {
     await act(async () => { await flush(); });
   }
 
+  const section = (name: string) =>
+    [...container.querySelectorAll<HTMLElement>(".wf-sec")]
+      .find((el) => el.querySelector(".wf-sec-head")?.getAttribute("data-section") === name);
+
+  async function toggleSection(name: string) {
+    const head = section(name)?.querySelector<HTMLButtonElement>(".wf-sec-head");
+    await act(async () => { head?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+  }
+
   test("stays shut and asks the gateway for nothing until it is opened", async () => {
     await render();
     expect(getWorkspaceChanges).not.toHaveBeenCalled();
     expect(container.querySelector("#files")?.className).not.toContain("open");
+  });
+
+  test("opening the panel reads the checkout, because Outputs is built from it", async () => {
+    // Files an agent writes through a shell name no path in any tool call, so
+    // without git the Outputs list would silently omit them.
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    expect(getWorkspaceChanges).toHaveBeenCalledWith("/repo");
+  });
+
+  test("every section is on screen at once, and each folds away", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    expect(section("outputs")).toBeDefined();
+    expect(section("context")).toBeDefined();
+    expect(section("outputs")?.querySelector(".wf-sec-body")).not.toBeNull();
+
+    await toggleSection("outputs");
+    expect(section("outputs")?.querySelector(".wf-sec-body")).toBeNull();
+    expect(section("context")?.querySelector(".wf-sec-body")).not.toBeNull();
   });
 
   test("lists the folder's changed files with their line counts", async () => {
@@ -198,7 +231,9 @@ describe("FilePanel", () => {
       .toBe("/workspace/raw?cwd=/repo&path=/repo/docs/shot.png");
   });
 
-  test("the Session tab lists files the conversation touched", async () => {
+  // A conversation that read one file and wrote another — the split the panel
+  // exists to draw.
+  async function withTouchedSession() {
     const { useStore } = await import("../store/store.ts");
     const { makeSession } = await import("../store/reducers.ts");
     useStore.setState({
@@ -209,20 +244,215 @@ describe("FilePanel", () => {
         s1: {
           ...makeSession("s1"),
           cwd: "/repo",
+          items: [
+            {
+              id: "t1", kind: "tool", toolCallId: "t1", title: "Read", toolKind: "read",
+              status: "completed", locations: ["file:///repo/notes/plan.md"], content: [],
+            },
+            {
+              id: "t2", kind: "tool", toolCallId: "t2", title: "Write", toolKind: "edit",
+              status: "completed", locations: ["file:///repo/reports/raven.sql"], content: [],
+            },
+          ],
+        },
+      },
+    });
+    await render();
+  }
+
+  test("Outputs holds what the conversation wrote, Context what it only read", async () => {
+    await withTouchedSession();
+
+    const text = (name: string) => section(name)?.querySelector(".wf-sec-body")?.textContent ?? "";
+    expect(text("outputs")).toContain("raven.sql");
+    expect(text("outputs")).not.toContain("plan.md");
+    expect(text("context")).toContain("plan.md");
+    expect(text("context")).not.toContain("raven.sql");
+  });
+
+  test("each section header carries its own count", async () => {
+    await withTouchedSession();
+    const count = (name: string) => section(name)?.querySelector(".wf-sec-count")?.textContent;
+    // Outputs is the write plus the two files git reports dirty.
+    expect(count("outputs")).toBe("3");
+    expect(count("context")).toBe("1");
+  });
+
+  test("Outputs merges git's view with the thread's, one row per file", async () => {
+    // The same file named by a tool call AND reported dirty by git is one row —
+    // and it carries git's status letter and line counts, not just its name.
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", activeId: "s1",
+      sessions: {
+        s1: {
+          ...makeSession("s1"), cwd: "/repo",
           items: [{
-            id: "t1", kind: "tool", toolCallId: "t1", title: "Read", toolKind: "read",
-            status: "completed", locations: ["file:///repo/notes/plan.md"], content: [],
+            id: "t1", kind: "tool", toolCallId: "t1", title: "Edit", toolKind: "edit",
+            status: "completed", locations: ["/repo/src/gateway.ts"], content: [],
           }],
         },
       },
     });
     await render();
 
-    const tab = [...container.querySelectorAll<HTMLButtonElement>("button.wf-tab")]
-      .find((b) => b.dataset.tab === "session");
-    await act(async () => { tab?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const rows = [...section("outputs")!.querySelectorAll("button.wf-row")];
+    expect(rows.filter((r) => r.textContent?.includes("gateway.ts"))).toHaveLength(1);
+    expect(rows[0].textContent).toContain("+12");
+    expect(rows[0].querySelector(".wf-mark")?.className).toContain("wf-git modified");
+    expect(rows[0].querySelector(".wf-mark")?.textContent).toBe("M");
+  });
 
-    expect(container.querySelector(".wf-body")?.textContent).toContain("plan.md");
+  test("a file git knows nothing about keeps its type icon, not a status letter", async () => {
+    // Written to /tmp, or written and reverted: git has no letter for it.
+    getWorkspaceChanges.mockResolvedValue({ repo: "/repo", files: [], truncated: false });
+    await withTouchedSession();
+    const mark = section("outputs")!.querySelector(".wf-mark");
+    expect(mark?.className).toContain("wf-kind");
+    expect(mark?.querySelector("svg")).not.toBeNull();
+  });
+
+  test("the agent's plan leads the panel as a Progress section", async () => {
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", activeId: "s1",
+      sessions: {
+        s1: {
+          ...makeSession("s1"), cwd: "/repo",
+          items: [
+            { id: "p1", kind: "plan", entries: [{ content: "stale", status: "pending" }] },
+            // ACP resends the whole plan on every change; the last one wins.
+            { id: "p2", kind: "plan", entries: [
+              { content: "Gather the tickets", status: "completed" },
+              { content: "Draft the deck", status: "in_progress" },
+            ] },
+          ],
+        },
+      },
+    });
+    await render();
+
+    const sections = [...container.querySelectorAll(".wf-sec-head")].map((h) => h.getAttribute("data-section"));
+    expect(sections).toEqual(["progress", "outputs", "context"]);
+    const progress = section("progress")?.textContent ?? "";
+    expect(progress).toContain("Gather the tickets");
+    expect(progress).toContain("Draft the deck");
+    expect(progress).not.toContain("stale");
+  });
+
+  test("no plan, no Progress section", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    expect(section("progress")).toBeUndefined();
+  });
+
+  test("an output row opens on its diff", async () => {
+    await withTouchedSession();
+    const row = container.querySelector<HTMLButtonElement>("button.wf-row");
+    await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(getFileDiff).toHaveBeenCalledWith("/repo", "/repo/reports/raven.sql");
+  });
+
+  test("an empty Outputs list is only empty when git agrees", async () => {
+    getWorkspaceChanges.mockResolvedValue({ repo: "/repo", files: [], truncated: false });
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    expect(container.textContent).toContain("Nothing written in this conversation yet");
+  });
+
+  test("a file the agent wrote outside the project is still listed and clickable", async () => {
+    // Whether the gateway will serve it is the gateway's call (cwd, its repo,
+    // and ACPG_PREVIEW_ROOTS); the panel's job is to show the row and ask.
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    useStore.setState({
+      filesOpen: true,
+      cwd: "/repo",
+      activeId: "s1",
+      sessions: {
+        s1: {
+          ...makeSession("s1"), cwd: "/repo",
+          items: [{
+            id: "t1", kind: "tool", toolCallId: "t1", title: "Write", toolKind: "edit",
+            status: "completed", locations: ["/tmp/shot.png"], content: [],
+          }],
+        },
+      },
+    });
+    await render();
+
+    const row = container.querySelector<HTMLButtonElement>("button.wf-row");
+    expect(row?.textContent).toContain("shot.png");
+    await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(getFileDiff).toHaveBeenCalledWith("/repo", "/tmp/shot.png");
+  });
+
+  test("a refused file explains itself instead of printing the server's JSON", async () => {
+    getFileDiff.mockRejectedValue(new Error("This file is outside the conversation's project, so the gateway won't read it. Add its folder to ACPG_PREVIEW_ROOTS to allow it."));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/tmp/shot.png", path: "shot.png" });
+    });
+    await act(async () => { await flush(); });
+
+    expect(container.querySelector(".wf-empty")?.textContent).toContain("ACPG_PREVIEW_ROOTS");
+    expect(container.textContent).not.toContain('{"error"');
+  });
+
+  test("the panel is draggable to a new width, and remembers it", async () => {
+    // jsdom reports 1024px, below the 1100px column breakpoint, so the handle
+    // must be there only when the panel is actually a column.
+    const desktop = vi.fn().mockReturnValue({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    });
+    vi.stubGlobal("matchMedia", desktop);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    const panel = container.querySelector<HTMLElement>("#files");
+    const handle = container.querySelector<HTMLElement>(".wf-resize");
+    expect(handle).not.toBeNull();
+    const before = panel!.style.width;
+
+    // Drag the left edge 100px left — the panel is right-anchored, so that
+    // makes it wider.
+    await act(async () => {
+      handle!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 700 }) as PointerEvent);
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 600 }) as PointerEvent);
+      window.dispatchEvent(new MouseEvent("pointerup", {}) as PointerEvent);
+    });
+
+    expect(panel!.style.width).not.toBe(before);
+    expect(parseInt(panel!.style.width, 10)).toBe(parseInt(before, 10) + 100);
+    // Committed on release, so the next visit opens at the chosen width.
+    expect(localStorage.getItem("acpg.filePanelWidth")).toBe(String(parseInt(panel!.style.width, 10)));
+    // The drag must not leave the whole page unselectable.
+    expect(document.body.classList.contains("resizing")).toBe(false);
+    vi.unstubAllGlobals();
+  });
+
+  test("below the column breakpoint there is nothing to drag", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    expect(container.querySelector(".wf-resize")).toBeNull();
+    // No inline width either — the sheet's layout is the stylesheet's to own.
+    expect(container.querySelector<HTMLElement>("#files")!.style.width).toBe("");
+    vi.unstubAllGlobals();
   });
 
   test("says a non-repo folder has nothing to compare rather than showing an error", async () => {
@@ -230,7 +460,7 @@ describe("FilePanel", () => {
     const { useStore } = await import("../store/store.ts");
     useStore.setState({ filesOpen: true, cwd: "/repo" });
     await render();
-    expect(container.textContent).toContain("isn't a git repository");
+    expect(container.textContent).toContain("only files this conversation named");
   });
 
   test("refreshes when a turn finishes — the moment the list is most likely stale", async () => {

@@ -1,7 +1,7 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, getInboxPending, putLockConfig, searchSessions,
-  uploadFile,
+  uploadFile, getFilePreview,
 } from "./api.ts";
 
 function mockFetch(json: unknown) {
@@ -209,5 +209,27 @@ describe("api", () => {
     });
     const r = await searchSessions("needle");
     expect(r.results[0].hits).toEqual([]);
+  });
+});
+
+describe("workspace error bodies", () => {
+  test("a refused path names the setting that would allow it", async () => {
+    // The gateway writes these for a program. Rendering one raw put a literal
+    // {"error":...} in the panel.
+    const refusal = '{"error":"path outside root","code":"outside-root"}';
+    mockResponse({ ok: false, text: () => Promise.resolve(refusal) });
+    await expect(getFilePreview("/repo", "/tmp/shot.png")).rejects.toThrow(/ACPG_PREVIEW_ROOTS/);
+    mockResponse({ ok: false, text: () => Promise.resolve(refusal) });
+    await expect(getFilePreview("/repo", "/tmp/shot.png")).rejects.not.toThrow(/\{"error"/);
+  });
+
+  test("an unrecognised JSON error falls back to the caller's message", async () => {
+    mockResponse({ ok: false, text: () => Promise.resolve('{"error":"something internal"}') });
+    await expect(getFilePreview("/repo", "/x")).rejects.toThrow("Couldn't open this file.");
+  });
+
+  test("a plain-text error body is still shown as written", async () => {
+    mockResponse({ ok: false, text: () => Promise.resolve("authentication required") });
+    await expect(getFilePreview("/repo", "/x")).rejects.toThrow("authentication required");
   });
 });
