@@ -31,6 +31,7 @@ describe("FilePanel", () => {
   let getWorkspaceChanges: ReturnType<typeof vi.fn>;
   let getFileDiff: ReturnType<typeof vi.fn>;
   let getFilePreview: ReturnType<typeof vi.fn>;
+  let getWorkspaceTree: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -50,10 +51,16 @@ describe("FilePanel", () => {
       path: "src/gateway.ts", abs: "/repo/src/gateway.ts", kind: "text",
       size: 20, modifiedAt: new Date().toISOString(), text: "line one\nline two\n", truncated: false,
     } satisfies FilePreviewResult);
+    getWorkspaceTree = vi.fn().mockResolvedValue({
+      abs: "/repo", path: "", truncated: false,
+      entries: [{ name: "src", abs: "/repo/src", dir: true }],
+    });
     vi.doMock("../lib/api.ts", () => ({
       getWorkspaceChanges,
       getFileDiff,
       getFilePreview,
+      getWorkspaceTree,
+      findWorkspaceFiles: vi.fn().mockResolvedValue({ files: [], truncated: false, fromGit: true }),
       rawFileUrl: (cwd: string, p: string) => `/workspace/raw?cwd=${cwd}&path=${p}`,
     }));
   });
@@ -484,6 +491,68 @@ describe("FilePanel", () => {
     expect(progress).toContain("Gather the tickets");
     expect(progress).toContain("Draft the deck");
     expect(progress).not.toContain("stale");
+  });
+
+  const switchTo = async (label: string) => {
+    const btn = [...container.querySelectorAll<HTMLButtonElement>(".wf-switch button")]
+      .find((b) => b.textContent === label);
+    await act(async () => { btn?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+  };
+
+  test("opens on Session, and asks for no tree until Project is chosen", async () => {
+    // Session's lists are built from state the panel already holds; the tree is
+    // a request per level, so the default mode must cost none of them.
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    expect(container.querySelector(".wf-switch button.active")?.textContent).toBe("Session");
+    expect(getWorkspaceTree).not.toHaveBeenCalled();
+
+    await switchTo("Project");
+    // No path: the tree's root is the conversation's own folder.
+    expect(getWorkspaceTree).toHaveBeenCalledWith("/repo", undefined);
+    // Project is the whole panel — the conversation's lists are gone, not
+    // pushed below a tree.
+    expect(section("outputs")).toBeUndefined();
+    expect(container.textContent).toContain("src");
+
+    await switchTo("Session");
+    expect(section("outputs")).toBeDefined();
+  });
+
+  test("Back from a file opened in Project returns to Project, not to the lists", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await switchTo("Project");
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/app.ts", path: "src/app.ts", mode: "file" });
+    });
+    await act(async () => { await flush(); });
+    // The viewer takes over, and the switch goes with it — Back is the one way out.
+    expect(container.querySelector(".wf-switch")).toBeNull();
+
+    await act(async () => { useStore.getState().clearFilePreview(); });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-switch button.active")?.textContent).toBe("Project");
+    expect(section("outputs")).toBeUndefined();
+  });
+
+  test("a different folder is a different project, so the panel returns to Session", async () => {
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await switchTo("Project");
+
+    await act(async () => {
+      useStore.setState({ activeId: "s2", sessions: { s2: { ...makeSession("s2"), cwd: "/other" } } });
+    });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-switch button.active")?.textContent).toBe("Session");
   });
 
   test("no plan, no Progress section", async () => {
