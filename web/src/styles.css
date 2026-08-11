@@ -1046,6 +1046,12 @@
   .wf-image { padding: 12px; display: grid; place-items: center; }
   .wf-image button { display: block; max-width: 100%; padding: 0; }
   .wf-image img { display: block; max-width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--border); }
+  /* The framed document keeps its own background (usually white), same as any
+     rendered page would — the panel doesn't try to theme content it doesn't own. */
+  .wf-html-preview {
+    display: block; width: 100%; height: 70vh; min-height: 320px; margin-top: 8px;
+    border: 1px solid var(--border); border-radius: 10px; background: #fff;
+  }
   /* Full-size viewing stays inside the app (see FileContents): the native
      client hosts this console in a webview where a new tab has nowhere to go. */
   .wf-lightbox {
