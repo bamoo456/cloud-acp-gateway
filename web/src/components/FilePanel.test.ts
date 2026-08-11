@@ -158,6 +158,59 @@ describe("FilePanel", () => {
     expect(container.querySelector(".udiff-row.del .code")?.textContent).toBe("old line");
   });
 
+  test("an .html file gets a Preview mode; other files don't", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    // src/gateway.ts (from the default DIFF fixture) is not HTML.
+    const row = container.querySelector<HTMLButtonElement>("button.wf-row");
+    await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    const modeLabels = () => [...container.querySelectorAll(".wf-modes button:not(.wf-dl)")].map((b) => b.textContent);
+    expect(modeLabels()).toEqual(["Diff", "File"]);
+
+    getFilePreview.mockResolvedValue({
+      path: "report.html", abs: "/repo/report.html", kind: "text",
+      size: 40, modifiedAt: new Date().toISOString(), text: "<h1>hi</h1>", truncated: false,
+    } satisfies FilePreviewResult);
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/report.html", path: "report.html", mode: "file" });
+    });
+    await act(async () => { await flush(); });
+    expect(modeLabels()).toEqual(["Diff", "File", "Preview"]);
+  });
+
+  test("Preview renders the file in a sandboxed iframe with no same-origin access", async () => {
+    getFilePreview.mockResolvedValue({
+      path: "report.html", abs: "/repo/report.html", kind: "text",
+      size: 40, modifiedAt: new Date().toISOString(),
+      text: "<html><head></head><body><h1>hi</h1></body></html>", truncated: false,
+    } satisfies FilePreviewResult);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/report.html", path: "report.html", mode: "file" });
+    });
+    await act(async () => { await flush(); });
+
+    const previewBtn = [...container.querySelectorAll<HTMLButtonElement>(".wf-modes button")]
+      .find((b) => b.textContent === "Preview");
+    await act(async () => { previewBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    const iframe = container.querySelector<HTMLIFrameElement>("iframe.wf-html-preview");
+    expect(iframe).not.toBeNull();
+    expect(iframe?.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(iframe?.getAttribute("referrerpolicy")).toBe("no-referrer");
+    // The injected CSP is the actual security boundary's belt-and-suspenders —
+    // assert it's really there, not just that an iframe exists.
+    expect(iframe?.getAttribute("srcdoc")).toContain("Content-Security-Policy");
+    expect(container.textContent).toContain("Sandboxed preview");
+  });
+
   test("a file with no diff falls through to its contents instead of an empty pane", async () => {
     getFileDiff.mockResolvedValue({ ...DIFF, diff: "" });
     const { useStore } = await import("../store/store.ts");
