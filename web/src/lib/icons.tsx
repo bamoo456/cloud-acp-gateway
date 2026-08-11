@@ -140,13 +140,14 @@ export function IconFile() {
   );
 }
 
-// The file-preview panel's header toggle: a document with a diff's +/- on it,
-// so it reads as "the files that changed" rather than "attach a file".
+// The file-preview panel's header toggle: the standard VS Code / macOS
+// "toggle right panel" glyph — a frame with a divider toward the right,
+// matching that this panel opens on the right edge of the screen.
 export function IconPanel() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="4" width="7.5" height="16" rx="2" />
-      <rect x="13.5" y="4" width="7.5" height="16" rx="2" />
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M15 4v16" />
     </svg>
   );
 }
