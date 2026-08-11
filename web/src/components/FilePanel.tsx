@@ -10,6 +10,7 @@ import { mergePanelFiles, type PanelFile } from "../lib/panelFiles.ts";
 import { fileKind, extensionOf } from "../lib/fileKind.ts";
 import { highlightBlock, highlightLanguageFor } from "../lib/highlight.ts";
 import { downloadFile } from "../lib/download.ts";
+import { FileTree } from "./FileTree.tsx";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
 import { HtmlPreview } from "./HtmlPreview.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -22,23 +23,38 @@ import {
 import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, fileIcon } from "../lib/icons.tsx";
 
 // The file preview panel: what the agent actually produced, rather than what it
-// said about it. Three lists and one viewer.
+// said about it. Two modes, three lists and one viewer.
+//
+// SESSION is what this conversation did — the default, and the reason the panel
+// exists:
 //
 //   Outputs — files this conversation WROTE, read back out of the thread's own
-//             tool calls. The default: "show me what it made" is the question
-//             the panel exists to answer.
+//             tool calls. "Show me what it made" is the question the panel is
+//             opened to answer.
 //   Context — files it only consulted. Same source, other half of the split.
-//   Changes — git's view of the conversation's folder. Last, because it answers
-//             a different question ("what is dirty in my checkout"), but not
-//             optional: an agent that writes through a shell names no path in
-//             any tool call, so for those turns — and for every codex and
+//   Changes — git's view of the conversation's folder. Merged into Outputs, but
+//             not optional: an agent that writes through a shell names no path
+//             in any tool call, so for those turns — and for every codex and
 //             opencode conversation, whose transcripts record no paths at all —
-//             this is the ONLY list that shows the work.
+//             this is the ONLY source that shows the work.
+//
+// PROJECT is the folder itself, browsable. A separate mode rather than a fourth
+// section: every list in Session is built FROM the conversation, so none of them
+// knows about a file nobody has touched yet — a different question, needing the
+// full height of the panel rather than whatever is left under three lists.
+//
+// The two modes are not the tabs this panel deliberately avoids. Those would
+// have split the three Session lists, which answer one question between them
+// ("what happened to files here") and were unusable when the reader had to guess
+// which list knew about a given file. Session and Project answer questions you
+// know which of you are asking.
 //
 // Opening a row shows its diff; a binary, an image, or an unchanged file falls
-// through to the contents view on its own.
+// through to the contents view on its own. The viewer takes over the whole
+// panel, and Back returns to the mode you opened the file from.
 
 type Section = "Progress" | "Outputs" | "Context";
+type Mode = "session" | "project";
 
 // Drag the panel's left edge to set its width. A separator rather than a bare
 // div: it is focusable and answers the arrow keys, so the panel is resizable
@@ -194,12 +210,20 @@ export function FilePanel() {
   // would silently show an unrelated repo's changes.
   const cwd = session?.cwd || storeCwd;
 
-  // Sections, not tabs — all three are on screen at once, and each remembers
-  // whether it is folded. Progress leads because it is the answer to "where is
-  // the agent up to", which is the question you open this panel mid-turn to ask.
+  // Within Session: sections, not tabs — all three are on screen at once, and
+  // each remembers whether it is folded. Progress leads because it is the answer
+  // to "where is the agent up to", which is the question you open this panel
+  // mid-turn to ask.
   const [folded, setFolded] = useState<Partial<Record<Section, boolean>>>({});
   const toggle = (name: Section) => setFolded((f) => ({ ...f, [name]: !f[name] }));
   const [changes, setChanges] = useState<ChangesResult | null>(null);
+  // The panel is closed and reopened rather than unmounted, so the mode
+  // survives — someone browsing a folder and glancing away should come back to
+  // where they were. A new folder is a different project, so that resets.
+  const [mode, setMode] = useState<Mode>("session");
+  useEffect(() => { setMode("session"); }, [cwd]);
+  // Refresh re-lists the tree too, but nothing else does — see FileTree.
+  const [treeKey, setTreeKey] = useState(0);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // Only the newest request may write state: switching folders or hammering
@@ -281,18 +305,38 @@ export function FilePanel() {
           {target && (
             <button className="icon-btn" title="Back to file list" onClick={clearFilePreview}><IconBack /></button>
           )}
+          {/* Naming the folder is half of what the Project mode is for, and it
+              is the only thing here that says WHICH checkout the lists describe
+              when a session's cwd differs from the picker's. */}
           <span className="wf-title" title={target ? target.abs : cwd}>
-            {target ? target.path : "Files"}
+            {target ? target.path : <>Files <span className="wf-cwd">{basename(cwd)}</span></>}
           </span>
           {!target && (
-            <button className="icon-btn" title="Refresh" onClick={loadChanges} disabled={loading}><IconRefresh /></button>
+            <button className="icon-btn" title="Refresh" disabled={loading}
+              onClick={() => { loadChanges(); setTreeKey((k) => k + 1); }}><IconRefresh /></button>
           )}
           <button className="icon-btn" title="Close" onClick={closeFiles}><IconX /></button>
         </div>
 
+        {/* Hidden behind the viewer: a file's Back button already says where it
+            returns to, and the switch would be a second, competing way out. */}
+        {!target && (
+          <div className="wf-switch" role="tablist" aria-label="What to show">
+            <button role="tab" aria-selected={mode === "session"} className={mode === "session" ? "active" : ""}
+              onClick={() => setMode("session")}>Session</button>
+            <button role="tab" aria-selected={mode === "project"} className={mode === "project" ? "active" : ""}
+              onClick={() => setMode("project")}>Project</button>
+          </div>
+        )}
+
         {target && <FileView cwd={cwd} target={target} />}
 
-        {!target && (
+        {!target && mode === "project" && (
+          <FileTree cwd={cwd} reloadKey={treeKey}
+            onOpenFile={(f) => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })} />
+        )}
+
+        {!target && mode === "session" && (
           <div className="wf-body">
             {plan && plan.kind === "plan" && plan.entries.length > 0 && (
               <Section title="Progress" open={!folded.Progress} onToggle={() => toggle("Progress")}>

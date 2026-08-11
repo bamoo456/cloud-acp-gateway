@@ -138,14 +138,27 @@ The gateway skips agent entries whose command does not exist, so one shared
 
 An agent working through the gateway writes real files on the gateway host —
 edited modules, generated reports, screenshots. The **Files** button in the top
-bar opens a side panel for reading them back — one scrolling column of
-collapsible sections:
+bar opens a side panel for reading them back. It has two modes:
+
+**Session** — what this conversation did, as one scrolling column of collapsible
+sections. The default.
 
 | Section | What it shows |
 |---|---|
 | Progress | The agent's current plan, when it has published one. |
 | Outputs | Every file this turn's work touched: what the conversation wrote (from its own tool calls) merged with what `git status` reports dirty in the checkout. One row per file. A file git tracks leads with git's status letter (`A`/`M`/`D`/`R`/`U`) and its `+`/`−` line counts; anything git has nothing to say about — a file written to `/tmp`, written and reverted, or already committed — leads with its type icon instead. |
 | Context | Files the conversation only consulted — read, searched, fetched. |
+
+**Project** — the folder itself, as a lazily-expanded tree with a pinned **Find
+files** box that matches on any part of a path. Every list in Session is built
+*from* the conversation, so none of them knows about a file nobody has touched
+yet; this is how you open one. Entries `git` ignores are dimmed rather than
+hidden, and `.git` is the one thing left out.
+
+Two modes rather than a fourth section, because the tree wants the panel's full
+height and answers a question you know you are asking. Within Session the three
+lists stay stacked and simultaneously visible — splitting *those* into tabs is
+what makes a reader guess which list knows about a given file.
 
 Opening a row shows that file:
 
@@ -201,10 +214,18 @@ opencode edit) reports a command, never a path. `git status` runs when the panel
 opens and again when a turn finishes; without a git checkout the list falls back
 to tool calls alone and says so.
 
-It reads through four authenticated endpoints (`/workspace/changes`,
-`/workspace/diff`, `/workspace/file`, `/workspace/raw`) — see *What the preview
-can reach* above for their boundary. Listing changed files requires `git` on the
-gateway host; a folder that isn't a checkout simply shows nothing to compare.
+It reads through six authenticated endpoints (`/workspace/changes`,
+`/workspace/diff`, `/workspace/file`, `/workspace/raw`, `/workspace/tree`,
+`/workspace/find`) — see *What the preview can reach* above for their boundary,
+which is deliberately the same one for all six: a tree that listed more than the
+viewer can open would offer rows it then refuses. Listing changed files requires
+`git` on the gateway host; a folder that isn't a checkout simply shows nothing to
+compare.
+
+Find files asks `git` for the file list, so it never walks into `node_modules`
+and never misses a dotfile — the same rule that dims a row in the tree decides
+whether it is a search candidate. Without a checkout it falls back to a bounded
+walk that folds away the usual build and dependency directories by name.
 
 ## Deployment
 

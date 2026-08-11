@@ -1027,6 +1027,45 @@
   .wf-counts .del { color: var(--err); }
   .wf-counts .bin { color: var(--muted); font-weight: 600; }
 
+  /* Session ⇄ Project. A segmented control rather than the pill row the viewer
+     uses for Diff/File/Preview: this one splits the whole panel, so it reads as
+     one control with two halves instead of a toolbar of options. */
+  .wf-switch {
+    flex: 0 0 auto; display: flex; gap: 2px; margin: 8px; padding: 3px;
+    background: var(--surface-2); border-radius: 9px;
+  }
+  .wf-switch button {
+    flex: 1; min-height: 28px; padding: 5px 0; border-radius: 7px;
+    font-size: 13px; font-weight: 600; color: var(--muted);
+  }
+  .wf-switch button.active {
+    background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .10);
+  }
+  .wf-switch button:hover:not(.active) { color: var(--text); }
+  /* the folder the lists describe, next to the panel's own name */
+  .wf-cwd { font-weight: 400; color: var(--muted); }
+
+  /* the project tree — same row as the lists above it, plus a twisty and an
+     indent that comes from the component (depth is a paddingLeft, so a deep
+     row still truncates its name rather than overflowing the panel) */
+  .wf-tree-row { gap: 6px; }
+  .wf-twist { flex: 0 0 auto; display: flex; width: 14px; color: var(--muted); }
+  .wf-twist svg { width: 14px; height: 14px; }
+  /* git wouldn't track it. Dimmed rather than hidden: "why is dist grey" is a
+     better question to leave a reader with than "where is dist". */
+  .wf-tree-row.ignored .wf-nm,
+  .wf-tree-row.ignored .wf-mark { opacity: .45; font-style: italic; }
+  .wf-size {
+    flex: 0 0 auto; font-size: 11.5px; color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .wf-find { padding: 4px 8px 8px; }
+  .wf-find input {
+    width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface-2); color: var(--text); font-size: 13px;
+  }
+  .wf-find input::placeholder { color: var(--muted); }
+
   /* diff / file switch above the viewer */
   .wf-modes {
     flex: 0 0 auto; display: flex; align-items: center; gap: 6px;

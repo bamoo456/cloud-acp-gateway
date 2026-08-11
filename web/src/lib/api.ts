@@ -199,6 +199,49 @@ export async function getFilePreview(cwd: string, filePath: string): Promise<Fil
   };
 }
 
+// ---- browsing the project itself ----
+// Outputs and Context answer "what did this conversation touch". These answer
+// "what else is in here", which is the question you have when the file you want
+// was never named in the thread. Same guard as the viewer, so every row listed
+// is a row that opens.
+export interface TreeEntry {
+  name: string;
+  abs: string;
+  dir: boolean;
+  size?: number;
+  ignored?: boolean;  // git wouldn't track it — dimmed, still listed
+  symlink?: boolean;
+}
+export interface TreeResult { abs: string; path: string; entries: TreeEntry[]; truncated: boolean }
+export interface FoundFile { path: string; abs: string }
+// `fromGit`: the search used git's file list, so ignored files were never
+// candidates. The panel says so rather than letting a visible-but-ignored file
+// look like a search that missed.
+export interface FindResult { files: FoundFile[]; truncated: boolean; fromGit: boolean }
+
+// `dir` omitted lists the conversation's own folder — the tree's root.
+export async function getWorkspaceTree(cwd: string, dir?: string): Promise<TreeResult> {
+  const url = base() + "/workspace/tree?cwd=" + encodeURIComponent(cwd)
+    + (dir ? "&path=" + encodeURIComponent(dir) : "");
+  const r = await readJson(await fetch(url), "Couldn't list this folder.");
+  return {
+    abs: String(r?.abs ?? dir ?? cwd),
+    path: String(r?.path ?? ""),
+    entries: Array.isArray(r?.entries) ? r.entries : [],
+    truncated: !!r?.truncated,
+  };
+}
+
+export async function findWorkspaceFiles(cwd: string, query: string): Promise<FindResult> {
+  const url = base() + "/workspace/find?cwd=" + encodeURIComponent(cwd) + "&q=" + encodeURIComponent(query);
+  const r = await readJson(await fetch(url), "Couldn't search this folder.");
+  return {
+    files: Array.isArray(r?.files) ? r.files : [],
+    truncated: !!r?.truncated,
+    fromGit: !!r?.fromGit,
+  };
+}
+
 // The <img> source for an image preview, and the href behind "Download" for
 // everything else. A URL rather than a fetch: the browser sends the console's
 // Basic credentials with a subresource load on the same origin, so an <img>
