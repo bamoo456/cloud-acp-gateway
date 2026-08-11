@@ -924,3 +924,238 @@
   @media (max-width: 760px) {
     .amenu.login-term { left: 8px; right: 8px; width: auto; bottom: calc(8px + env(safe-area-inset-bottom)); top: auto; }
   }
+
+  /* ---- workspace file preview panel ---- */
+  /* Below the desktop breakpoint it is a right-anchored sheet, mirroring the
+     sessions panel on the left; at 1100px+ (where a 284px sidebar, a readable
+     chat column and this can coexist) it becomes a real column instead. */
+  #files {
+    position: absolute; top: calc(52px + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
+    max-width: 560px; margin-left: auto;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); z-index: 25; overflow: hidden;
+    transform-origin: top center; display: none; flex-direction: column;
+    max-height: calc(100vh - 52px - env(safe-area-inset-top) - 14px);
+  }
+  @supports (height: 100dvh) {
+    #files { max-height: calc(100dvh - 52px - env(safe-area-inset-top) - 14px); }
+  }
+  #files.open { display: flex; animation: pop .14s ease-out; }
+  #files-scrim { position: fixed; inset: 0; z-index: 20; display: none; }
+  #files-scrim.open { display: block; }
+  .files-btn.on { color: var(--accent); background: var(--surface-2); }
+
+  .wf-head {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
+    min-height: 48px; padding: 5px 6px 5px 12px; border-bottom: 1px solid var(--border);
+  }
+  .wf-title {
+    flex: 1; min-width: 0; font-size: 14px; font-weight: 650;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .wf-head .icon-btn svg { width: 18px; height: 18px; }
+  .wf-head .icon-btn:disabled { opacity: .45; cursor: default; }
+  /* Stacked collapsible sections rather than tabs: all of them on screen at
+     once, so nobody has to guess which list would know about a given file. */
+  .wf-sec { border-bottom: 1px solid var(--border); }
+  .wf-sec:last-child { border-bottom: none; }
+  .wf-sec-head {
+    display: flex; align-items: center; gap: 6px; width: 100%;
+    padding: 11px 10px 11px 6px; text-align: left;
+    font-size: 13px; font-weight: 700; color: var(--muted);
+  }
+  .wf-sec-head:hover { color: var(--text); }
+  .wf-sec.open .wf-sec-title { color: var(--text); }
+  .wf-chev { display: flex; flex: 0 0 auto; width: 18px; color: var(--muted); }
+  .wf-chev svg { width: 16px; height: 16px; }
+  .wf-sec-title { flex: 0 0 auto; }
+  .wf-sec-count {
+    flex: 0 0 auto; min-width: 18px; padding: 1px 6px; border-radius: 999px;
+    background: var(--surface-2); font-size: 11.5px; font-weight: 700; text-align: center;
+  }
+  .wf-sec-body { padding: 0 2px 10px; }
+  /* The plan sits in a section that already names it, so it needs none of the
+     card chrome it wears in the thread. */
+  .wf-sec-body .plan { border: none; background: none; margin: 0; padding: 0 6px; }
+  .wf-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 8px 10px; }
+  .wf-empty { padding: 18px 14px; color: var(--muted); font-size: 14px; text-align: center; }
+  .wf-empty a { color: var(--accent); }
+  /* the caveat under an empty Outputs list — quieter than the line above it */
+  .wf-sub { margin-top: 8px; font-size: 12.5px; line-height: 1.5; opacity: .85; }
+  .linkish { color: var(--accent); font: inherit; text-decoration: underline; padding: 0 0 0 4px; }
+  .wf-note { padding: 8px 14px; color: var(--muted); font-size: 12px; }
+
+  /* one changed / touched file */
+  .wf-row {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 9px 10px; border-radius: 10px; text-align: left;
+  }
+  .wf-row:hover { background: var(--surface-2); }
+  .wf-mark {
+    flex: 0 0 auto; width: 20px; text-align: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; font-weight: 800; color: var(--muted);
+  }
+  /* git's own status letter, in git's own colours — the lead glyph is the whole
+     answer to "does the checkout know about this file". */
+  .wf-mark.wf-git.added, .wf-mark.wf-git.untracked { color: var(--ok); }
+  .wf-mark.wf-git.deleted { color: var(--err); }
+  .wf-mark.wf-git.modified, .wf-mark.wf-git.renamed { color: var(--accent); }
+  /* Outputs/Context rows lead with a type glyph instead of a status letter. */
+  .wf-mark.wf-kind { display: flex; align-items: center; justify-content: center; }
+  .wf-mark.wf-kind svg { width: 16px; height: 16px; }
+  /* wf-nm / wf-dir rather than the bare .nm / .dir used elsewhere: .dir is
+     already the folder-browser's row (min-height 48px, flex), and inheriting it
+     here stretched every file row to twice its height. */
+  .wf-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .wf-nm { font-size: 14px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wf-dir {
+    font-size: 11.5px; line-height: 1.35; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .wf-counts {
+    flex: 0 0 auto; display: flex; gap: 6px; font-size: 12px; font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .wf-counts .add { color: var(--ok); }
+  .wf-counts .del { color: var(--err); }
+  .wf-counts .bin { color: var(--muted); font-weight: 600; }
+
+  /* diff / file switch above the viewer */
+  .wf-modes {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+    padding: 6px 6px 6px 10px; border-bottom: 1px solid var(--border);
+  }
+  .wf-modes button {
+    min-height: 30px; padding: 5px 12px; border-radius: 8px;
+    font-size: 13px; font-weight: 700; color: var(--muted);
+  }
+  .wf-modes button.active { color: var(--accent); background: var(--surface-2); }
+  .wf-modes button:hover:not(.active) { background: var(--surface-2); color: var(--text); }
+  .wf-modes .sp { flex: 1 1 auto; }
+  .wf-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .wf-dl { width: 34px; height: 34px; }
+  .wf-dl svg { width: 18px; height: 18px; }
+
+  /* text / image viewers */
+  .wf-text {
+    margin: 0; padding: 10px 12px; overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    line-height: 1.5; white-space: pre; tab-size: 2;
+  }
+  .wf-image { padding: 12px; display: grid; place-items: center; }
+  .wf-image button { display: block; max-width: 100%; padding: 0; }
+  .wf-image img { display: block; max-width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--border); }
+  /* Full-size viewing stays inside the app (see FileContents): the native
+     client hosts this console in a webview where a new tab has nowhere to go. */
+  .wf-lightbox {
+    position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
+    padding: 16px; background: #000000d9; backdrop-filter: blur(2px);
+    animation: pop .12s ease-out;
+  }
+  .wf-lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .wf-lightbox .icon-btn {
+    position: absolute; top: calc(10px + env(safe-area-inset-top)); right: 10px;
+    color: #fff; background: #ffffff22;
+  }
+
+  /* whole-file unified diff (git's own output, hunk by hunk) */
+  /* max-content so the block is as wide as its widest line: the body scrolls
+     horizontally for long lines, and without this the added/deleted row tint
+     would stop at the viewport edge while the code kept going past it. */
+  .udiff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; min-width: max-content; }
+  .udiff-stat { display: flex; gap: 10px; padding: 8px 12px 4px; font-weight: 800; }
+  .udiff-stat .add { color: var(--ok); }
+  .udiff-stat .del { color: var(--err); }
+  .udiff-hunk { margin: 8px 0; border-top: 1px solid var(--border); }
+  .udiff-head {
+    padding: 5px 12px; background: var(--surface-2); color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .udiff-row { display: flex; align-items: flex-start; line-height: 1.5; }
+  .udiff-row .gutter {
+    flex: 0 0 auto; width: 38px; padding: 0 6px; text-align: right;
+    color: var(--muted); opacity: .65; user-select: none; font-size: 11.5px;
+  }
+  .udiff-row .sign { flex: 0 0 auto; width: 14px; text-align: center; user-select: none; }
+  /* The code cell scrolls the whole row set as one block (the .wf-body scroller),
+     so long lines don't wrap into an unreadable zig-zag. */
+  .udiff-row .code { flex: 1 1 auto; white-space: pre; padding-right: 12px; }
+  .udiff-row.add { background: rgba(58,155,92,.13); }
+  .udiff-row.add .sign { color: var(--ok); }
+  .udiff-row.del { background: rgba(207,91,78,.13); }
+  .udiff-row.del .sign { color: var(--err); }
+
+  /* A file path in a tool card, turned into a control that opens the panel on
+     that file. Inherits the surrounding .loc/.path look; only the affordances
+     are added, so the thread reads the same as before until you hover one. */
+  /* A produced file, as a card in the thread. Sized so a turn that writes a
+     handful of files still reads as a conversation, not a file manager. */
+  .fcard {
+    display: flex; align-items: stretch; gap: 8px; margin-bottom: 8px;
+    border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2);
+    overflow: hidden;
+  }
+  .fcard-main {
+    flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 11px;
+    padding: 10px 12px; text-align: left;
+  }
+  .fcard-main:hover { background: var(--surface); }
+  .fcard-icon {
+    flex: 0 0 auto; display: grid; place-items: center;
+    width: 34px; height: 34px; border-radius: 9px;
+    background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+  }
+  .fcard-icon svg { width: 17px; height: 17px; }
+  .fcard-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .fcard-name {
+    font-size: 13.5px; font-weight: 600; line-height: 1.3;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .fcard-kind { font-size: 11.5px; color: var(--muted); }
+  .fcard-dl {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+    padding: 0 13px; border-left: 1px solid var(--border);
+    font-size: 12.5px; font-weight: 600; color: var(--muted);
+  }
+  .fcard-dl:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+  .fcard-dl:disabled { opacity: .5; cursor: default; }
+  .fcard-dl.failed, .wf-dl.failed { color: var(--err); }
+  .fcard-dl svg { width: 15px; height: 15px; }
+  /* The label is the first thing worth dropping when the thread is narrow —
+     the icon alone still reads as "save this". */
+  @media (max-width: 520px) {
+    .fcard-dl span { display: none; }
+    .fcard-dl { padding: 0 11px; }
+  }
+
+  .openable {
+    display: block; width: 100%; text-align: left; font: inherit;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .openable:hover { color: var(--accent); text-decoration: underline; }
+  .diff .path.openable { border-bottom: 1px solid var(--border); }
+
+  /* The drag handle sits ON the panel's left border rather than beside it, so
+     resizing costs no layout width. Hidden below the breakpoint, where the
+     panel is a sheet and its width is not the reader's to choose. */
+  .wf-resize { display: none; }
+
+  @media (min-width: 1100px) {
+    #files-scrim { display: none !important; }
+    #files {
+      position: relative; flex: 0 0 auto; width: min(440px, 34vw); max-width: 440px;
+      height: 100%; inset: auto; margin: 0;
+      border: none; border-left: 1px solid var(--border); border-radius: 0;
+      box-shadow: none; animation: none;
+    }
+    .wf-resize {
+      display: block; position: absolute; top: 0; bottom: 0; left: -3px; width: 7px;
+      z-index: 2; cursor: col-resize; touch-action: none;
+    }
+    .wf-resize:hover, .wf-resize:focus-visible { background: var(--accent); opacity: .5; outline: none; }
+    /* Set on <body> for the length of a drag: without it the pointer selects
+       the chat text it passes over, and the cursor reverts to a caret the
+       moment it leaves the 7px strip. */
+    body.resizing { user-select: none; cursor: col-resize; }
+  }

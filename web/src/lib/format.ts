@@ -2,6 +2,38 @@ export function basename(p: string): string {
   return (p || "").replace(/\/+$/, "").split("/").pop() || p || "/";
 }
 
+// Everything above the directory in a path ("src/lib/api.ts" -> "src/lib"), for
+// the second line of a file row. Empty for a file at the root.
+export function dirname(p: string): string {
+  const i = (p || "").replace(/\/+$/, "").lastIndexOf("/");
+  return i > 0 ? p.slice(0, i) : "";
+}
+
+// A path as it reads inside a folder: "/repo/web/src/App.tsx" against "/repo"
+// becomes "web/src/App.tsx". Anything outside keeps its absolute path — in a
+// column this narrow, a "../../" chain is noise, and the full path at least
+// says where the file really is.
+export function relativeTo(p: string, dir: string): string {
+  return isInside(p, dir) ? p.slice(dir.replace(/\/+$/, "").length + 1) : p;
+}
+
+// Is `p` under `dir`? The client's copy of the gateway's own ACPG_FS_ROOT test,
+// used to say up front that a file can't be opened rather than letting the row
+// look ordinary until it is clicked. An empty `dir` means "unknown" — the
+// config didn't say — so nothing is claimed to be outside it.
+export function isInside(p: string, dir: string): boolean {
+  if (!dir || !p) return false;
+  const base = dir.replace(/\/+$/, "");
+  return p.startsWith(base + "/");
+}
+
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10 * 1024 ? 1 : 0) + " KB";
+  return (n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0) + " MB";
+}
+
 // Capitalize an agent name for display (e.g. "codex" -> "Codex").
 export function displayName(name: string): string {
   return name ? name[0].toUpperCase() + name.slice(1) : name;

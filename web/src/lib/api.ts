@@ -2,7 +2,7 @@ import type { PermissionOption } from "../types.ts";
 
 export interface HistorySession { sessionId: string; title: string | null; updatedAt: string; }
 export interface DiscoveredHistorySession extends HistorySession { cwd: string; source: "claude-cli"; }
-export interface ViewBlock { type: "text" | "thought" | "tool" | "image"; text?: string; name?: string; toolCallId?: string; status?: string; output?: string; mimeType?: string; data?: string; uri?: string; }
+export interface ViewBlock { type: "text" | "thought" | "tool" | "image"; text?: string; name?: string; toolCallId?: string; status?: string; output?: string; locations?: string[]; kind?: string; mimeType?: string; data?: string; uri?: string; }
 export interface ViewMessage { role: "user" | "assistant"; blocks: ViewBlock[]; }
 export interface MessagesResult { messages: ViewMessage[]; total: number; start: number; truncated: boolean; }
 export interface DirEntry { name: string; git: boolean; }
@@ -10,10 +10,25 @@ export interface FsResult { root: string; path: string; parent: string | null; d
 
 const base = () => location.protocol + "//" + location.host;
 
+// Prose for the failures a person can act on. Keyed on a `code` the server
+// sends rather than on its English message, so the wording is the client's to
+// choose and stays fixable without touching the gateway.
+const ERROR_TEXT: Record<string, string> = {
+  "outside-root": "This file is outside the conversation's project, so the gateway won't read it. Add its folder to ACPG_PREVIEW_ROOTS to allow it.",
+};
+
 async function readJson(r: Response, unavailableMessage: string): Promise<any> {
   if (r.ok === false) {
     let body = "";
     try { body = (await r.text()).trim(); } catch { /* ignore */ }
+    // A JSON error body is written for a program, not for a reader — rendering
+    // it raw put a literal {"error":"path outside root"} in the panel. Use the
+    // mapped text, or the caller's own message, but never the payload.
+    if (body.startsWith("{")) {
+      let code = "";
+      try { code = String((JSON.parse(body) as { code?: unknown }).code ?? ""); } catch { /* not our shape */ }
+      throw new Error(ERROR_TEXT[code] || unavailableMessage);
+    }
     throw new Error(body || unavailableMessage);
   }
   try {
@@ -111,6 +126,84 @@ export async function uploadFile(file: File): Promise<{ name: string; uri: strin
   const j = await readJson(r, "Couldn't upload the file.");
   if (!j?.uri) throw new Error("Couldn't upload the file.");
   return { name: String(j.name || file.name), uri: String(j.uri) };
+}
+
+// ---- workspace file preview ----
+// The agent writes files on the gateway host; these read them back so the panel
+// can show what it produced instead of only what it said about it. Every path
+// travels as the absolute path the gateway itself reported (ChangedFile.abs, or
+// a tool call's own location), with `cwd` supplying the git context.
+//
+// The gateway serves what is inside the conversation's project (its cwd and the
+// repo around it) plus whatever ACPG_PREVIEW_ROOTS names — see
+// allowedPreviewPath in src/gateway.ts. A path outside all of those comes back
+// as `outside-root`, which readJson turns into the prose above.
+export type ChangeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
+export interface ChangedFile {
+  path: string;   // repo-root-relative, for display
+  abs: string;    // how every other call addresses this file
+  status: ChangeStatus;
+  staged: boolean;
+  oldPath?: string;
+  additions?: number;
+  deletions?: number;
+  binary?: boolean;
+}
+// `repo: null` means the folder isn't a git checkout (or git isn't installed) —
+// `reason` distinguishes those so the panel can say which.
+export interface ChangesResult { repo: string | null; files: ChangedFile[]; truncated: boolean; reason?: string }
+export interface FileDiffResult { path: string; status: ChangeStatus; diff: string; binary: boolean; truncated: boolean }
+export interface FilePreviewResult {
+  path: string; abs: string;
+  kind: "text" | "image" | "binary";
+  size: number; modifiedAt: string;
+  mimeType?: string; text?: string; truncated?: boolean;
+}
+
+export async function getWorkspaceChanges(cwd: string): Promise<ChangesResult> {
+  const url = base() + "/workspace/changes?cwd=" + encodeURIComponent(cwd);
+  const r = await readJson(await fetch(url), "File changes aren't available on this gateway.");
+  return {
+    repo: typeof r?.repo === "string" ? r.repo : null,
+    files: Array.isArray(r?.files) ? r.files : [],
+    truncated: !!r?.truncated,
+    reason: typeof r?.reason === "string" ? r.reason : undefined,
+  };
+}
+
+export async function getFileDiff(cwd: string, filePath: string): Promise<FileDiffResult> {
+  const url = base() + "/workspace/diff?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+  const r = await readJson(await fetch(url), "Couldn't read this file's diff.");
+  return {
+    path: String(r?.path ?? filePath),
+    status: (r?.status ?? "modified") as ChangeStatus,
+    diff: typeof r?.diff === "string" ? r.diff : "",
+    binary: !!r?.binary,
+    truncated: !!r?.truncated,
+  };
+}
+
+export async function getFilePreview(cwd: string, filePath: string): Promise<FilePreviewResult> {
+  const url = base() + "/workspace/file?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+  const r = await readJson(await fetch(url), "Couldn't open this file.");
+  return {
+    path: String(r?.path ?? filePath),
+    abs: String(r?.abs ?? filePath),
+    kind: r?.kind === "image" || r?.kind === "binary" ? r.kind : "text",
+    size: typeof r?.size === "number" ? r.size : 0,
+    modifiedAt: String(r?.modifiedAt ?? ""),
+    mimeType: typeof r?.mimeType === "string" ? r.mimeType : undefined,
+    text: typeof r?.text === "string" ? r.text : undefined,
+    truncated: !!r?.truncated,
+  };
+}
+
+// The <img> source for an image preview, and the href behind "Download" for
+// everything else. A URL rather than a fetch: the browser sends the console's
+// Basic credentials with a subresource load on the same origin, so an <img>
+// works without pulling megabytes of base64 through JSON first.
+export function rawFileUrl(cwd: string, filePath: string): string {
+  return base() + "/workspace/raw?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
 }
 
 // Pinned ("favorite") folders live on the server (shared across devices/IPs),

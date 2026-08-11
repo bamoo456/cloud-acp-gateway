@@ -17,11 +17,17 @@ function diffLines(a: string[], b: string[]): Row[] {
   while (j < m) res.push({ t: "add", text: b[j++] });
   return res;
 }
-export function Diff({ path, oldText, newText }: { path?: string; oldText?: string; newText?: string }) {
+// `renderPath` lets a caller turn the header into a control (ToolCall makes it
+// open the file preview panel) without this component knowing about the store.
+// Default: the plain label it has always been.
+export function Diff({ path, oldText, newText, renderPath }: {
+  path?: string; oldText?: string; newText?: string;
+  renderPath?: (path: string) => React.ReactNode;
+}) {
   const rows = diffLines((oldText || "").split("\n"), (newText || "").split("\n"));
   return (
     <div className="diff">
-      <div className="path">{path || "diff"}</div>
+      {path && renderPath ? renderPath(path) : <div className="path">{path || "diff"}</div>}
       {rows.map((r, k) => <span key={k} className={"ln " + r.t}>{r.text}</span>)}
     </div>
   );
