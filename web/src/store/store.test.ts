@@ -1269,6 +1269,92 @@ describe("store notification routing", () => {
     await sending;
   });
 
+  test("sends a whole file as a resource_link and a line range as an embedded resource", async () => {
+    const { useStore } = await import("./store.ts");
+
+    const ws = await bootstrapAndWaitForSse(useStore);
+    ws.open();
+    await flush();
+    const init = JSON.parse(ws.sent[0]);
+    ws.recv({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: 1, agentCapabilities: { promptCapabilities: { embeddedContext: true } }, authMethods: [] } });
+    await flush();
+    const sessReq = JSON.parse(ws.sent[1]);
+    ws.recv({ jsonrpc: "2.0", id: sessReq.id, result: { sessionId: "ref-session" } });
+    await flush();
+
+    const sending = useStore.getState().sendPrompt("look at these", [], [
+      { name: "web/src/App.tsx", uri: "file:///repo/web/src/App.tsx" },
+      { name: "FilePanel.tsx", range: "12-13", uri: "file:///repo/FilePanel.tsx#L12-L13", text: "one\ntwo" },
+    ]);
+    await flush();
+
+    // The whole file stays a link the agent resolves itself; the range travels
+    // with its lines, because the lines are the entire point of sending it.
+    // Both adapters render an embedded resource as a <context ref="…"> block.
+    const prompt = JSON.parse(ws.sent[2]);
+    expect(prompt.params.prompt).toEqual([
+      { type: "text", text: "look at these" },
+      { type: "resource_link", uri: "file:///repo/web/src/App.tsx", name: "web/src/App.tsx" },
+      { type: "resource", resource: { uri: "file:///repo/FilePanel.tsx#L12-L13", mimeType: "text/plain", text: "one\ntwo" } },
+    ]);
+
+    // The user's own bubble shows both as chips, range and all.
+    const user = useStore.getState().sessions["ref-session"].items.find((it) => it.kind === "user") as any;
+    expect(user.files).toEqual([
+      { name: "web/src/App.tsx", uri: "file:///repo/web/src/App.tsx" },
+      { name: "FilePanel.tsx", range: "12-13", uri: "file:///repo/FilePanel.tsx#L12-L13", text: "one\ntwo" },
+    ]);
+
+    ws.recv({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
+    await sending;
+  });
+
+  test("an empty line range still sends its lines, rather than degrading to a link", async () => {
+    // "" is a real selection — a blank line — and `f.text` is what decides the
+    // wire shape, so the check has to be for undefined and not for falsy.
+    const { useStore } = await import("./store.ts");
+
+    const ws = await bootstrapAndWaitForSse(useStore);
+    ws.open();
+    await flush();
+    const init = JSON.parse(ws.sent[0]);
+    ws.recv({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: 1, agentCapabilities: { promptCapabilities: { embeddedContext: true } }, authMethods: [] } });
+    await flush();
+    const sessReq = JSON.parse(ws.sent[1]);
+    ws.recv({ jsonrpc: "2.0", id: sessReq.id, result: { sessionId: "blank-session" } });
+    await flush();
+
+    const sending = useStore.getState().sendPrompt("this line", [], [
+      { name: "a.ts", range: "9", uri: "file:///repo/a.ts#L9", text: "" },
+    ]);
+    await flush();
+
+    const prompt = JSON.parse(ws.sent[2]);
+    expect(prompt.params.prompt[1]).toEqual({
+      type: "resource", resource: { uri: "file:///repo/a.ts#L9", mimeType: "text/plain", text: "" },
+    });
+
+    ws.recv({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
+    await sending;
+  });
+
+  test("attached files de-duplicate on the URI, so two ranges of one file both stay", async () => {
+    const { useStore } = await import("./store.ts");
+    const whole = { name: "a.ts", uri: "file:///repo/a.ts" };
+    const first = { name: "a.ts", range: "1-3", uri: "file:///repo/a.ts#L1-L3", text: "x" };
+    const second = { name: "a.ts", range: "9-12", uri: "file:///repo/a.ts#L9-L12", text: "y" };
+
+    useStore.getState().attachFiles([whole, first]);
+    useStore.getState().attachFiles([second, first]); // `first` again — already there
+    expect(useStore.getState().attachedFiles).toEqual([whole, first, second]);
+
+    useStore.getState().removeAttachedFile(1);
+    expect(useStore.getState().attachedFiles).toEqual([whole, second]);
+
+    useStore.getState().clearAttachedFiles();
+    expect(useStore.getState().attachedFiles).toEqual([]);
+  });
+
   test("drops images when the agent does not report the image capability", async () => {
     const { useStore, ws } = await bootstrapClaude(); // init result reports no promptCapabilities
     expect(useStore.getState().promptCapabilities.image).toBeFalsy();

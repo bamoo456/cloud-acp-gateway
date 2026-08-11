@@ -3,6 +3,7 @@ import type {
   Model, Mode, ConfigOption, ToolContentItem, MessageImage, MessageFile,
 } from "../types.ts";
 import type { ViewMessage } from "../lib/api.ts";
+import { describeFileUri } from "../lib/mentions.ts";
 
 // Updates that are part of a session/load replay; dropped during a lazy resume
 // because /history/messages already rendered the history.
@@ -53,7 +54,12 @@ export function contentImage(c: ContentBlock | undefined): MessageImage | null {
 export function contentFile(c: ContentBlock | undefined): MessageFile | null {
   if (!c) return null;
   if (c.type === "resource_link") return { name: c.name || c.uri || "file", uri: c.uri };
-  if (c.type === "resource" && c.resource?.uri) return { name: c.resource.uri, uri: c.resource.uri };
+  // An embedded resource names nothing but its URI, so the chip's label has to
+  // be read back out of it — otherwise a line range replays as the whole
+  // file:///Users/… path where the composer showed "FilePanel.tsx 412-427".
+  if (c.type === "resource" && c.resource?.uri) {
+    return { ...describeFileUri(c.resource.uri), uri: c.resource.uri };
+  }
   return null;
 }
 

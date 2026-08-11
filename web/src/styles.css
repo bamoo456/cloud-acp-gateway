@@ -764,6 +764,11 @@
     background: var(--surface-2); font-size: 13px; color: var(--text); }
   .file-chip > svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--muted); }
   .file-chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the lines a range chip covers — "412-427" */
+  .file-chip .rng {
+    flex: 0 0 auto; color: var(--accent);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 700;
+  }
   .file-chip .chip-x { flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%;
     display: grid; place-items: center; font-size: 10px; line-height: 1; color: var(--muted); }
   .file-chip .chip-x:hover { background: var(--border); color: var(--text); }
@@ -997,6 +1002,10 @@
     padding: 9px 10px; border-radius: 10px; text-align: left;
   }
   .wf-row:hover { background: var(--surface-2); }
+  /* A long press on a row asks for the file menu. iOS answers a long press on
+     its own — a text-selection callout over the row — unless both of these say
+     the row isn't text to be selected. */
+  .wf-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   .wf-mark {
     flex: 0 0 auto; width: 20px; text-align: center;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1081,6 +1090,53 @@
   .wf-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .wf-dl { width: 34px; height: 34px; }
   .wf-dl svg { width: 18px; height: 18px; }
+  /* "add the selected lines to the chat". Dim until there is a selection, then
+     it fills and names the range it will attach. */
+  .wf-add {
+    flex: 0 0 auto; width: auto; height: 34px; padding: 0 8px;
+    display: inline-flex; align-items: center; gap: 5px;
+    border-radius: 8px; color: var(--muted);
+  }
+  .wf-add svg { width: 17px; height: 17px; }
+  .wf-add:disabled { opacity: .45; cursor: default; }
+  .wf-add.on { background: var(--accent); color: var(--accent-text); }
+  .wf-add .lines {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; font-weight: 700; white-space: nowrap;
+  }
+  /* The code in the viewer must stay selectable — .wf-row above turns selection
+     off for the lists, and the rule would otherwise reach this too. */
+  .wf-text, .wf-text code { -webkit-user-select: text; user-select: text; }
+
+  /* Right-click / long-press menu on a file row. A dropdown at the pointer on a
+     desktop, a bottom sheet on a phone — the same switch .amenu makes, and the
+     same 640px it makes it at. */
+  .wf-menu-scrim { position: fixed; inset: 0; z-index: 40; }
+  .wf-menu {
+    position: fixed; z-index: 50; width: 214px; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: 14px; box-shadow: var(--shadow); animation: pop .12s ease-out;
+  }
+  .wf-menu-head { padding: 9px 14px 7px; border-bottom: 1px solid var(--border); }
+  .wf-menu-head .nm { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wf-menu-head .dir { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wf-menu-row {
+    display: flex; align-items: center; gap: 11px; width: 100%; text-align: left;
+    padding: 11px 14px; font-size: 14px; color: var(--text);
+  }
+  .wf-menu-row + .wf-menu-row { border-top: 1px solid var(--border); }
+  .wf-menu-row:hover { background: var(--surface-2); }
+  .wf-menu-row svg { width: 17px; height: 17px; flex: 0 0 auto; color: var(--muted); }
+  .wf-menu-row.accent, .wf-menu-row.accent svg { color: var(--accent); }
+  @media (max-width: 640px) {
+    .wf-menu-scrim { background: #00000070; backdrop-filter: blur(2px); }
+    .wf-menu.sheet {
+      left: 8px; right: 8px; width: auto; top: auto;
+      bottom: calc(8px + env(safe-area-inset-bottom));
+      border-radius: 20px; animation: sheetup .27s cubic-bezier(.32,.72,0,1);
+    }
+    .wf-menu.sheet .wf-menu-row { padding: 15px 18px; font-size: 16px; }
+  }
 
   /* text / image viewers */
   .wf-text {

@@ -25,6 +25,7 @@ describe("FileTree", () => {
   let getWorkspaceTree: ReturnType<typeof vi.fn>;
   let findWorkspaceFiles: ReturnType<typeof vi.fn>;
   let onOpenFile: ReturnType<typeof vi.fn>;
+  let onMenu: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -32,6 +33,7 @@ describe("FileTree", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     onOpenFile = vi.fn();
+    onMenu = vi.fn();
     getWorkspaceTree = vi.fn().mockImplementation((_cwd: string, dir?: string) =>
       Promise.resolve({
         abs: dir ?? "/repo", path: dir ? "src" : "", truncated: false,
@@ -56,7 +58,7 @@ describe("FileTree", () => {
     const { FileTree } = await import("./FileTree.tsx");
     await act(async () => {
       root = createRoot(container);
-      root.render(React.createElement(FileTree, { cwd, reloadKey, onOpenFile }));
+      root.render(React.createElement(FileTree, { cwd, reloadKey, onOpenFile, onMenu }));
     });
     await act(async () => { await flush(); });
   }
@@ -125,6 +127,43 @@ describe("FileTree", () => {
     expect(onOpenFile).toHaveBeenCalledWith({ abs: "/repo/src/app.ts", name: "app.ts" });
   });
 
+  test("a right-click reports the entry it landed on, and whether it is a folder", async () => {
+    await render();
+    const menu = async (name: string, x: number, y: number) => {
+      await act(async () => {
+        rowNamed(name)?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: x, clientY: y }));
+      });
+    };
+
+    await menu("README.md", 12, 34);
+    // The panel positions the menu itself, so it needs the pointer as well as
+    // the file — and isDir, because a folder is not something to attach.
+    expect(onMenu).toHaveBeenCalledWith({ abs: "/repo/README.md", name: "README.md", isDir: false }, 12, 34);
+
+    await menu("src", 40, 60);
+    expect(onMenu).toHaveBeenLastCalledWith({ abs: "/repo/src", name: "src", isDir: true }, 40, 60);
+
+    // The row's own action is untouched: the menu is a second gesture, not a
+    // replacement for opening the file.
+    expect(onOpenFile).not.toHaveBeenCalled();
+  });
+
+  test("a find hit has the same menu as a tree row", async () => {
+    await render();
+    const input = container.querySelector<HTMLInputElement>(".wf-find input")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "app");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await settle(); });
+
+    await act(async () => {
+      rowNamed("app.ts")?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 5, clientY: 6 }));
+    });
+    expect(onMenu).toHaveBeenCalledWith({ abs: "/repo/src/app.ts", name: "app.ts" }, 5, 6);
+  });
+
   test("an empty result says why an ignored file wasn't found", async () => {
     findWorkspaceFiles.mockResolvedValue({ files: [], truncated: false, fromGit: true });
     await render();
@@ -149,14 +188,14 @@ describe("FileTree", () => {
     // folder. Only a bumped reloadKey (the Refresh button) does.
     await act(async () => {
       const { FileTree } = await import("./FileTree.tsx");
-      root!.render(React.createElement(FileTree, { cwd: "/repo", reloadKey: 0, onOpenFile }));
+      root!.render(React.createElement(FileTree, { cwd: "/repo", reloadKey: 0, onOpenFile, onMenu }));
     });
     await act(async () => { await flush(); });
     expect(getWorkspaceTree).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       const { FileTree } = await import("./FileTree.tsx");
-      root!.render(React.createElement(FileTree, { cwd: "/repo", reloadKey: 1, onOpenFile }));
+      root!.render(React.createElement(FileTree, { cwd: "/repo", reloadKey: 1, onOpenFile, onMenu }));
     });
     await act(async () => { await flush(); });
     expect(getWorkspaceTree).toHaveBeenCalledTimes(2);

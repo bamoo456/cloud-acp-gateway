@@ -43,6 +43,7 @@ function MessageFiles({ files }: { files: MessageFile[] }) {
       {files.map((f, i) => (
         <span className="file-chip" key={i} title={f.uri || f.name}>
           <IconFile /><span className="nm">{f.name}</span>
+          {f.range && <span className="rng">{f.range}</span>}
         </span>
       ))}
     </div>

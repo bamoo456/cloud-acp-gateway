@@ -37,10 +37,17 @@ export interface ContentBlock {
 // the user sends and images the agent returns.
 export interface MessageImage { mimeType: string; data?: string; uri?: string; }
 
-// A file referenced via the composer's "@ file" picker. `name` is the cwd-relative
-// path shown on the chip; `uri` is the file:// URI sent to the agent as an ACP
-// `resource_link` so the agent can read the file itself.
-export interface MessageFile { name: string; uri?: string; }
+// A file referenced via the composer's "@ file" picker, or attached from the
+// file panel. `name` is the path shown on the chip; `uri` is the file:// URI
+// sent to the agent as an ACP `resource_link` so the agent can read the file
+// itself.
+//
+// A range of lines picked out of the file viewer carries two more fields: the
+// `range` the chip prints ("412-427"), and the `text` of those lines. `text` is
+// what changes the wire shape — a reference with lines is sent as an embedded
+// resource carrying them, so the agent has the lines in the prompt rather than
+// a link it has to go and resolve.
+export interface MessageFile { name: string; uri?: string; range?: string; text?: string; }
 
 // What an agent reports it can accept in a prompt (from `initialize`'s
 // agentCapabilities.promptCapabilities). We only gate on `image` today.
