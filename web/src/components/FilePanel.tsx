@@ -11,6 +11,11 @@ import { fileKind, extensionOf } from "../lib/fileKind.ts";
 import { highlightBlock, highlightLanguageFor } from "../lib/highlight.ts";
 import { downloadFile } from "../lib/download.ts";
 import { FileTree } from "./FileTree.tsx";
+import { FileMenu, useRowMenu, type FileMenuTarget } from "./FileMenu.tsx";
+import { makeAbsFile, makeRangeFile } from "../lib/mentions.ts";
+import { rangeFromOffsets, sliceLines, formatRange, type LineRange } from "../lib/lineRange.ts";
+import { copyText } from "../lib/clipboard.ts";
+import type { MessageFile } from "../types.ts";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
 import { HtmlPreview } from "./HtmlPreview.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -20,7 +25,7 @@ import {
   clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH,
   DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
 } from "../lib/panelWidth.ts";
-import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, fileIcon } from "../lib/icons.tsx";
+import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, fileIcon } from "../lib/icons.tsx";
 
 // The file preview panel: what the agent actually produced, rather than what it
 // said about it. Two modes, three lists and one viewer.
@@ -114,12 +119,14 @@ const STATUS_LABEL: Record<ChangeStatus, string> = {
   added: "Added", modified: "Modified", deleted: "Deleted", renamed: "Renamed", untracked: "New file",
 };
 
-function FileRow({ lead, leadClass, leadTitle, name, dir, right, onClick }: {
+function FileRow({ lead, leadClass, leadTitle, name, dir, right, onClick, onMenu }: {
   lead: React.ReactNode; leadClass: string; leadTitle: string;
   name: string; dir: string; right?: React.ReactNode; onClick: () => void;
+  onMenu: (x: number, y: number) => void;
 }) {
+  const menu = useRowMenu(onMenu);
   return (
-    <button className="wf-row" onClick={onClick} title={dir ? dir + "/" + name : name}>
+    <button className="wf-row" onClick={onClick} {...menu} title={dir ? dir + "/" + name : name}>
       <span className={"wf-mark " + leadClass} title={leadTitle}>{lead}</span>
       <span className="wf-name">
         <span className="wf-nm">{name}</span>
@@ -157,7 +164,9 @@ function Section({ title, count, open, onToggle, children }: {
 // Tool calls report absolute paths, and in a column this narrow the folder
 // prefix every row shares would push the part that distinguishes them off the
 // end. Show the path as it reads from the conversation's own folder.
-function PanelRow({ file, cwd, onOpen }: { file: PanelFile; cwd: string; onOpen: () => void }) {
+function PanelRow({ file, cwd, onOpen, onMenu }: {
+  file: PanelFile; cwd: string; onOpen: () => void; onMenu: (x: number, y: number) => void;
+}) {
   const kind = fileKind(file.label);
   const git = file.git;
   const counts = git && ((git.additions ?? 0) + (git.deletions ?? 0) > 0 || git.binary);
@@ -169,6 +178,7 @@ function PanelRow({ file, cwd, onOpen }: { file: PanelFile; cwd: string; onOpen:
       name={file.label}
       dir={dirname(relativeTo(file.abs, cwd))}
       onClick={onOpen}
+      onMenu={onMenu}
       right={counts ? (
         <span className="wf-counts">
           {git!.binary
@@ -186,13 +196,14 @@ function PanelRow({ file, cwd, onOpen }: { file: PanelFile; cwd: string; onOpen:
 // Context rows never carry git status — the question there is "what did the
 // agent read", and whether that file also happens to be dirty is someone else's
 // business.
-function ContextRow({ path, label, cwd, onOpen }: {
+function ContextRow({ path, label, cwd, onOpen, onMenu }: {
   path: string; label: string; cwd: string; onOpen: () => void;
+  onMenu: (x: number, y: number) => void;
 }) {
   const kind = fileKind(label);
   return (
     <FileRow lead={fileIcon(kind.icon)} leadClass="wf-kind" leadTitle={kind.category}
-      name={label} dir={dirname(relativeTo(path, cwd))} onClick={onOpen} />
+      name={label} dir={dirname(relativeTo(path, cwd))} onClick={onOpen} onMenu={onMenu} />
   );
 }
 
@@ -202,6 +213,10 @@ export function FilePanel() {
   const closeFiles = useStore((s) => s.closeFiles);
   const clearFilePreview = useStore((s) => s.clearFilePreview);
   const openFilePreview = useStore((s) => s.openFilePreview);
+  const attachFiles = useStore((s) => s.attachFiles);
+  // The same capability the composer's "@" button is gated on: file references
+  // ride on embeddedContext, and an agent without it drops them on send.
+  const canAttach = useStore((s) => !!s.promptCapabilities.embeddedContext);
   const session = useStore((s) => (s.activeId ? s.sessions[s.activeId] : null));
   const storeCwd = useStore((s) => s.cwd);
   // The folder to inspect is the one the *conversation* runs in. It can differ
@@ -278,6 +293,21 @@ export function FilePanel() {
     return () => { mq.removeEventListener("change", sync); window.removeEventListener("resize", sync); };
   }, []);
 
+  // Which row was right-clicked / long-pressed, and where the menu goes. Null
+  // is the ordinary state: no menu.
+  const [menu, setMenu] = useState<FileMenuTarget | null>(null);
+  const openMenu = (abs: string, isDir: boolean, x: number, y: number) =>
+    setMenu({ abs, name: basename(abs), dir: dirname(relativeTo(abs, cwd)), isDir, x, y });
+
+  // Attaching is the one action here that has its result somewhere else — on the
+  // composer. Below the desktop breakpoint this panel is a sheet ON TOP of the
+  // chat, so the chip it just added would be behind it: get out of the way,
+  // which is where you were going anyway.
+  function attach(files: MessageFile[]) {
+    attachFiles(files);
+    if (!desktop) closeFiles();
+  }
+
   const touched = touchedFiles(session?.items ?? []);
   const context = touched.filter((f) => f.role === "context");
   const outputs = mergePanelFiles(touched.filter((f) => f.role === "output"), changes?.files ?? []);
@@ -329,11 +359,17 @@ export function FilePanel() {
           </div>
         )}
 
-        {target && <FileView cwd={cwd} target={target} />}
+        {target && (
+          <FileView cwd={cwd} target={target} canAttach={canAttach}
+            onAttach={(range, text) => attach([
+              makeRangeFile(target.abs, basename(target.path), range, text),
+            ])} />
+        )}
 
         {!target && mode === "project" && (
           <FileTree cwd={cwd} reloadKey={treeKey}
-            onOpenFile={(f) => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })} />
+            onOpenFile={(f) => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })}
+            onMenu={(f, x, y) => openMenu(f.abs, !!f.isDir, x, y)} />
         )}
 
         {!target && mode === "session" && (
@@ -360,14 +396,16 @@ export function FilePanel() {
               )}
               {written.map((f) => (
                 <PanelRow key={f.abs} file={f} cwd={cwd}
-                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })} />
+                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
+                  onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
               ))}
               {alsoChanged.length > 0 && (
                 <div className="wf-group">Other changes in this folder</div>
               )}
               {alsoChanged.map((f) => (
                 <PanelRow key={f.abs} file={f} cwd={cwd}
-                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })} />
+                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
+                  onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
               ))}
               {/* Without git the list is only what tool calls named — no
                   shell-written file, nothing another conversation changed. Say
@@ -391,17 +429,49 @@ export function FilePanel() {
               )}
               {context.map((f) => (
                 <ContextRow key={f.path} path={f.path} label={f.label} cwd={cwd}
-                  onOpen={() => openFilePreview({ abs: f.path, path: relativeTo(f.path, cwd), mode: "file" })} />
+                  onOpen={() => openFilePreview({ abs: f.path, path: relativeTo(f.path, cwd), mode: "file" })}
+                  onMenu={(x, y) => openMenu(f.path, false, x, y)} />
               ))}
             </Section>
           </div>
         )}
       </aside>
+      {/* Outside the panel, not inside it: the menu is positioned against the
+          viewport, and the panel is the one element here that animates in on a
+          transform (which would re-anchor a fixed child to it). */}
+      {menu && (
+        <FileMenu target={menu} canAttach={canAttach}
+          onAttach={() => attach([makeAbsFile(menu.abs, relativeTo(menu.abs, cwd))])}
+          onOpen={menu.isDir ? undefined : () =>
+            openFilePreview({ abs: menu.abs, path: relativeTo(menu.abs, cwd), mode: "file" })}
+          onCopyPath={() => void copyText(menu.abs)}
+          onClose={() => setMenu(null)} />
+      )}
     </>
   );
 }
 
-function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
+// What is selected inside the rendered code, as whole lines. The offsets are
+// walked out of the DOM rather than taken from the fetched text: a highlighted
+// file is a tree of <span>s, and only a Range walk gives coordinates in the same
+// string the element's own textContent is counted in.
+function selectedRange(code: HTMLElement | null): LineRange | null {
+  if (!code) return null;
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+  const picked = sel.getRangeAt(0);
+  if (!code.contains(picked.startContainer) || !code.contains(picked.endContainer)) return null;
+  const before = document.createRange();
+  before.selectNodeContents(code);
+  before.setEnd(picked.startContainer, picked.startOffset);
+  const from = before.toString().length;
+  return rangeFromOffsets(code.textContent ?? "", from, from + picked.toString().length);
+}
+
+function FileView({ cwd, target, canAttach, onAttach }: {
+  cwd: string; target: FilePreviewTarget; canAttach: boolean;
+  onAttach: (range: LineRange, text: string) => void;
+}) {
   const [mode, setMode] = useState<PreviewMode>(target.mode);
   const [diff, setDiff] = useState<FileDiffResult | null>(null);
   const [file, setFile] = useState<FilePreviewResult | null>(null);
@@ -414,6 +484,41 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
   const autoSwitched = useRef<string | null>(null);
 
   useEffect(() => { setMode(target.mode); }, [target.abs, target.mode]);
+
+  // The rendered code element, and which lines are selected inside it. Watched
+  // through selectionchange rather than a mouseup: a selection is also made by
+  // keyboard, by double-click, and by the touch handles, and only this event
+  // sees all of them.
+  const codeRef = useRef<HTMLElement>(null);
+  const [range, setRange] = useState<LineRange | null>(null);
+  useEffect(() => {
+    setRange(null);
+    if (mode !== "file") return;
+    // Deliberately only ever arms the button, never disarms it. Pressing a
+    // button IS what clears a selection on most platforms — the tap collapses
+    // it before the click lands — so a handler that mirrored every collapse
+    // would disable the button in the instant between pressing it and it
+    // firing. What is armed stays armed until the lines are attached or the
+    // file changes, and the button prints the range it holds, so it cannot
+    // quietly attach something other than what it says.
+    const sync = () => {
+      const picked = selectedRange(codeRef.current);
+      if (picked) setRange(picked);
+    };
+    document.addEventListener("selectionchange", sync);
+    return () => document.removeEventListener("selectionchange", sync);
+  }, [mode, target.abs]);
+
+  function addSelection() {
+    const text = codeRef.current?.textContent;
+    if (!range || !text) return;
+    onAttach(range, sliceLines(text, range));
+    // Dropping the selection is the acknowledgement: on a phone the panel is
+    // about to close over the chip, and on a desktop it stops the same lines
+    // being added twice by a second click.
+    window.getSelection()?.removeAllRanges();
+    setRange(null);
+  }
 
   useEffect(() => {
     let alive = true;
@@ -460,7 +565,25 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
         <button className={mode === "file" ? "active" : ""} onClick={() => setMode("file")}>File</button>
         {canPreview && <button className={mode === "render" ? "active" : ""} onClick={() => setMode("render")}>Preview</button>}
         <span className="sp" />
-        {file && <span className="wf-meta">{formatBytes(file.size)}{file.modifiedAt ? " · " + timeAgo(file.modifiedAt) : ""}</span>}
+        {/* Yields the room to the range while there is one: both at once
+            overflow the toolbar on a phone-width panel. */}
+        {file && !range && <span className="wf-meta">{formatBytes(file.size)}{file.modifiedAt ? " · " + timeAgo(file.modifiedAt) : ""}</span>}
+        {/* Select lines in the file and they can go to the composer as an
+            attachment. Present but dim with nothing selected — an action that
+            only exists once you have already done the thing that enables it is
+            an action nobody finds. */}
+        {canAttach && mode === "file" && file?.kind === "text" && (
+          <button type="button" className={"icon-btn wf-add" + (range ? " on" : "")} disabled={!range}
+            onClick={addSelection}
+            // Keeps the lines visibly selected while the button is pressed —
+            // the default action of a mousedown is to collapse the selection.
+            onMouseDown={(e) => e.preventDefault()}
+            title={range
+              ? "Add lines " + formatRange(range) + " to the chat"
+              : "Select lines in the file to add them to the chat"}>
+            <IconAddToChat />{range && <span className="lines">{formatRange(range)}</span>}
+          </button>
+        )}
         <DownloadButton raw={raw} name={basename(target.path)} />
       </div>
       <div className="wf-body">
@@ -479,7 +602,7 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
               ? <div className="wf-empty">Binary file — there's nothing to diff. Switch to File to preview or download it.</div>
               : <UnifiedDiff diff={diff.diff} path={target.path} truncated={diff.truncated} />
         )}
-        {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} />}
+        {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} codeRef={codeRef} />}
         {!err && !loading && mode === "render" && file && (
           file.kind !== "text"
             ? <div className="wf-empty">Binary file — there's nothing to render. Switch to File to preview or download it.</div>
@@ -526,7 +649,12 @@ function DownloadButton({ raw, name }: { raw: string; name: string }) {
   );
 }
 
-function FileContents({ file, raw }: { file: FilePreviewResult; raw: string }) {
+function FileContents({ file, raw, codeRef }: {
+  file: FilePreviewResult; raw: string;
+  // The element a selection is measured against — held by FileView, which owns
+  // the toolbar button that acts on it.
+  codeRef: React.RefObject<HTMLElement>;
+}) {
   // Full-size viewing is an overlay inside the app, not target="_blank". The
   // panel is narrow and a screenshot is the thing you most want to zoom into,
   // but a new-window request in the native client's WKWebView has nowhere to go
@@ -568,8 +696,8 @@ function FileContents({ file, raw }: { file: FilePreviewResult; raw: string }) {
     <>
       <pre className="wf-text">
         {html != null
-          ? <code className="wf-hl" dangerouslySetInnerHTML={{ __html: html }} />
-          : <code>{file.text}</code>}
+          ? <code ref={codeRef} className="wf-hl" dangerouslySetInnerHTML={{ __html: html }} />
+          : <code ref={codeRef}>{file.text}</code>}
       </pre>
       {file.truncated && <div className="wf-note">File truncated at {formatBytes(file.text?.length ?? 0)}.</div>}
     </>
