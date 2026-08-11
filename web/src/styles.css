@@ -1086,6 +1086,42 @@
   .udiff-row.del { background: rgba(207,91,78,.13); }
   .udiff-row.del .sign { color: var(--err); }
 
+  /* syntax colour for the file preview and diff views — GitHub's own Light/Dark
+     hljs theme (github.css / github-dark.css), scoped so it never touches the
+     chat's own markdown code blocks. No base .hljs colour/background rule, same
+     as the chat's .md .hljs-* below: these panels already own their text colour
+     and surface, this only paints the tokens on top of it. */
+  .wf-hl .hljs-doctag, .wf-hl .hljs-keyword, .wf-hl .hljs-meta .hljs-keyword,
+  .wf-hl .hljs-template-tag, .wf-hl .hljs-template-variable, .wf-hl .hljs-type,
+  .wf-hl .hljs-variable.language_ { color: #d73a49; }
+  .wf-hl .hljs-title, .wf-hl .hljs-title.class_, .wf-hl .hljs-title.function_ { color: #6f42c1; }
+  .wf-hl .hljs-attr, .wf-hl .hljs-attribute, .wf-hl .hljs-literal, .wf-hl .hljs-meta,
+  .wf-hl .hljs-number, .wf-hl .hljs-operator, .wf-hl .hljs-variable,
+  .wf-hl .hljs-selector-attr, .wf-hl .hljs-selector-class, .wf-hl .hljs-selector-id { color: #005cc5; }
+  .wf-hl .hljs-regexp, .wf-hl .hljs-string, .wf-hl .hljs-meta .hljs-string { color: #032f62; }
+  .wf-hl .hljs-built_in, .wf-hl .hljs-symbol { color: #e36209; }
+  .wf-hl .hljs-comment, .wf-hl .hljs-code, .wf-hl .hljs-formula { color: #6a737d; }
+  .wf-hl .hljs-name, .wf-hl .hljs-quote, .wf-hl .hljs-selector-tag, .wf-hl .hljs-selector-pseudo { color: #22863a; }
+  .wf-hl .hljs-section { color: #005cc5; font-weight: bold; }
+  .wf-hl .hljs-bullet { color: #735c0f; }
+  .wf-hl .hljs-emphasis { font-style: italic; }
+  .wf-hl .hljs-strong { font-weight: bold; }
+  @media (prefers-color-scheme: dark) {
+    .wf-hl .hljs-doctag, .wf-hl .hljs-keyword, .wf-hl .hljs-meta .hljs-keyword,
+    .wf-hl .hljs-template-tag, .wf-hl .hljs-template-variable, .wf-hl .hljs-type,
+    .wf-hl .hljs-variable.language_ { color: #ff7b72; }
+    .wf-hl .hljs-title, .wf-hl .hljs-title.class_, .wf-hl .hljs-title.function_ { color: #d2a8ff; }
+    .wf-hl .hljs-attr, .wf-hl .hljs-attribute, .wf-hl .hljs-literal, .wf-hl .hljs-meta,
+    .wf-hl .hljs-number, .wf-hl .hljs-operator, .wf-hl .hljs-variable,
+    .wf-hl .hljs-selector-attr, .wf-hl .hljs-selector-class, .wf-hl .hljs-selector-id { color: #79c0ff; }
+    .wf-hl .hljs-regexp, .wf-hl .hljs-string, .wf-hl .hljs-meta .hljs-string { color: #a5d6ff; }
+    .wf-hl .hljs-built_in, .wf-hl .hljs-symbol { color: #ffa657; }
+    .wf-hl .hljs-comment, .wf-hl .hljs-code, .wf-hl .hljs-formula { color: #8b949e; }
+    .wf-hl .hljs-name, .wf-hl .hljs-quote, .wf-hl .hljs-selector-tag, .wf-hl .hljs-selector-pseudo { color: #7ee787; }
+    .wf-hl .hljs-section { color: #1f6feb; }
+    .wf-hl .hljs-bullet { color: #f2cc60; }
+  }
+
   /* A file path in a tool card, turned into a control that opens the panel on
      that file. Inherits the surrounding .loc/.path look; only the affordances
      are added, so the thread reads the same as before until you hover one. */
