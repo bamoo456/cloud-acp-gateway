@@ -501,6 +501,11 @@ export async function tree(cwd: string, abs: string, displayPath: string): Promi
   // structurally), so it would sit at the top of every tree undimmed.
   const ents = all.filter((e) => e.name !== ".git");
 
+  // Sort before the cap, so a truncated folder shows its first N names rather
+  // than whichever N the filesystem happened to hand back — and so re-opening
+  // it shows the same N. The rows are sorted again after the stat pass, which
+  // is what moves folders to the top; this pass only makes the cut stable.
+  ents.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
   const truncated = ents.length > MAX_TREE_ENTRIES;
   const kept = truncated ? ents.slice(0, MAX_TREE_ENTRIES) : ents;
   const root = await repoRoot(cwd);
