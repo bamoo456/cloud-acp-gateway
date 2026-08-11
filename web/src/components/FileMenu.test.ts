@@ -93,6 +93,22 @@ describe("useRowMenu", () => {
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
+  test("a dismissed menu doesn't leave the row needing two taps", async () => {
+    // The click that ends a long press lands on the menu's scrim, not on the
+    // row — so the row never sees the click that would clear its suppression.
+    // The next tap has to open the file, not be swallowed as that one's tail.
+    await act(async () => { row().dispatchEvent(pointer("pointerdown", { clientX: 10, clientY: 20 })); });
+    await act(async () => { vi.advanceTimersByTime(600); });
+    await act(async () => { row().dispatchEvent(pointer("pointerup")); });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    // …the menu is dismissed somewhere else, and the row is tapped again.
+    await act(async () => { row().dispatchEvent(pointer("pointerdown", { clientX: 10, clientY: 20 })); });
+    await act(async () => { row().dispatchEvent(pointer("pointerup")); });
+    await act(async () => { row().dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
   test("holding a mouse button down selects text — only its right button opens the menu", async () => {
     await act(async () => { row().dispatchEvent(pointer("pointerdown", { pointerType: "mouse" })); });
     await act(async () => { vi.advanceTimersByTime(600); });

@@ -47,6 +47,11 @@ export function useRowMenu(open: (x: number, y: number) => void) {
       open(e.clientX, e.clientY);
     },
     onPointerDown: (e: React.PointerEvent) => {
+      // A new gesture, however the last one ended. The click that would
+      // otherwise clear this flag lands on the menu's scrim, not on the row —
+      // so without resetting here, a dismissed menu leaves the row needing two
+      // taps to open its file.
+      fired.current = false;
       // A mouse already has a right button; a long left-press with one is how
       // you select text, not how you ask for a menu.
       if (e.pointerType === "mouse") return;
