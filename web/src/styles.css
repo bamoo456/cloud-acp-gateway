@@ -1052,6 +1052,11 @@
     display: block; width: 100%; height: 70vh; min-height: 320px; margin-top: 8px;
     border: 1px solid var(--border); border-radius: 10px; background: #fff;
   }
+  /* Rendered markdown, unlike the HTML preview, needs no sandbox: markdown.ts
+     renders with html:false, so there's no script to contain — this is the
+     same escaped-HTML renderer chat messages already use, just themed at
+     document scale (.md's base rules) instead of a chat bubble's. */
+  .wf-md-preview { padding: 10px 12px; }
   /* Full-size viewing stays inside the app (see FileContents): the native
      client hosts this console in a webview where a new tab has nowhere to go. */
   .wf-lightbox {
