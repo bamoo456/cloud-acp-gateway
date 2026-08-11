@@ -211,6 +211,35 @@ describe("FilePanel", () => {
     expect(container.textContent).toContain("Sandboxed preview");
   });
 
+  test(".md files get a Preview mode too, rendered — not sandboxed, since nothing executes", async () => {
+    getFilePreview.mockResolvedValue({
+      path: "README.md", abs: "/repo/README.md", kind: "text",
+      size: 20, modifiedAt: new Date().toISOString(),
+      text: "# Title\n\nSome **bold** text.", truncated: false,
+    } satisfies FilePreviewResult);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/README.md", path: "README.md", mode: "file" });
+    });
+    await act(async () => { await flush(); });
+
+    const previewBtn = [...container.querySelectorAll<HTMLButtonElement>(".wf-modes button")]
+      .find((b) => b.textContent === "Preview");
+    expect(previewBtn).toBeDefined();
+    await act(async () => { previewBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    // Same renderer chat markdown uses — an actual heading and bold element,
+    // not escaped source text, and no sandboxed iframe (there's no script to
+    // contain here, unlike the HTML preview).
+    expect(container.querySelector(".wf-md-preview h1")?.textContent).toBe("Title");
+    expect(container.querySelector(".wf-md-preview strong")?.textContent).toBe("bold");
+    expect(container.querySelector("iframe.wf-html-preview")).toBeNull();
+  });
+
   test("a file with no diff falls through to its contents instead of an empty pane", async () => {
     getFileDiff.mockResolvedValue({ ...DIFF, diff: "" });
     const { useStore } = await import("../store/store.ts");
