@@ -184,6 +184,29 @@ test("a file under an ACPG_PREVIEW_ROOTS entry is served, project or not", async
   }
 });
 
+// A file that was there when the list was built but is gone by the time it's
+// opened must read as "not found" (404), not "outside the project" (400).
+// realpath throws for a path that doesn't exist, and naively falling back to
+// the un-resolved form there breaks the comparison whenever the root itself is
+// a symlink (SCRATCH sits under the OS tmp dir, which on macOS resolves
+// through one) — this pins that a within-root-but-missing file still resolves
+// as within-root.
+test("a file that no longer exists under an allowed root is 'not found', not 'outside the project'", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const r = await get(q("/workspace/file", { cwd: REPO, path: path.join(SCRATCH, "gone.txt") }));
+    assert.equal(r.status, 404);
+    assert.equal((await r.json()).code, "not-found");
+
+    // Same for a file under the project itself, not just an ACPG_PREVIEW_ROOTS entry.
+    const inProject = await get(q("/workspace/file", { cwd: REPO, path: "also-gone.txt" }));
+    assert.equal(inProject.status, 404);
+    assert.equal((await inProject.json()).code, "not-found");
+  } finally {
+    await close();
+  }
+});
+
 // /workspace/changes lists the whole checkout, so a conversation opened on a
 // subdirectory would otherwise show repo-wide rows it then refused to open.
 test("a conversation running in a subdirectory can still open the rest of its repo", async () => {
