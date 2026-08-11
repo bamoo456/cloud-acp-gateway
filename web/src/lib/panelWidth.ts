@@ -16,6 +16,16 @@ const MIN_CHAT_WIDTH = 460;
 
 export const DEFAULT_PANEL_WIDTH = 440;
 
+// Below this the file panel is an overlay sheet rather than a column — the
+// same breakpoint the stylesheet uses. Shared so the store's "open by
+// default on desktop" check and the panel's own column-vs-sheet layout can't
+// drift apart into two different widths meaning "desktop".
+export const DESKTOP_PANEL_QUERY = "(min-width: 1100px)";
+
+export function isDesktopPanelWidth(): boolean {
+  return window.matchMedia?.(DESKTOP_PANEL_QUERY).matches ?? false;
+}
+
 export function clampPanelWidth(px: number, viewport = window.innerWidth): number {
   const ceiling = Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, viewport - MIN_CHAT_WIDTH));
   return Math.round(Math.min(Math.max(px, MIN_PANEL_WIDTH), ceiling));
