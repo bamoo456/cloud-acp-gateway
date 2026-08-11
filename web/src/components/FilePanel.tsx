@@ -7,10 +7,12 @@ import {
 } from "../lib/api.ts";
 import { touchedFiles } from "../lib/touchedFiles.ts";
 import { mergePanelFiles, type PanelFile } from "../lib/panelFiles.ts";
-import { fileKind } from "../lib/fileKind.ts";
+import { fileKind, extensionOf } from "../lib/fileKind.ts";
 import { highlightBlock, highlightLanguageFor } from "../lib/highlight.ts";
 import { downloadFile } from "../lib/download.ts";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
+import { HtmlPreview } from "./HtmlPreview.tsx";
+import { Markdown } from "./Markdown.tsx";
 import { Plan } from "./Plan.tsx";
 import { basename, dirname, formatBytes, relativeTo, timeAgo } from "../lib/format.ts";
 import {
@@ -378,11 +380,16 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
   }, [cwd, target.abs, mode]);
 
   const raw = rawFileUrl(cwd, target.abs);
+  const ext = extensionOf(target.path);
+  const isHtml = ext === "html" || ext === "htm";
+  const isMarkdown = ext === "md" || ext === "markdown" || ext === "mdx";
+  const canPreview = isHtml || isMarkdown;
   return (
     <>
       <div className="wf-modes">
         <button className={mode === "diff" ? "active" : ""} onClick={() => setMode("diff")}>Diff</button>
         <button className={mode === "file" ? "active" : ""} onClick={() => setMode("file")}>File</button>
+        {canPreview && <button className={mode === "render" ? "active" : ""} onClick={() => setMode("render")}>Preview</button>}
         <span className="sp" />
         {file && <span className="wf-meta">{formatBytes(file.size)}{file.modifiedAt ? " · " + timeAgo(file.modifiedAt) : ""}</span>}
         <DownloadButton raw={raw} name={basename(target.path)} />
@@ -396,6 +403,23 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
             : <UnifiedDiff diff={diff.diff} path={target.path} truncated={diff.truncated} />
         )}
         {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} />}
+        {!err && !loading && mode === "render" && file && (
+          file.kind !== "text"
+            ? <div className="wf-empty">Binary file — there's nothing to render. Switch to File to preview or download it.</div>
+            : isHtml
+              ? <>
+                  <div className="wf-note">
+                    Sandboxed preview — scripts can run, but the sandbox blocks it from reaching the
+                    network, reading your session, or navigating away from this panel.
+                    {file.truncated && " The file was cut short, so this preview may be incomplete."}
+                  </div>
+                  <HtmlPreview html={file.text ?? ""} />
+                </>
+              : <div className="wf-md-preview">
+                  {file.truncated && <div className="wf-note">The file was cut short, so this preview may be incomplete.</div>}
+                  <Markdown text={file.text ?? ""} />
+                </div>
+        )}
       </div>
     </>
   );
