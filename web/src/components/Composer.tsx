@@ -7,7 +7,7 @@ import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
 import { listFiles, uploadFile } from "../lib/api.ts";
-import type { MessageImage, MessageFile } from "../types.ts";
+import type { MessageImage } from "../types.ts";
 
 // Touch / coarse-pointer devices (phones, tablets) have no Shift key on their
 // virtual keyboard, so there is no way to type Shift+Enter for a newline. On
@@ -26,7 +26,6 @@ export function Composer() {
   const atRef = useRef<HTMLButtonElement>(null);
   const [text, setText] = useState("");
   const [images, setImages] = useState<MessageImage[]>([]);
-  const [files, setFiles] = useState<MessageFile[]>([]); // "@ file" references + uploads
   const [uploading, setUploading] = useState(0); // in-flight /uploads count
   const [dragging, setDragging] = useState(false);
   // slash-command menu: query is null when closed, "" when opened via the button
@@ -39,6 +38,9 @@ export function Composer() {
   const [fileItems, setFileItems] = useState<string[]>([]);
   const [fileActive, setFileActive] = useState(0);
   const s = useStore();
+  // "@ file" references, uploads, and anything attached from the file panel.
+  // The panel adds to the same strip, so the list lives in the store.
+  const files = s.attachedFiles;
   const activeBusy = !!(s.activeId && s.busySessionIds[s.activeId]);
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
@@ -164,8 +166,7 @@ export function Composer() {
     for (const f of picks) {
       setUploading((n) => n + 1);
       try {
-        const uploaded = await uploadFile(f);
-        setFiles((prev) => (prev.some((p) => p.uri === uploaded.uri) ? prev : [...prev, uploaded]));
+        s.attachFiles([await uploadFile(f)]);
       } catch (e) {
         s.setTip(e instanceof Error ? e.message : "Couldn't upload the file.");
       } finally {
@@ -197,11 +198,9 @@ export function Composer() {
   }
 
   function removeImage(i: number) { setImages((prev) => prev.filter((_, idx) => idx !== i)); }
-  function removeFile(i: number) { setFiles((prev) => prev.filter((_, idx) => idx !== i)); }
 
   function addReferencedFile(rel: string) {
-    const f = makeMessageFile(s.cwd, rel);
-    setFiles((prev) => (prev.some((p) => p.uri === f.uri) ? prev : [...prev, f]));
+    s.attachFiles([makeMessageFile(s.cwd, rel)]);
   }
 
   // Pick a file from the "@" menu: drop the "@token" from the text (the file shows
@@ -236,7 +235,7 @@ export function Composer() {
     if (uploading) return;
     const t = text; const imgs = images; const refs = files;
     if (!t.trim() && !imgs.length && !refs.length) return;
-    setText(""); setImages([]); setFiles([]); setFileQuery(null); setCmdQuery(null);
+    setText(""); setImages([]); s.clearAttachedFiles(); setFileQuery(null); setCmdQuery(null);
     s.sendPrompt(t, imgs, refs);
   }
 
@@ -310,7 +309,8 @@ export function Composer() {
             {files.map((f, i) => (
               <span className="file-chip" key={f.uri || f.name} title={f.uri || f.name}>
                 <IconFile /><span className="nm">{f.name}</span>
-                <button className="chip-x" title="Remove file" onClick={() => removeFile(i)}>✕</button>
+                {f.range && <span className="rng">{f.range}</span>}
+                <button className="chip-x" title="Remove file" onClick={() => s.removeAttachedFile(i)}>✕</button>
               </span>
             ))}
           </div>

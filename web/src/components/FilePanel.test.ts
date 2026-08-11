@@ -695,4 +695,123 @@ describe("FilePanel", () => {
     await act(async () => { await flush(); });
     expect(getWorkspaceChanges).toHaveBeenCalledTimes(2);
   });
+
+  // ---- attaching to the chat ----
+
+  test("a row's menu attaches the file the menu was opened on", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", attachedFiles: [],
+      promptCapabilities: { embeddedContext: true },
+    });
+    await render();
+
+    const row = [...container.querySelectorAll<HTMLElement>("button.wf-row")]
+      .find((r) => r.querySelector(".wf-nm")?.textContent === "gateway.ts")!;
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    expect(document.querySelector(".wf-menu-head .nm")?.textContent).toBe("gateway.ts");
+
+    const add = [...document.querySelectorAll<HTMLElement>(".wf-menu-row")]
+      .find((b) => b.textContent === "Add to chat")!;
+    await act(async () => { add.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    // Labelled as it reads from the conversation's folder; addressed absolutely.
+    expect(useStore.getState().attachedFiles).toEqual([
+      { name: "src/gateway.ts", uri: "file:///repo/src/gateway.ts" },
+    ]);
+    expect(document.querySelector(".wf-menu")).toBeNull();
+  });
+
+  test("no menu entry to attach when the agent takes no file references", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo", promptCapabilities: {} });
+    await render();
+
+    const row = container.querySelector<HTMLElement>("button.wf-row")!;
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    expect([...document.querySelectorAll(".wf-menu-row")].map((b) => b.textContent))
+      .toEqual(["Open", "Copy path"]);
+  });
+
+  test("selected lines attach as a range, with the lines themselves", async () => {
+    const { useStore } = await import("../store/store.ts");
+    getFilePreview.mockResolvedValue({
+      path: "notes.txt", abs: "/repo/notes.txt", kind: "text",
+      size: 40, modifiedAt: new Date().toISOString(),
+      text: "alpha\nbravo\ncharlie\ndelta", truncated: false,
+    } satisfies FilePreviewResult);
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", attachedFiles: [],
+      promptCapabilities: { embeddedContext: true },
+      filePreview: { abs: "/repo/notes.txt", path: "notes.txt", mode: "file" },
+    });
+    await render();
+
+    const add = () => container.querySelector<HTMLButtonElement>("button.wf-add")!;
+    // Offered before anything is selected — an action that only appears once you
+    // have already done the thing that enables it is an action nobody finds.
+    expect(add().disabled).toBe(true);
+
+    // "vo\nchar" — part of line 2 through part of line 3.
+    const code = container.querySelector("pre.wf-text code")!;
+    await act(async () => {
+      const range = document.createRange();
+      range.setStart(code.firstChild!, 9);
+      range.setEnd(code.firstChild!, 16);
+      const sel = window.getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+
+    // Snapped out to whole lines: half a line is not what "add these lines"
+    // means, and the range has to be one you can look up in the file.
+    expect(add().disabled).toBe(false);
+    expect(add().textContent).toContain("2-3");
+
+    // Pressing a button is itself what collapses a selection on most platforms.
+    // If that disarmed the button, it would go disabled in the instant between
+    // the press and the click — so a collapse leaves the armed range alone.
+    await act(async () => {
+      window.getSelection()!.removeAllRanges();
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+    expect(add().disabled).toBe(false);
+    expect(add().textContent).toContain("2-3");
+
+    await act(async () => { add().dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(useStore.getState().attachedFiles).toEqual([{
+      name: "notes.txt",
+      range: "2-3",
+      uri: "file:///repo/notes.txt#L2-L3",
+      text: "bravo\ncharlie",
+    }]);
+  });
+
+  test("attaching from a phone gets the panel out of the way of the chip", async () => {
+    // Below the desktop breakpoint this panel is a sheet ON TOP of the composer,
+    // so the chip it just added would be behind it. (jsdom reports no matchMedia,
+    // which is the non-desktop branch.)
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", attachedFiles: [],
+      promptCapabilities: { embeddedContext: true },
+    });
+    await render();
+
+    const row = container.querySelector<HTMLElement>("button.wf-row")!;
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    const add = [...document.querySelectorAll<HTMLElement>(".wf-menu-row")]
+      .find((b) => b.textContent === "Add to chat")!;
+    await act(async () => { add.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(useStore.getState().attachedFiles).toHaveLength(1);
+    expect(useStore.getState().filesOpen).toBe(false);
+  });
 });

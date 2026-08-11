@@ -101,9 +101,24 @@ describe("session helpers", () => {
     expect(contentFile({ type: "resource_link", name: "src/App.tsx", uri: "file:///r/src/App.tsx" }))
       .toEqual({ name: "src/App.tsx", uri: "file:///r/src/App.tsx" });
     expect(contentFile({ type: "resource_link", uri: "file:///r/x" })).toEqual({ name: "file:///r/x", uri: "file:///r/x" });
-    expect(contentFile({ type: "resource", resource: { uri: "file:///r/y" } })).toEqual({ name: "file:///r/y", uri: "file:///r/y" });
+    // An embedded resource names nothing but its URI, so the chip's label is
+    // read back out of it — the file's own name, not the whole path.
+    expect(contentFile({ type: "resource", resource: { uri: "file:///r/y" } })).toEqual({ name: "y", uri: "file:///r/y" });
     expect(contentFile({ type: "text", text: "hi" })).toBeNull();
     expect(contentFile(undefined)).toBeNull();
+  });
+
+  // A line range sent from the file panel comes back as an embedded resource
+  // whose URI carries the range. Replay has to rebuild the chip the composer
+  // showed, or re-opening a conversation turns "FilePanel.tsx 412-427" into a
+  // file:/// path with a fragment stuck on the end.
+  test("contentFile rebuilds a line-range chip from the URI fragment", () => {
+    expect(contentFile({
+      type: "resource",
+      resource: { uri: "file:///r/web/src/FilePanel.tsx#L412-L427", text: "  const isHtml = …" },
+    })).toEqual({
+      name: "FilePanel.tsx", range: "412-427", uri: "file:///r/web/src/FilePanel.tsx#L412-L427",
+    });
   });
 
   test("addUserBubble carries referenced files on the bubble", () => {

@@ -1,5 +1,8 @@
 import { describe, test, expect } from "vitest";
-import { activeMention, replaceMention, fileUri, makeMessageFile } from "./mentions.ts";
+import {
+  activeMention, replaceMention, fileUri, makeMessageFile,
+  makeAbsFile, makeRangeFile, describeFileUri,
+} from "./mentions.ts";
 
 describe("activeMention", () => {
   test("detects an @ token ending at the caret", () => {
@@ -45,5 +48,42 @@ describe("fileUri / makeMessageFile", () => {
 
   test("makeMessageFile carries the relative name and the uri", () => {
     expect(makeMessageFile("/repo", "src/x.ts")).toEqual({ name: "src/x.ts", uri: "file:///repo/src/x.ts" });
+  });
+});
+
+describe("references attached from the file panel", () => {
+  test("a panel pick and an '@' pick of one file produce the same URI", () => {
+    // They must, or the composer's de-duplication (which keys on the URI) lets
+    // one file on twice under two names.
+    expect(makeAbsFile("/repo/web/src/App.tsx", "web/src/App.tsx").uri)
+      .toBe(makeMessageFile("/repo", "web/src/App.tsx").uri);
+  });
+
+  test("the panel labels a file by its path, not by its URI", () => {
+    expect(makeAbsFile("/repo/web/src/App.tsx", "web/src/App.tsx"))
+      .toEqual({ name: "web/src/App.tsx", uri: "file:///repo/web/src/App.tsx" });
+  });
+
+  test("a range carries its lines, its label, and a URI unique to that range", () => {
+    const f = makeRangeFile("/repo/a.ts", "a.ts", { start: 12, end: 20 }, "the lines");
+    expect(f).toEqual({
+      name: "a.ts", range: "12-20", uri: "file:///repo/a.ts#L12-L20", text: "the lines",
+    });
+    // Two ranges of one file are two attachments; the same range twice is one.
+    expect(makeRangeFile("/repo/a.ts", "a.ts", { start: 30, end: 31 }, "other").uri)
+      .not.toBe(f.uri);
+    expect(makeRangeFile("/repo/a.ts", "a.ts", { start: 12, end: 20 }, "the lines").uri)
+      .toBe(f.uri);
+  });
+
+  test("describeFileUri reads a chip back out of a URI", () => {
+    expect(describeFileUri("file:///repo/web/src/App.tsx")).toEqual({ name: "App.tsx" });
+    expect(describeFileUri("file:///repo/web/src/App.tsx#L12-L20"))
+      .toEqual({ name: "App.tsx", range: "12-20" });
+    expect(describeFileUri("file:///repo/a.ts#L7")).toEqual({ name: "a.ts", range: "7" });
+  });
+
+  test("describeFileUri falls back to the whole string when there is no path", () => {
+    expect(describeFileUri("weird")).toEqual({ name: "weird" });
   });
 });
