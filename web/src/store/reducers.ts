@@ -237,9 +237,14 @@ export function applyHistoryMessages(s0: Session, messages: ViewMessage[]): Sess
         if (b.type === "text") cur = { ...cur, seq, hasContent: true, items: [...cur.items, { id: iid, kind: "assistant", text: b.text || "" }] };
         else if (b.type === "image" && (b.data || b.uri)) cur = { ...cur, seq, hasContent: true, items: [...cur.items, { id: iid, kind: "assistant", text: "", images: [{ mimeType: b.mimeType || "image/png", data: b.data, uri: b.uri }] }] };
         else if (b.type === "thought") cur = { ...cur, seq, items: [...cur.items, { id: iid, kind: "thought", text: b.text || "" }] };
+        // `kind` and `locations` are what the gateway recovered from the
+        // transcript, so a resumed conversation lists the files it touched
+        // exactly as a live turn does. Agents whose transcripts don't record a
+        // path (codex and opencode run their edits through a shell) simply send
+        // none, and the panel falls back to the Changes tab for those.
         else if (b.type === "tool") cur = { ...cur, seq, hasContent: true, items: [...cur.items, {
           id: iid, kind: "tool", toolCallId: b.toolCallId || iid, title: b.name || "Tool",
-          toolKind: b.name || "other", status: b.status || "completed", locations: [],
+          toolKind: b.kind || "other", status: b.status || "completed", locations: b.locations ?? [],
           content: b.output ? [{ type: "content", content: { type: "text", text: b.output } }] : [],
         }] };
       }

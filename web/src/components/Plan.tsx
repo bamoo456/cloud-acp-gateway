@@ -27,10 +27,12 @@ function PlanBox({ status }: { status?: string }) {
   );
 }
 
-export function Plan({ entries }: { entries: PlanEntry[] }) {
+// `heading` is off in the file panel, where the section it sits in is already
+// labelled — two headings stacked would just be the word twice.
+export function Plan({ entries, heading = true }: { entries: PlanEntry[]; heading?: boolean }) {
   return (
     <div className="plan">
-      <div className="ph"><IconPlan />Plan</div>
+      {heading && <div className="ph"><IconPlan />Plan</div>}
       <ul>
         {entries.map((e, k) => (
           <li key={k} className={e.status || ""}>

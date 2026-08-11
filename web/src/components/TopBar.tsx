@@ -5,7 +5,7 @@ import { AgentPill } from "./AgentPill.tsx";
 import { PendingPermissions } from "./PendingPermissions.tsx";
 import { RunningTasks } from "./RunningTasks.tsx";
 import { basename } from "../lib/format.ts";
-import { IconClock, IconPlus, IconDots, IconFolder, IconChevronDown } from "../lib/icons.tsx";
+import { IconClock, IconPlus, IconDots, IconFolder, IconChevronDown, IconFileDiff } from "../lib/icons.tsx";
 import type { AgentRef } from "../types.ts";
 export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void; onPicker: () => void; onOpenLogin?: (agent: AgentRef) => void }) {
   const s = useStore();
@@ -25,6 +25,8 @@ export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void
       <span className={connClass}><span className="dot" />{connText}</span>
       <RunningTasks />
       <PendingPermissions />
+      <button className={"icon-btn files-btn" + (s.filesOpen ? " on" : "")} title="Files and changes"
+        aria-pressed={s.filesOpen} onClick={s.toggleFiles}><IconFileDiff /></button>
       <button className="icon-btn" title="Conversation menu" onClick={() => setMenu((v) => !v)}><IconDots /></button>
       <button className="icon-btn" title="New chat" onClick={() => { if (s.agentReady) s.newSession(); }}><IconPlus /></button>
       <ActionMenu open={menu} onClose={() => setMenu(false)} />

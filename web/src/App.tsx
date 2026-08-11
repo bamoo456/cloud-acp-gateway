@@ -3,6 +3,7 @@ import { useStore } from "./store/store.ts";
 import { getRunning, getInboxPending } from "./lib/api.ts";
 import { TopBar } from "./components/TopBar.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
+import { FilePanel } from "./components/FilePanel.tsx";
 import { Thread } from "./components/Thread.tsx";
 import { Composer } from "./components/Composer.tsx";
 import { FolderPicker } from "./components/FolderPicker.tsx";
@@ -71,6 +72,10 @@ export function App() {
         <main id="main"><Thread session={sess} agentReady={agentReady} loading={joining} /></main>
         <Composer />
       </div>
+      {/* Right of the chat column on desktop, an overlay on mobile. Always
+          mounted: it holds the fetched change list across open/close so
+          reopening it is instant rather than a fresh `git status`. */}
+      <FilePanel />
       {picker && <FolderPicker onClose={() => setPicker(false)} />}
       {loginAgent && <LoginTerminal agent={loginAgent} onClose={() => setLoginAgent(null)} />}
       {/* loginAgent carries the full AgentRef so LoginTerminal can key device-auth on kind */}

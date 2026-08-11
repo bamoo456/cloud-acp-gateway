@@ -1,4 +1,5 @@
 import { useId, type ReactElement } from "react";
+import type { FileIcon } from "./fileKind.ts";
 
 // ---- header / panel icons ----
 
@@ -135,6 +136,57 @@ export function IconFile() {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
       <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z" />
       <path d="M14 3v5h5" />
+    </svg>
+  );
+}
+
+// The file-preview panel's header toggle: a document with a diff's +/- on it,
+// so it reads as "the files that changed" rather than "attach a file".
+export function IconFileDiff() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z" />
+      <path d="M14 3v5h5" />
+      <path d="M12 11v4M10 13h4M10 18h4" />
+    </svg>
+  );
+}
+
+// A file's glyph, chosen from its type (see lib/fileKind.ts): a document with
+// the mark of what it holds. One component rather than six exports because the
+// caller always has a FileIcon string, never a specific icon in mind.
+const FILE_ICON_MARKS: Record<FileIcon, ReactElement> = {
+  code: <path d="M10.5 12l-1.5 1.5 1.5 1.5M13.5 12l1.5 1.5-1.5 1.5" />,
+  data: <path d="M8 12h8M8 15h8M8 18h5" />,
+  doc: <path d="M8 13h8M8 16h8M8 19h4" />,
+  image: <><circle cx="10" cy="13.5" r="1.2" /><path d="M8 19l3-3 2 2 2.5-2.5L18 18" /></>,
+  archive: <path d="M12 11v1M12 14v1M12 17v1M12 20v.5" />,
+  file: <></>,
+};
+export function fileIcon(kind: FileIcon): ReactElement {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z" />
+      <path d="M14 3v5h5" />
+      {FILE_ICON_MARKS[kind]}
+    </svg>
+  );
+}
+
+export function IconRefresh() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 11a8 8 0 10-1.6 5.6" />
+      <path d="M20 5v6h-6" />
+    </svg>
+  );
+}
+
+export function IconDownload() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3v12M8 11l4 4 4-4" />
+      <path d="M4 19h16" />
     </svg>
   );
 }

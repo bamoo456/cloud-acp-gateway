@@ -42,6 +42,10 @@ import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.
 import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleUpload } from "./uploads.ts";
+import {
+  changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
+  inlineImageType, repoRoot, MAX_RAW_BYTES,
+} from "./workspace.ts";
 import { buildClientConfig } from "./client-config.ts";
 import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
@@ -516,6 +520,21 @@ function resolveWithinRootBase(p: string, root: string): string | null {
 export function resolveWithinRoot(p: string): string | null {
   return resolveWithinRootBase(p, FS_ROOT);
 }
+
+// Directories the file-preview panel may read OUTSIDE the conversation's own
+// project. Colon-separated, PATH-style: ACPG_PREVIEW_ROOTS=/tmp:/var/exports
+//
+// It exists because an agent's output does not always land in the checkout —
+// "write the screenshot to /tmp" is an ordinary instruction, and a viewer that
+// then refuses to show the file is reporting its own configuration rather than
+// the work. Making that an explicit list rather than the default keeps the
+// panel's reach something a deployment states out loud: the credential does not
+// silently become a read-any-file capability.
+const PREVIEW_ROOTS: string[] = (process.env.ACPG_PREVIEW_ROOTS ?? "")
+  .split(":")
+  .map((p) => p.trim())
+  .filter(Boolean)
+  .map((p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } });
 async function listDirs(dir: string) {
   const ents = await fs.promises.readdir(dir, { withFileTypes: true });
   const out: Array<{ name: string; git: boolean }> = [];
@@ -577,6 +596,88 @@ export async function listFiles(dir: string, query = "", limit = FILE_WALK_MAX_R
   return out;
 }
 
+// What the preview panel may read, given the conversation's `cwd`:
+//
+//   1. anything under `cwd` itself — the project being worked in
+//   2. anything under an ACPG_PREVIEW_ROOTS entry — the explicit escape hatch
+//   3. anything under the git repo `cwd` sits in — because /workspace/changes
+//      lists the whole checkout, so a conversation opened on a subdirectory
+//      would otherwise show repo-wide rows it then refused to open
+//
+// `cwd` is not the client's to choose freely: it is checked against FS_ROOT
+// first, exactly as the folder picker is. Without that, a request could name
+// `cwd=/` and rule 1 would hand back the filesystem.
+//
+// Rule 3 costs a `git rev-parse`, so it is only consulted when 1 and 2 have
+// already failed — the ordinary case (a file inside the project) never pays for
+// it. `resolveWithinRootBase` realpaths both sides, so neither a "../" chain nor
+// a symlink out of the tree widens any of the three.
+async function allowedPreviewPath(abs: string, cwd: string): Promise<string | null> {
+  const direct = resolveWithinRootBase(abs, cwd) ?? PREVIEW_ROOTS.reduce<string | null>(
+    (hit, root) => hit ?? resolveWithinRootBase(abs, root), null,
+  );
+  if (direct) return direct;
+  const repo = await repoRoot(cwd);
+  return repo ? resolveWithinRootBase(abs, repo) : null;
+}
+
+// Resolve a /workspace/* request's target file. `cwd` supplies the git and
+// relative-path context and must itself sit inside FS_ROOT; `path` is either
+// absolute (how /workspace/changes addresses every file it lists) or
+// cwd-relative. Null means "refuse" — a missing parameter or a path outside
+// everything allowedPreviewPath permits.
+async function resolveWorkspaceTarget(q: URLSearchParams): Promise<{ cwd: string; abs: string; display: string } | null> {
+  const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+  if (!cwd) return null;
+  const raw = q.get("path") ?? "";
+  if (!raw) return null;
+  const abs = await allowedPreviewPath(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw), cwd);
+  if (!abs) return null;
+  const rel = path.relative(cwd, abs);
+  // Files under cwd read better by their short path; anything else (a sibling
+  // package elsewhere in the same repo) keeps its absolute path rather than
+  // being shown as a "../../" chain nobody can parse at a glance.
+  const display = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : abs;
+  return { cwd, abs, display };
+}
+
+// Raw bytes for one file: the <img> source behind an image preview, and the
+// download fallback for everything else.
+//
+// The content-type is an allowlist, never a guess: this route serves files
+// whose contents an agent (or the repo) chose, from the console's *own* origin
+// — the origin holding the gateway credential injected into the SPA config. So
+// anything that isn't a plain raster image goes out as application/octet-stream
+// with an attachment disposition. That, plus nosniff and a deny-everything CSP,
+// is what stops an .html or .svg sitting in the checkout from executing script
+// against that origin. Text-ish files are still readable — /workspace/file
+// returns them as escaped text, which is the view you want anyway.
+function serveWorkspaceRaw(res: http.ServerResponse, abs: string): void {
+  let st: fs.Stats;
+  try { st = fs.statSync(abs); } catch { res.writeHead(404); res.end(); return; }
+  if (!st.isFile()) { res.writeHead(404); res.end(); return; }
+  if (st.size > MAX_RAW_BYTES) { res.writeHead(413); res.end(); return; }
+  const image = inlineImageType(abs);
+  const base = path.basename(abs);
+  // Header values are latin1: a filename with CJK or emoji (routine for
+  // agent-generated screenshots) would throw ERR_INVALID_CHAR from writeHead.
+  // Send an ASCII-folded name for old parsers and the real one via RFC 5987.
+  const ascii = base.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  res.writeHead(200, {
+    "content-type": image ?? "application/octet-stream",
+    "content-length": String(st.size),
+    "content-disposition": `${image ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(base)}`,
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "default-src 'none'; sandbox",
+    "cache-control": "no-store",
+  });
+  const stream = fs.createReadStream(abs);
+  // Headers are already out, so a mid-read failure can't become a status code —
+  // dropping the connection is the only way left to signal a partial body.
+  stream.on("error", () => res.destroy());
+  stream.pipe(res);
+}
+
 // Server-side state shared across all clients/IPs (favorite folders today).
 // Opened lazily on first use, NOT at import: tests import this module with
 // ACPG_NO_LISTEN=1 and must not create a SQLite file under the default /data.
@@ -593,6 +694,10 @@ export type ViewBlock = {
   type: "text" | "thought" | "tool" | "tool_result" | "image";
   text?: string; name?: string;
   toolCallId?: string; status?: "completed" | "failed"; output?: string;
+  // tool blocks: the files the call acted on, and which ACP kind of act it was.
+  // A live turn gets both straight from ACP; a replayed transcript has to have
+  // them recovered here, or a resumed conversation shows no files at all.
+  locations?: string[]; kind?: string;
   // image blocks: raw base64 in `data` (+ `mimeType`) or a link in `uri`
   mimeType?: string; data?: string; uri?: string;
 };
@@ -721,6 +826,39 @@ export function stripCommandMarkup(text: string): string {
   return text.replace(COMMAND_WRAPPER_BLOCK, "").replace(COMMAND_CAVEAT, "").trim();
 }
 
+// A live turn's tool call arrives over ACP already carrying `kind` and
+// `locations`. A transcript carries neither — only the CLI's own tool name and
+// its raw input — so replaying one has to recover both, or a resumed
+// conversation reports that it touched no files at all.
+//
+// Mapping the name to the ACP kind here rather than in the client keeps one
+// vocabulary on the wire: every consumer downstream sees "edit"/"read", never
+// "Edit"/"Read".
+const CLAUDE_TOOL_KINDS: Record<string, string> = {
+  Edit: "edit", Write: "edit", MultiEdit: "edit", NotebookEdit: "edit",
+  Read: "read", NotebookRead: "read",
+  Glob: "search", Grep: "search", WebSearch: "search",
+  Bash: "execute", BashOutput: "execute", KillShell: "execute",
+  WebFetch: "fetch",
+  Task: "think", TodoWrite: "think",
+};
+// The input keys Claude's file tools name their target with. Deliberately a
+// fixed list: a tool whose input merely *contains* a path-looking string (Bash's
+// `command`) has not told us which file it touched, and guessing one would put
+// files in the panel that the agent never wrote.
+const TOOL_PATH_KEYS = ["file_path", "notebook_path", "path"];
+
+function toolInputLocations(input: unknown): string[] {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const rec = input as Record<string, unknown>;
+  const out: string[] = [];
+  for (const key of TOOL_PATH_KEYS) {
+    const v = rec[key];
+    if (typeof v === "string" && v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
 function normalizeContent(content: unknown): ViewBlock[] {
   const out: ViewBlock[] = [];
   if (typeof content === "string") {
@@ -734,7 +872,15 @@ function normalizeContent(content: unknown): ViewBlock[] {
     if (b.type === "text" && typeof b.text === "string" && b.text) { const t = stripCommandMarkup(b.text); if (t) out.push({ type: "text", text: t }); }
     else if (b.type === "image") { const img = claudeImageBlock(b.source); if (img) out.push(img); }
     else if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking) out.push({ type: "thought", text: b.thinking });
-    else if (b.type === "tool_use") out.push({ type: "tool", name: typeof b.name === "string" ? b.name : "tool", toolCallId: typeof b.id === "string" ? b.id : undefined });
+    else if (b.type === "tool_use") {
+      const name = typeof b.name === "string" ? b.name : "tool";
+      const locations = toolInputLocations(b.input);
+      out.push({
+        type: "tool", name, toolCallId: typeof b.id === "string" ? b.id : undefined,
+        kind: CLAUDE_TOOL_KINDS[name] ?? "other",
+        ...(locations.length ? { locations } : {}),
+      });
+    }
     else if (b.type === "tool_result") out.push({ type: "tool_result", toolCallId: typeof b.tool_use_id === "string" ? b.tool_use_id : undefined, status: b.is_error ? "failed" : "completed", output: toolResultText(b.content) });
   }
   return out;
@@ -3869,6 +4015,62 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         console.error(`upload route failed: ${String(e)}`);
         if (!res.headersSent) { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); }
       });
+    return;
+  }
+  // ---- workspace file preview ----
+  // Read-only views of the project the agent is working in, so its output can be
+  // inspected from the browser instead of only read about in the transcript:
+  //   /workspace/changes  git status + line counts for the folder's checkout
+  //   /workspace/diff     one file's unified diff (untracked files included)
+  //   /workspace/file     one file's content as text / image metadata / binary
+  //   /workspace/raw      one file's bytes (the <img> source, and downloads)
+  // What each may read is allowedPreviewPath's decision: the conversation's cwd,
+  // its repo, and ACPG_PREVIEW_ROOTS. They stay read-only regardless — nothing
+  // here writes, stages or reverts.
+  if (consoleEnabled && pathname === "/workspace/changes") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
+    workspaceChanges(cwd)
+      .then((r) => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(r));
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  if (consoleEnabled && pathname === "/workspace/diff") {
+    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        return workspaceFileDiff(target.cwd, target.abs).then((r) => {
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify(r));
+        });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  if (consoleEnabled && pathname === "/workspace/file") {
+    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        return workspacePreview(target.abs, target.display).then((r) => {
+          if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable file" })); return; }
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify(r));
+        });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  if (consoleEnabled && pathname === "/workspace/raw") {
+    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(); return; }
+        serveWorkspaceRaw(res, target.abs);
+      })
+      .catch(() => { res.writeHead(500); res.end(); });
     return;
   }
   // Pinned ("favorite") folders, persisted server-side so they survive a client
