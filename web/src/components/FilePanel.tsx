@@ -13,7 +13,10 @@ import { downloadFile } from "../lib/download.ts";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
 import { Plan } from "./Plan.tsx";
 import { basename, dirname, formatBytes, relativeTo, timeAgo } from "../lib/format.ts";
-import { clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH } from "../lib/panelWidth.ts";
+import {
+  clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH,
+  DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
+} from "../lib/panelWidth.ts";
 import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, fileIcon } from "../lib/icons.tsx";
 
 // The file preview panel: what the agent actually produced, rather than what it
@@ -34,11 +37,6 @@ import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDow
 // through to the contents view on its own.
 
 type Section = "Progress" | "Outputs" | "Context";
-
-// The width below which the panel is an overlay sheet rather than a column —
-// the same 1100px the stylesheet uses. Resizing only means anything in column
-// mode, and an inline width would fight the sheet's own layout.
-const DESKTOP = "(min-width: 1100px)";
 
 // Drag the panel's left edge to set its width. A separator rather than a bare
 // div: it is focusable and answers the arrow keys, so the panel is resizable
@@ -242,9 +240,9 @@ export function FilePanel() {
   // breakpoint the panel is a right-anchored sheet whose width the stylesheet
   // owns, and an inline value would override it.
   const [width, setWidth] = useState(readPanelWidth);
-  const [desktop, setDesktop] = useState(() => window.matchMedia?.(DESKTOP).matches ?? false);
+  const [desktop, setDesktop] = useState(isDesktopPanelWidth);
   useEffect(() => {
-    const mq = window.matchMedia?.(DESKTOP);
+    const mq = window.matchMedia?.(DESKTOP_PANEL_QUERY);
     if (!mq) return;
     // Re-clamp on resize too: a width chosen on a wide window would otherwise
     // leave no room for the chat after the window shrinks.

@@ -7,6 +7,7 @@ import { readRecentSessions, touchRecentSession, removeRecentSession, renameRece
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
 import { isLockEnabled, hydrateLock } from "../lib/lock.ts";
 import { basename } from "../lib/format.ts";
+import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
 } from "./reducers.ts";
@@ -940,7 +941,10 @@ export const useStore = create<State>((set, get) => {
     // lock is enabled it engages the local lock first and waits for unlock().
     locked: false,
     lockEnabled: isLockEnabled(),
-    filesOpen: false,
+    // Open by default on a desktop-width screen (the panel renders as a
+    // column there, not an overlay sheet that would cover the chat) and
+    // closed on a phone-width one.
+    filesOpen: isDesktopPanelWidth(),
     filePreview: null,
 
     bootstrap() {
