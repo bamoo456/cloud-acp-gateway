@@ -257,6 +257,14 @@ export function FilePanel() {
   const touched = touchedFiles(session?.items ?? []);
   const context = touched.filter((f) => f.role === "context");
   const outputs = mergePanelFiles(touched.filter((f) => f.role === "output"), changes?.files ?? []);
+  // The two halves of Outputs, labelled rather than blended. `git status` runs
+  // at the repo root, so its half carries work from other conversations, from
+  // your own editor, from a reverted branch — and a row that reads as "this
+  // conversation produced it" when nothing here wrote it is the panel lying.
+  // mergePanelFiles already emits the thread's files first, so this only names
+  // the boundary that was there.
+  const written = outputs.filter((f) => f.fromThread);
+  const alsoChanged = outputs.filter((f) => !f.fromThread);
   // The agent's current plan, if it has published one. The last plan update wins
   // — ACP re-sends the whole list every time an entry changes.
   const plan = [...(session?.items ?? [])].reverse().find((it) => it.kind === "plan");
@@ -301,7 +309,19 @@ export function FilePanel() {
               {!err && outputs.length === 0 && !loading && (
                 <div className="wf-empty">Nothing written in this conversation yet.</div>
               )}
-              {outputs.map((f) => (
+              {/* Only worth a heading when there is something to tell it apart
+                  from; on its own, the section title already says it. */}
+              {written.length > 0 && alsoChanged.length > 0 && (
+                <div className="wf-group">Written in this conversation</div>
+              )}
+              {written.map((f) => (
+                <PanelRow key={f.abs} file={f} cwd={cwd}
+                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })} />
+              ))}
+              {alsoChanged.length > 0 && (
+                <div className="wf-group">Other changes in this folder</div>
+              )}
+              {alsoChanged.map((f) => (
                 <PanelRow key={f.abs} file={f} cwd={cwd}
                   onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })} />
               ))}
@@ -363,7 +383,12 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
           setDiff(d);
           // Nothing to render as a diff — a binary blob, an image, or a file
           // the agent only read. Show the file itself instead of an empty pane.
-          if ((d.binary || !d.diff.trim()) && autoSwitched.current !== target.abs) {
+          //
+          // Except a deleted one, which has nothing to fall through TO:
+          // /workspace/file must 404 for a path that is no longer on disk, so
+          // the switch turned "the agent removed this" into a red error. The
+          // diff pane says so itself now.
+          if (d.status !== "deleted" && (d.binary || !d.diff.trim()) && autoSwitched.current !== target.abs) {
             autoSwitched.current = target.abs;
             setMode("file");
           }
@@ -398,9 +423,17 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
         {err && <div className="wf-empty">{err}</div>}
         {!err && loading && <div className="wf-empty">Loading…</div>}
         {!err && !loading && mode === "diff" && diff && (
-          diff.binary
-            ? <div className="wf-empty">Binary file — there's nothing to diff. Switch to File to preview or download it.</div>
-            : <UnifiedDiff diff={diff.diff} path={target.path} truncated={diff.truncated} />
+          // A deletion git can still describe — a tracked file removed from the
+          // worktree — keeps its diff, and showing the lines that went is the
+          // most useful thing the panel can do. It is the deletion git has NO
+          // record of (a file the agent wrote and later removed through a
+          // shell, or a staged `git rm`) that arrives with an empty diff, and
+          // for that the honest answer is a sentence, not a blank pane.
+          diff.status === "deleted" && !diff.diff.trim()
+            ? <div className="wf-empty">This file has been deleted — there's nothing left on disk to show.</div>
+            : diff.binary
+              ? <div className="wf-empty">Binary file — there's nothing to diff. Switch to File to preview or download it.</div>
+              : <UnifiedDiff diff={diff.diff} path={target.path} truncated={diff.truncated} />
         )}
         {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} />}
         {!err && !loading && mode === "render" && file && (

@@ -255,6 +255,46 @@ describe("FilePanel", () => {
     expect(container.querySelector("pre.wf-text")?.textContent).toBe("line one\nline two\n");
   });
 
+  test("a deleted file says so instead of bouncing into a 404", async () => {
+    // The file-contents route MUST 404 a path that isn't on disk, so falling
+    // through to it turned every deletion git can't describe — a file the agent
+    // wrote and later removed through a shell, a staged `git rm` — into a red
+    // error under a row that claims the conversation produced something.
+    getFileDiff.mockResolvedValue({ ...DIFF, status: "deleted", diff: "" } satisfies FileDiffResult);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/gateway.ts", path: "src/gateway.ts" });
+    });
+    await act(async () => { await flush(); });
+
+    expect(getFilePreview).not.toHaveBeenCalled();
+    expect(container.querySelector(".wf-empty")?.textContent).toContain("has been deleted");
+  });
+
+  test("a deletion git can still describe shows the lines that went", async () => {
+    // A tracked file removed from the worktree still diffs against HEAD, and
+    // those lines are the most useful thing the panel has — the deleted case
+    // must not swallow them.
+    getFileDiff.mockResolvedValue({
+      ...DIFF, status: "deleted",
+      diff: ["@@ -1,2 +0,0 @@", "-old line", "-second line"].join("\n"),
+    } satisfies FileDiffResult);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/gateway.ts", path: "src/gateway.ts" });
+    });
+    await act(async () => { await flush(); });
+
+    expect(getFilePreview).not.toHaveBeenCalled();
+    expect(container.querySelector(".udiff-row.del .code")?.textContent).toBe("old line");
+  });
+
   test("Download fetches the bytes — it never links the page at an attachment", async () => {
     // A plain <a href download> is a top-level navigation, and the native
     // client's WKWebView answers an attachment response by killing the frame
@@ -350,6 +390,28 @@ describe("FilePanel", () => {
     expect(text("outputs")).not.toContain("plan.md");
     expect(text("context")).toContain("plan.md");
     expect(text("context")).not.toContain("raven.sql");
+  });
+
+  test("Outputs names which half of it this conversation actually wrote", async () => {
+    // git status runs at the repo root, so the other half is whatever else is
+    // dirty — another session, your editor, a reverted branch. Blending the two
+    // made every row read as "this conversation produced it".
+    await withTouchedSession();
+
+    const groups = [...section("outputs")!.querySelectorAll(".wf-group")].map((g) => g.textContent);
+    expect(groups).toEqual(["Written in this conversation", "Other changes in this folder"]);
+    const rows = [...section("outputs")!.querySelectorAll("button.wf-row")].map((r) => r.textContent);
+    expect(rows[0]).toContain("raven.sql");
+    expect(rows.slice(1).join(" ")).toContain("gateway.ts");
+  });
+
+  test("with nothing from the thread, the folder's changes still say where they came from", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    const groups = [...section("outputs")!.querySelectorAll(".wf-group")].map((g) => g.textContent);
+    expect(groups).toEqual(["Other changes in this folder"]);
   });
 
   test("each section header carries its own count", async () => {
