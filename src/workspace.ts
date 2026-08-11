@@ -7,10 +7,12 @@
 // change the agent summarised in one line. The agent runs on this host, so the
 // files are right there; this module is the read-only window onto them.
 //
-// Three reads, all bounded and all scoped to ACPG_FS_ROOT by the caller:
+// Five reads, all bounded and all scoped to ACPG_FS_ROOT by the caller:
 //   - changes(): git's view of what is dirty in the project (status + numstat)
 //   - fileDiff(): one file's unified diff, including untracked files
 //   - preview():  one file's bytes as text, image metadata, or "binary"
+//   - tree():     one directory's entries, for browsing the project itself
+//   - find():     filenames matching a query, anywhere under the project
 //
 // Deliberately read-only: nothing here writes, stages, or reverts. The panel is
 // a viewer, and keeping the write surface at zero means a browser session that
@@ -36,6 +38,11 @@ export const MAX_TEXT_BYTES = 512 * 1024;
 // Raw byte cap for the <img>/download route. Generous enough for screenshots
 // and design assets, small enough that one request can't pin memory.
 export const MAX_RAW_BYTES = 25 * 1024 * 1024;
+// One directory's worth of rows. A generated folder can hold tens of thousands
+// of entries; the tree says so rather than rendering them.
+export const MAX_TREE_ENTRIES = 500;
+// Filename matches per query. The box is a jump-to, not a report.
+export const MAX_FIND_RESULTS = 200;
 
 export type ChangeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
 
@@ -63,6 +70,36 @@ export interface FileDiff {
   diff: string;
   binary: boolean;
   truncated: boolean;
+}
+
+export interface TreeEntry {
+  name: string;
+  abs: string;
+  dir: boolean;
+  size?: number;      // files only
+  ignored?: boolean;  // git would not track it — dimmed, not hidden
+  symlink?: boolean;  // shown, but never descended into by find()
+}
+
+export interface TreeResult {
+  abs: string;             // the directory listed
+  path: string;            // how to name it in the UI (cwd-relative, else absolute)
+  entries: TreeEntry[];
+  truncated: boolean;
+}
+
+export interface FoundFile {
+  path: string;  // relative to the search root, POSIX
+  abs: string;
+}
+
+export interface FindResult {
+  files: FoundFile[];
+  truncated: boolean;
+  // True when the walk was git's own file list, which already excludes ignored
+  // files. Without it the client can't explain why a visible-but-ignored file
+  // in the tree isn't a search hit.
+  fromGit: boolean;
 }
 
 export type PreviewKind = "text" | "image" | "binary";
@@ -215,6 +252,35 @@ function git(cwd: string, args: string[]): Promise<GitResult> {
         resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "", failed: !!err && code === -1 });
       },
     );
+  });
+}
+
+// `git`, but with `input` written to the child's stdin. `check-ignore --stdin`
+// is the one caller: asking about a whole directory's entries in one process
+// beats spawning git per row, but the paths have to get in somehow, and a
+// directory of a few hundred names would blow past the argv limit.
+function gitStdin(cwd: string, args: string[], input: string): Promise<GitResult> {
+  return new Promise((resolve) => {
+    const child = execFile(
+      "git",
+      ["--no-optional-locks", "-c", "core.fsmonitor=", ...args],
+      {
+        cwd,
+        timeout: GIT_TIMEOUT_MS,
+        maxBuffer: GIT_MAX_BUFFER,
+        encoding: "utf8",
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", LC_ALL: "C" },
+      },
+      (err, stdout, stderr) => {
+        const code = err && typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : err ? -1 : 0;
+        resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "", failed: !!err && code === -1 });
+      },
+    );
+    // A git that exited before reading (no repo, bad flag) leaves a stdin nobody
+    // is draining; the EPIPE that write raises is that, not a failure worth
+    // reporting — the callback above still delivers the exit code.
+    child.stdin?.on("error", () => { /* see above */ });
+    child.stdin?.end(input);
   });
 }
 
@@ -382,4 +448,154 @@ export async function preview(abs: string, displayPath: string): Promise<FilePre
   // as a single replacement char at the very end, which is the right cosmetic
   // outcome for a view already labelled truncated.
   return { ...base, kind: "text", text: body.toString("utf8"), truncated };
+}
+
+// Directories folded away in the fallback walk, when there is no git to ask.
+// Same list the composer's "@ file" picker uses: a build output or a dependency
+// tree buries every real source file under it.
+const FIND_IGNORE_DIRS = new Set([
+  "node_modules", "dist", "build", "out", "target", "vendor", "coverage", ".git",
+]);
+// Depth bound for that same fallback. git's own listing needs no such limit.
+const FIND_MAX_DEPTH = 8;
+
+// Sort a directory the way a file tree reads: folders first, then files, each
+// case-insensitively alphabetical. Exported for its own test — this is the
+// order the panel is judged on, and it has no other observable effect.
+export function sortTreeEntries(entries: TreeEntry[]): TreeEntry[] {
+  return [...entries].sort((a, b) =>
+    Number(b.dir) - Number(a.dir) ||
+    a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) ||
+    a.name.localeCompare(b.name));
+}
+
+// Which of `names` (relative to `root`) git would refuse to track. One call for
+// the whole directory rather than one per row.
+//
+// `check-ignore` exits 1 when NOTHING matches, which is the common case and not
+// an error — same shape as `diff --no-index`'s exit 1 above. Any other non-zero
+// (no repo, no git) means "no ignore information", and the tree simply shows
+// every row undimmed rather than failing.
+async function ignoredNames(root: string, dir: string, names: string[]): Promise<Set<string>> {
+  if (!names.length) return new Set();
+  const rels = names.map((n) => toPosix(path.relative(root, path.join(dir, n))));
+  // No --no-index: a path that is tracked is not ignored, whatever the patterns
+  // say, and that is the answer a reader wants from a dimmed row.
+  const r = await gitStdin(root, ["check-ignore", "-z", "--stdin"], rels.join("\0"));
+  if (r.code !== 0 && r.code !== 1) return new Set();
+  const hits = new Set(r.stdout.split("\0").filter(Boolean));
+  const out = new Set<string>();
+  names.forEach((n, i) => { if (hits.has(rels[i])) out.add(n); });
+  return out;
+}
+
+// One directory's entries. Names only — no stat storm beyond the size a row
+// shows, and no descent: the tree asks again when a folder is opened, so the
+// cost of a huge subtree is only paid by someone who opens it.
+export async function tree(cwd: string, abs: string, displayPath: string): Promise<TreeResult | null> {
+  let all: fs.Dirent[];
+  try { all = await fs.promises.readdir(abs, { withFileTypes: true }); } catch { return null; }
+  // Every other dotfile is shown — a .env you can see is the point of showing
+  // them. `.git` is the exception: it is the repo's own plumbing, it is in
+  // every checkout, and `check-ignore` won't call it ignored (git excludes it
+  // structurally), so it would sit at the top of every tree undimmed.
+  const ents = all.filter((e) => e.name !== ".git");
+
+  const truncated = ents.length > MAX_TREE_ENTRIES;
+  const kept = truncated ? ents.slice(0, MAX_TREE_ENTRIES) : ents;
+  const root = await repoRoot(cwd);
+  const ignored = root ? await ignoredNames(root, abs, kept.map((e) => e.name)) : new Set<string>();
+
+  const entries = kept.map((e): TreeEntry => {
+    const child = path.join(abs, e.name);
+    // A symlink reports isDirectory() false, so resolve it once to decide
+    // whether the row is expandable. A broken link stays a (dead) file row.
+    let dir = e.isDirectory();
+    const symlink = e.isSymbolicLink();
+    if (symlink) { try { dir = fs.statSync(child).isDirectory(); } catch { dir = false; } }
+    let size: number | undefined;
+    if (!dir) { try { size = fs.statSync(child).size; } catch { /* unreadable, or a dead link */ } }
+    return {
+      name: e.name, abs: child, dir,
+      ...(size === undefined ? {} : { size }),
+      ...(ignored.has(e.name) ? { ignored: true } : {}),
+      ...(symlink ? { symlink: true } : {}),
+    };
+  });
+  return { abs, path: displayPath, entries: sortTreeEntries(entries), truncated };
+}
+
+// Filenames under `abs` matching `query` as a case-insensitive substring of the
+// root-relative path.
+//
+// git supplies the file list when there is a repo: one call, it already knows
+// every tracked and untracked-but-not-ignored file, and it includes dotfiles —
+// which the tree shows, so a filter that skipped them would fail to find a
+// `.env` sitting in plain sight. It also means the box never walks into
+// node_modules, for the same reason the tree dims it.
+export async function find(cwd: string, abs: string, query: string): Promise<FindResult> {
+  const q = query.trim().toLowerCase();
+  if (!q) return { files: [], truncated: false, fromGit: false };
+
+  const root = await repoRoot(cwd);
+  const rels = root ? await gitFileList(root, abs) : null;
+  const paths = rels ?? await walkFiles(abs);
+  const hits: FoundFile[] = [];
+  for (const rel of paths) {
+    if (!rel.toLowerCase().includes(q)) continue;
+    if (hits.length >= MAX_FIND_RESULTS) return { files: rank(hits, q), truncated: true, fromGit: !!rels };
+    hits.push({ path: rel, abs: path.join(abs, rel) });
+  }
+  return { files: rank(hits, q), truncated: false, fromGit: !!rels };
+}
+
+// A basename hit beats a mid-path hit, then the shallower path, then
+// alphabetical — so typing "panel" finds FilePanel.tsx before a file buried in
+// a folder called panels/.
+function rank(files: FoundFile[], q: string): FoundFile[] {
+  return files.sort((a, b) => {
+    const ab = a.path.slice(a.path.lastIndexOf("/") + 1).toLowerCase().includes(q) ? 0 : 1;
+    const bb = b.path.slice(b.path.lastIndexOf("/") + 1).toLowerCase().includes(q) ? 0 : 1;
+    return ab - bb || a.path.length - b.path.length || a.path.localeCompare(b.path);
+  });
+}
+
+// Every file git would show under `abs`, as paths relative to it. Null when git
+// can't answer, which sends find() to the filesystem walk instead.
+async function gitFileList(root: string, abs: string): Promise<string[] | null> {
+  const r = await git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", abs]);
+  if (r.code !== 0) return null;
+  const out: string[] = [];
+  for (const rel of r.stdout.split("\0")) {
+    if (!rel) continue;
+    // ls-files answers in repo-relative paths even when asked about a
+    // subdirectory, so re-base onto the folder actually being searched.
+    const under = path.relative(abs, path.resolve(root, rel));
+    if (under && !under.startsWith("..") && !path.isAbsolute(under)) out.push(toPosix(under));
+  }
+  return out;
+}
+
+// No repo, or no git: walk it ourselves. Bounded in depth, folds away the
+// build/dependency directories by name (there is no .gitignore to consult), and
+// never follows a symlinked directory — a loop there would hang the request.
+async function walkFiles(abs: string): Promise<string[]> {
+  const out: string[] = [];
+  async function walk(cur: string, rel: string, depth: number): Promise<void> {
+    if (out.length >= MAX_FIND_RESULTS * 20) return;
+    let ents: fs.Dirent[];
+    try { ents = await fs.promises.readdir(cur, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const childRel = rel ? rel + "/" + e.name : e.name;
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) {
+        if (FIND_IGNORE_DIRS.has(e.name) || depth >= FIND_MAX_DEPTH) continue;
+        await walk(path.join(cur, e.name), childRel, depth + 1);
+      } else if (e.isFile()) {
+        out.push(childRel);
+      }
+    }
+  }
+  await walk(abs, "", 0);
+  return out;
 }

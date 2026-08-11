@@ -146,6 +146,7 @@ collapsible sections:
 | Progress | The agent's current plan, when it has published one. |
 | Outputs | Every file this turn's work touched: what the conversation wrote (from its own tool calls) merged with what `git status` reports dirty in the checkout. One row per file. A file git tracks leads with git's status letter (`A`/`M`/`D`/`R`/`U`) and its `+`/`−` line counts; anything git has nothing to say about — a file written to `/tmp`, written and reverted, or already committed — leads with its type icon instead. |
 | Context | Files the conversation only consulted — read, searched, fetched. |
+| Files | The project itself, as a lazily-expanded tree, plus a **Find files** box that matches on any part of a path. Folded by default — the three sections above are built from the conversation, so none of them knows about a file nobody has touched yet. Entries `git` ignores are dimmed rather than hidden; `.git` is the one thing left out. |
 
 Opening a row shows that file:
 
@@ -201,10 +202,18 @@ opencode edit) reports a command, never a path. `git status` runs when the panel
 opens and again when a turn finishes; without a git checkout the list falls back
 to tool calls alone and says so.
 
-It reads through four authenticated endpoints (`/workspace/changes`,
-`/workspace/diff`, `/workspace/file`, `/workspace/raw`) — see *What the preview
-can reach* above for their boundary. Listing changed files requires `git` on the
-gateway host; a folder that isn't a checkout simply shows nothing to compare.
+It reads through six authenticated endpoints (`/workspace/changes`,
+`/workspace/diff`, `/workspace/file`, `/workspace/raw`, `/workspace/tree`,
+`/workspace/find`) — see *What the preview can reach* above for their boundary,
+which is deliberately the same one for all six: a tree that listed more than the
+viewer can open would offer rows it then refuses. Listing changed files requires
+`git` on the gateway host; a folder that isn't a checkout simply shows nothing to
+compare.
+
+Find files asks `git` for the file list, so it never walks into `node_modules`
+and never misses a dotfile — the same rule that dims a row in the tree decides
+whether it is a search candidate. Without a checkout it falls back to a bounded
+walk that folds away the usual build and dependency directories by name.
 
 ## Deployment
 

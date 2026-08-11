@@ -31,6 +31,7 @@ describe("FilePanel", () => {
   let getWorkspaceChanges: ReturnType<typeof vi.fn>;
   let getFileDiff: ReturnType<typeof vi.fn>;
   let getFilePreview: ReturnType<typeof vi.fn>;
+  let getWorkspaceTree: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -50,10 +51,16 @@ describe("FilePanel", () => {
       path: "src/gateway.ts", abs: "/repo/src/gateway.ts", kind: "text",
       size: 20, modifiedAt: new Date().toISOString(), text: "line one\nline two\n", truncated: false,
     } satisfies FilePreviewResult);
+    getWorkspaceTree = vi.fn().mockResolvedValue({
+      abs: "/repo", path: "", truncated: false,
+      entries: [{ name: "src", abs: "/repo/src", dir: true }],
+    });
     vi.doMock("../lib/api.ts", () => ({
       getWorkspaceChanges,
       getFileDiff,
       getFilePreview,
+      getWorkspaceTree,
+      findWorkspaceFiles: vi.fn().mockResolvedValue({ files: [], truncated: false, fromGit: true }),
       rawFileUrl: (cwd: string, p: string) => `/workspace/raw?cwd=${cwd}&path=${p}`,
     }));
   });
@@ -479,11 +486,27 @@ describe("FilePanel", () => {
     await render();
 
     const sections = [...container.querySelectorAll(".wf-sec-head")].map((h) => h.getAttribute("data-section"));
-    expect(sections).toEqual(["progress", "outputs", "context"]);
+    expect(sections).toEqual(["progress", "outputs", "context", "files"]);
     const progress = section("progress")?.textContent ?? "";
     expect(progress).toContain("Gather the tickets");
     expect(progress).toContain("Draft the deck");
     expect(progress).not.toContain("stale");
+  });
+
+  test("the Files section starts folded, and lists nothing until it is opened", async () => {
+    // The other three lists are built from state the panel already holds. This
+    // one is a request per level, so a folded tree must cost none of them.
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    expect(section("files")?.querySelector(".wf-sec-body")).toBeNull();
+    expect(getWorkspaceTree).not.toHaveBeenCalled();
+
+    await toggleSection("files");
+    // No path: the tree's root is the conversation's own folder.
+    expect(getWorkspaceTree).toHaveBeenCalledWith("/repo", undefined);
+    expect(section("files")?.textContent).toContain("src");
   });
 
   test("no plan, no Progress section", async () => {

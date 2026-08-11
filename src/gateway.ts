@@ -44,6 +44,7 @@ import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleUpload } from "./uploads.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
+  tree as workspaceTree, find as workspaceFind,
   inlineImageType, repoRoot, MAX_RAW_BYTES,
 } from "./workspace.ts";
 import { buildClientConfig } from "./client-config.ts";
@@ -638,12 +639,16 @@ async function allowedPreviewPath(abs: string, cwd: string): Promise<string | nu
 // absolute (how /workspace/changes addresses every file it lists) or
 // cwd-relative. Null means "refuse" — a missing parameter or a path outside
 // everything allowedPreviewPath permits.
-async function resolveWorkspaceTarget(q: URLSearchParams): Promise<{ cwd: string; abs: string; display: string } | null> {
+// `rootIsCwd` is for the tree, whose top level has no path to send: an omitted
+// `path` there means "the folder this conversation runs in", not "refuse".
+async function resolveWorkspaceTarget(q: URLSearchParams, rootIsCwd = false): Promise<{ cwd: string; abs: string; display: string } | null> {
   const cwd = resolveWithinRoot(q.get("cwd") ?? "");
   if (!cwd) return null;
   const raw = q.get("path") ?? "";
-  if (!raw) return null;
-  const abs = await allowedPreviewPath(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw), cwd);
+  if (!raw && !rootIsCwd) return null;
+  const abs = raw
+    ? await allowedPreviewPath(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw), cwd)
+    : cwd;
   if (!abs) return null;
   const rel = path.relative(cwd, abs);
   // Files under cwd read better by their short path; anything else (a sibling
@@ -4058,6 +4063,37 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
         return workspacePreview(target.abs, target.display).then((r) => {
           if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable file", code: "not-found" })); return; }
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify(r));
+        });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // One directory's entries, for browsing the project rather than only the
+  // files this conversation happened to name. Same guard as every other
+  // /workspace route deliberately: a tree gated more loosely than the viewer
+  // would list rows the viewer then refuses to open.
+  if (consoleEnabled && pathname === "/workspace/tree") {
+    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams, true)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        return workspaceTree(target.cwd, target.abs, target.display).then((r) => {
+          if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable directory", code: "not-found" })); return; }
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify(r));
+        });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Filenames matching ?q= anywhere under the tree's root.
+  if (consoleEnabled && pathname === "/workspace/find") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    resolveWorkspaceTarget(q, true)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        return workspaceFind(target.cwd, target.abs, q.get("q") ?? "").then((r) => {
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
         });
