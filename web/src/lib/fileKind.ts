@@ -58,7 +58,14 @@ const BY_NAME: Record<string, [string, string?]> = {
   ".gitignore": ["Data", "Config"], ".gitattributes": ["Data", "Config"],
 };
 
-function extensionOf(name: string): string {
+// Shared with highlight.ts, which needs the same "what's the filename really"
+// parsing to pick a grammar — one definition of "extension" and "basename" for
+// both call sites.
+export function basenameLower(name: string): string {
+  return (name.split(/[\\/]/).pop() ?? "").toLowerCase();
+}
+
+export function extensionOf(name: string): string {
   const base = name.split(/[\\/]/).pop() ?? "";
   const dot = base.lastIndexOf(".");
   // A leading dot is the whole name (".env"), not an extension of "".
@@ -66,7 +73,7 @@ function extensionOf(name: string): string {
 }
 
 export function fileKind(name: string): FileKind {
-  const base = (name.split(/[\\/]/).pop() ?? "").toLowerCase();
+  const base = basenameLower(name);
   const named = BY_NAME[base];
   if (named) return { category: named[0], language: named[1], icon: ICONS[named[0]] ?? "file" };
 
