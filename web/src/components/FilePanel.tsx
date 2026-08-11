@@ -8,6 +8,7 @@ import {
 import { touchedFiles } from "../lib/touchedFiles.ts";
 import { mergePanelFiles, type PanelFile } from "../lib/panelFiles.ts";
 import { fileKind } from "../lib/fileKind.ts";
+import { highlightBlock, highlightLanguageFor } from "../lib/highlight.ts";
 import { downloadFile } from "../lib/download.ts";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
 import { Plan } from "./Plan.tsx";
@@ -394,7 +395,7 @@ function FileView({ cwd, target }: { cwd: string; target: FilePreviewTarget }) {
         {!err && !loading && mode === "diff" && diff && (
           diff.binary
             ? <div className="wf-empty">Binary file — there's nothing to diff. Switch to File to preview or download it.</div>
-            : <UnifiedDiff diff={diff.diff} truncated={diff.truncated} />
+            : <UnifiedDiff diff={diff.diff} path={target.path} truncated={diff.truncated} />
         )}
         {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} />}
       </div>
@@ -457,13 +458,20 @@ function FileContents({ file, raw }: { file: FilePreviewResult; raw: string }) {
       </div>
     );
   }
+  // One text node for the whole file when it isn't coloured: a per-line
+  // element turns a 5,000-line file into tens of thousands of DOM nodes, and
+  // every later layout pass in this tab pays for them — the same cost that
+  // forced Markdown's highlight cap. highlightBlock enforces the same budget
+  // here (see its own cap), so a large file still falls back to this.
+  const lang = highlightLanguageFor(file.path);
+  const html = lang && file.text ? highlightBlock(file.text, lang) : null;
   return (
     <>
-      {/* One text node for the whole file, deliberately: a per-line element (or
-          a syntax-highlighted span per token) turns a 5,000-line file into tens
-          of thousands of DOM nodes, and every later layout pass in this tab pays
-          for them — the same cost that forced Markdown's highlight cap. */}
-      <pre className="wf-text"><code>{file.text}</code></pre>
+      <pre className="wf-text">
+        {html != null
+          ? <code className="wf-hl" dangerouslySetInnerHTML={{ __html: html }} />
+          : <code>{file.text}</code>}
+      </pre>
       {file.truncated && <div className="wf-note">File truncated at {formatBytes(file.text?.length ?? 0)}.</div>}
     </>
   );
