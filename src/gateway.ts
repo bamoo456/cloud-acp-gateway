@@ -509,12 +509,29 @@ const FS_ROOT = (() => {
 // private storage, deliberately NOT under FS_ROOT (that's the user's browsable
 // project tree; an "uploads" folder in it would pollute their repo).
 const UPLOADS_DIR = path.join(cfg.ledgerDir, "uploads");
+
+// realpath a path that may not exist (yet, or at all): walk up to the nearest
+// existing ancestor, realpath *that*, then reattach the parts that don't
+// exist. A plain fs.realpathSync throws for a missing file, and falling back
+// to the un-resolved path there is what broke this: macOS's /tmp is a symlink
+// to /private/tmp, so a real, allowed, merely-nonexistent path like
+// /tmp/report.png resolved to a form that no longer matched the (realpath'd)
+// root — the gateway reported "outside the conversation's project" for a file
+// that was never there in the first place, instead of "not found". `..` is
+// collapsed by path.resolve() before any of this runs, so a traversal
+// attempt is caught the same way it always was.
+function realpathLenient(p: string): string {
+  const resolved = path.resolve(p);
+  try { return fs.realpathSync(resolved); } catch { /* missing — resolve the ancestor instead */ }
+  const parent = path.dirname(resolved);
+  if (parent === resolved) return resolved; // reached the filesystem root
+  return path.join(realpathLenient(parent), path.basename(resolved));
+}
 function resolveWithinRootBase(p: string, root: string): string | null {
   if (!p) return null;
   let safeRoot: string;
   try { safeRoot = fs.realpathSync(root); } catch { safeRoot = path.resolve(root); }
-  let abs: string;
-  try { abs = fs.realpathSync(path.resolve(p)); } catch { abs = path.resolve(p); }
+  const abs = realpathLenient(p);
   return abs === safeRoot || abs.startsWith(safeRoot + path.sep) ? abs : null;
 }
 export function resolveWithinRoot(p: string): string | null {
@@ -4056,7 +4073,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       .then((target) => {
         if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
         return workspacePreview(target.abs, target.display).then((r) => {
-          if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable file" })); return; }
+          if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable file", code: "not-found" })); return; }
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
         });
