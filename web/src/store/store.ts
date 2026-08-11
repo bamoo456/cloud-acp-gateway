@@ -24,7 +24,9 @@ export type TextSize = "small" | "default" | "large" | "xl";
 // anything the agent changed — that's the question being asked — and it falls
 // back to the contents view on its own when there is no diff to show (an
 // untouched file, a binary, an image).
-export type PreviewMode = "diff" | "file";
+// "render" is only ever reached from inside the panel's own mode toggle (see
+// FilePanel.tsx) — nothing opens a file straight into it.
+export type PreviewMode = "diff" | "file" | "render";
 // `abs` is the gateway-side absolute path (how the API addresses a file);
 // `path` is the short label shown in the panel's title bar.
 export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode }
