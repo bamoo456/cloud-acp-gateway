@@ -16,6 +16,7 @@ describe("highlightLanguageFor", () => {
     expect(highlightLanguageFor("Main.java")).toBe("java");
     expect(highlightLanguageFor("src/app.tsx")).toBe("typescript");
     expect(highlightLanguageFor("config.toml")).toBe("ini");
+    expect(highlightLanguageFor("README.md")).toBe("markdown");
   });
 
   test("a name-based grammar wins over guessing from the extension", () => {
