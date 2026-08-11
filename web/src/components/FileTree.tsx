@@ -3,6 +3,7 @@ import { getWorkspaceTree, findWorkspaceFiles, type TreeEntry, type FoundFile } 
 import { fileKind } from "../lib/fileKind.ts";
 import { formatBytes } from "../lib/format.ts";
 import { IconFolder, IconChevronDown, IconChevronRight, fileIcon } from "../lib/icons.tsx";
+import { useRowMenu } from "./FileMenu.tsx";
 
 // Browsing the project, rather than only the files this conversation happened
 // to name. Outputs and Context are built from the thread, so they are blind to
@@ -18,15 +19,18 @@ import { IconFolder, IconChevronDown, IconChevronRight, fileIcon } from "../lib/
 // Depth is indentation only; the fetch cares about the path.
 const INDENT_PX = 12;
 
-function Row({ entry, depth, open, onClick }: {
+function Row({ entry, depth, open, onClick, onMenu }: {
   entry: TreeEntry; depth: number; open?: boolean; onClick: () => void;
+  onMenu: (x: number, y: number) => void;
 }) {
   const kind = fileKind(entry.name);
+  const menu = useRowMenu(onMenu);
   return (
     <button
       className={"wf-row wf-tree-row" + (entry.ignored ? " ignored" : "")}
       style={{ paddingLeft: 10 + depth * INDENT_PX }}
       onClick={onClick}
+      {...menu}
       title={entry.ignored ? entry.abs + " — git ignores this" : entry.abs}
     >
       <span className="wf-twist">
@@ -44,8 +48,9 @@ function Row({ entry, depth, open, onClick }: {
 // One expanded directory's children, fetched on mount. A component per level
 // rather than one flattened list, so opening a folder deep in the tree doesn't
 // re-fetch — or re-render — anything above it.
-function Level({ cwd, dir, depth, onOpenFile }: {
+function Level({ cwd, dir, depth, onOpenFile, onMenu }: {
   cwd: string; dir?: string; depth: number; onOpenFile: (e: TreeEntry) => void;
+  onMenu: (e: TreeEntry, x: number, y: number) => void;
 }) {
   const [entries, setEntries] = useState<TreeEntry[] | null>(null);
   const [truncated, setTruncated] = useState(false);
@@ -79,9 +84,10 @@ function Level({ cwd, dir, depth, onOpenFile }: {
       {entries.map((e) => (
         <div key={e.abs}>
           <Row entry={e} depth={depth} open={open.has(e.abs)}
-            onClick={() => (e.dir ? toggle(e.abs) : onOpenFile(e))} />
+            onClick={() => (e.dir ? toggle(e.abs) : onOpenFile(e))}
+            onMenu={(x, y) => onMenu(e, x, y)} />
           {e.dir && open.has(e.abs) && (
-            <Level cwd={cwd} dir={e.abs} depth={depth + 1} onOpenFile={onOpenFile} />
+            <Level cwd={cwd} dir={e.abs} depth={depth + 1} onOpenFile={onOpenFile} onMenu={onMenu} />
           )}
         </div>
       ))}
@@ -90,8 +96,28 @@ function Level({ cwd, dir, depth, onOpenFile }: {
   );
 }
 
-function Results({ cwd, query, onOpenFile }: {
+// A find hit. Its own component rather than a row inside the map below, because
+// the menu gestures are a hook and a hook cannot be called per iteration.
+function ResultRow({ file, onOpen, onMenu }: {
+  file: FoundFile; onOpen: () => void; onMenu: (x: number, y: number) => void;
+}) {
+  const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+  const dir = file.path.slice(0, file.path.length - name.length - 1);
+  const menu = useRowMenu(onMenu);
+  return (
+    <button className="wf-row" onClick={onOpen} {...menu} title={file.path}>
+      <span className="wf-mark wf-kind">{fileIcon(fileKind(name).icon)}</span>
+      <span className="wf-name">
+        <span className="wf-nm">{name}</span>
+        {dir && <span className="wf-dir">{dir}</span>}
+      </span>
+    </button>
+  );
+}
+
+function Results({ cwd, query, onOpenFile, onMenu }: {
   cwd: string; query: string; onOpenFile: (e: { abs: string; name: string }) => void;
+  onMenu: (e: { abs: string; name: string }, x: number, y: number) => void;
 }) {
   const [files, setFiles] = useState<FoundFile[] | null>(null);
   const [meta, setMeta] = useState<{ truncated: boolean; fromGit: boolean }>({ truncated: false, fromGit: false });
@@ -124,16 +150,11 @@ function Results({ cwd, query, onOpenFile }: {
   return (
     <>
       {files.map((f) => {
-        const name = f.path.slice(f.path.lastIndexOf("/") + 1);
-        const dir = f.path.slice(0, f.path.length - name.length - 1);
+        const found = { abs: f.abs, name: f.path.slice(f.path.lastIndexOf("/") + 1) };
         return (
-          <button key={f.abs} className="wf-row" onClick={() => onOpenFile({ abs: f.abs, name })} title={f.path}>
-            <span className="wf-mark wf-kind">{fileIcon(fileKind(name).icon)}</span>
-            <span className="wf-name">
-              <span className="wf-nm">{name}</span>
-              {dir && <span className="wf-dir">{dir}</span>}
-            </span>
-          </button>
+          <ResultRow key={f.abs} file={f}
+            onOpen={() => onOpenFile(found)}
+            onMenu={(x, y) => onMenu(found, x, y)} />
         );
       })}
       {meta.truncated && <div className="wf-note">Showing the first {files.length} matches.</div>}
@@ -141,13 +162,16 @@ function Results({ cwd, query, onOpenFile }: {
   );
 }
 
-export function FileTree({ cwd, reloadKey, onOpenFile }: {
+export function FileTree({ cwd, reloadKey, onOpenFile, onMenu }: {
   cwd: string;
   // Bumped by the panel's Refresh button. The tree does not re-fetch on its own
   // — an agent finishing a turn changes a handful of files, and re-listing every
   // open folder for that is a request per level for almost no news.
   reloadKey: number;
   onOpenFile: (file: { abs: string; name: string }) => void;
+  // Right-click / long-press on a row. The panel owns the menu itself, because
+  // it is positioned against the viewport rather than against the tree.
+  onMenu: (file: { abs: string; name: string; isDir?: boolean }, x: number, y: number) => void;
 }) {
   const [query, setQuery] = useState("");
   // A new folder is a new tree: dropping the old one's expansions is the point.
@@ -168,9 +192,10 @@ export function FileTree({ cwd, reloadKey, onOpenFile }: {
       </div>
       <div className="wf-body">
         {query.trim()
-          ? <Results cwd={cwd} query={query.trim()} onOpenFile={onOpenFile} />
+          ? <Results cwd={cwd} query={query.trim()} onOpenFile={onOpenFile} onMenu={onMenu} />
           : <Level key={cwd + ":" + reloadKey} cwd={cwd} depth={0}
-              onOpenFile={(e) => onOpenFile({ abs: e.abs, name: e.name })} />}
+              onOpenFile={(e) => onOpenFile({ abs: e.abs, name: e.name })}
+              onMenu={(e, x, y) => onMenu({ abs: e.abs, name: e.name, isDir: e.dir }, x, y)} />}
       </div>
     </>
   );

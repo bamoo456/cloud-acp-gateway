@@ -140,6 +140,17 @@ export function IconFile() {
   );
 }
 
+// "Add to chat" — a speech bubble with a plus in it. The bubble is what makes
+// it read as "into the conversation" rather than as a bare add-to-a-list.
+export function IconAddToChat() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+      <path d="M12 8v6M9 11h6" />
+    </svg>
+  );
+}
+
 // The file-preview panel's header toggle: the standard VS Code / macOS
 // "toggle right panel" glyph — a frame with a divider toward the right,
 // matching that this panel opens on the right edge of the screen.

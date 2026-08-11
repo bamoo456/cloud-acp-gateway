@@ -112,6 +112,11 @@ interface State {
   filesOpen: boolean;
   // Which file the preview pane is showing; null means the file list.
   filePreview: FilePreviewTarget | null;
+  // Files staged on the composer, waiting to be sent with the next message —
+  // the chips above the input. In the store for the same reason the preview
+  // panel is: they are added from the file panel as well as from the composer's
+  // own "@" picker, and the panel cannot reach into the composer's local state.
+  attachedFiles: MessageFile[];
   // actions
   bootstrap: () => void;
   setAgent: (name: string) => void;
@@ -150,6 +155,9 @@ interface State {
   // file", wherever the path was clicked.
   openFilePreview: (file: { abs: string; path?: string; mode?: PreviewMode }) => void;
   clearFilePreview: () => void;
+  attachFiles: (files: MessageFile[]) => void;
+  removeAttachedFile: (index: number) => void;
+  clearAttachedFiles: () => void;
 }
 
 type SkinState = Pick<State, "cfg" | "agentName">;
@@ -948,6 +956,7 @@ export const useStore = create<State>((set, get) => {
     // closed on a phone-width one.
     filesOpen: isDesktopPanelWidth(),
     filePreview: null,
+    attachedFiles: [],
 
     bootstrap() {
       // Pull the account's shared prefs (text size, screen-lock config, recent
@@ -1406,7 +1415,7 @@ export const useStore = create<State>((set, get) => {
       }
       try {
         // text block first (when non-empty), then one image block per attachment,
-        // then a resource_link per "@ file" reference (the agent reads the file).
+        // then a block per file reference.
         const prompt: Array<Record<string, unknown>> = [];
         if (text.trim()) prompt.push({ type: "text", text });
         for (const im of imgs) {
@@ -1414,7 +1423,18 @@ export const useStore = create<State>((set, get) => {
             ? { type: "image", mimeType: im.mimeType, data: im.data }
             : { type: "image", mimeType: im.mimeType, uri: im.uri });
         }
-        for (const f of refs) prompt.push({ type: "resource_link", uri: f.uri, name: f.name });
+        // A whole file is a resource_link — the agent reads it itself, and
+        // sending a large file inline would spend the context on a file it may
+        // only need one function out of. A line range is the opposite case:
+        // the lines ARE the point, so they ride along as an embedded resource.
+        // Both adapters turn that into a link plus a <context ref="…"> block
+        // (claude-agent-acp promptToClaude, codex-acp buildPromptItems), which
+        // is how the selection reaches the model without a second read.
+        for (const f of refs) {
+          prompt.push(f.text !== undefined
+            ? { type: "resource", resource: { uri: f.uri, mimeType: "text/plain", text: f.text } }
+            : { type: "resource_link", uri: f.uri, name: f.name });
+        }
         const res = (await acp.request("session/prompt", { sessionId: activeId, prompt })) as { stopReason?: string };
         patch(activeId, (s) => ({ ...s, curAssistantId: null, curThoughtId: null }));
         if (res?.stopReason && res.stopReason !== "end_turn") {
@@ -1533,6 +1553,27 @@ export const useStore = create<State>((set, get) => {
 
     clearFilePreview() {
       set({ filePreview: null });
+    },
+
+    // De-duplicated on the URI, which carries the line range: two ranges of one
+    // file are two attachments, the same range attached twice is one.
+    attachFiles(files) {
+      if (!files.length) return;
+      set((st) => {
+        const next = [...st.attachedFiles];
+        for (const f of files) if (!next.some((p) => p.uri === f.uri)) next.push(f);
+        return { attachedFiles: next };
+      });
+    },
+
+    // By index rather than by URI: an upload that failed to report one would
+    // otherwise be a chip that cannot be removed.
+    removeAttachedFile(index) {
+      set((st) => ({ attachedFiles: st.attachedFiles.filter((_, i) => i !== index) }));
+    },
+
+    clearAttachedFiles() {
+      set({ attachedFiles: [] });
     },
   };
 });
