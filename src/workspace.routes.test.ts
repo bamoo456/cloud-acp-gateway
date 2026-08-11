@@ -32,6 +32,26 @@ fs.writeFileSync(path.join(REPO, "kept.txt"), "one\ntwo\nthree\n");
 fs.writeFileSync(path.join(REPO, "shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d]));
 fs.writeFileSync(path.join(REPO, "report.html"), "<script>alert(document.cookie)</script>");
 
+// A second checkout, for the tree/find routes. Separate from REPO on purpose:
+// those tests care about what a folder CONTAINS, and adding fixture files to
+// REPO would rewrite what `git status` reports for the tests above.
+const TREE = path.join(ROOT, "treeproj");
+fs.mkdirSync(path.join(TREE, "src", "deep"), { recursive: true });
+fs.mkdirSync(path.join(TREE, "build"), { recursive: true });
+const runTree = (...args: string[]) => execFileSync("git", args, { cwd: TREE, stdio: "pipe" });
+runTree("init", "-q", "-b", "main");
+runTree("config", "user.email", "test@example.com");
+runTree("config", "user.name", "Test");
+fs.writeFileSync(path.join(TREE, ".gitignore"), "ignored.log\nbuild/\n");
+fs.writeFileSync(path.join(TREE, ".env"), "SECRET=1\n");
+fs.writeFileSync(path.join(TREE, "README.md"), "# tree\n");
+fs.writeFileSync(path.join(TREE, "ignored.log"), "noise\n");
+fs.writeFileSync(path.join(TREE, "src", "app.ts"), "export const a = 1;\n");
+fs.writeFileSync(path.join(TREE, "src", "deep", "nested.ts"), "export const b = 2;\n");
+fs.writeFileSync(path.join(TREE, "build", "bundle.js"), "// generated\n");
+runTree("add", "-A");
+runTree("commit", "-q", "-m", "initial");
+
 const authHeader = "Basic " + Buffer.from(
   `${process.env.ACPG_AUTH_USER ?? ""}:${process.env.ACPG_AUTH_TOKEN ?? ""}`, "utf8",
 ).toString("base64");
@@ -146,10 +166,85 @@ test("anything else is served as an opaque download, never as active content", a
   }
 });
 
+interface TreeBody { path: string; truncated: boolean; entries: Array<{ name: string; dir: boolean; ignored?: boolean; size?: number }> }
+
+test("/workspace/tree lists one level, folders first, with git's ignored files dimmed rather than hidden", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    // No `path`: the tree's root is the conversation's own folder.
+    const r = await get(q("/workspace/tree", { cwd: TREE }));
+    assert.equal(r.status, 200);
+    const body = await r.json() as TreeBody;
+    const names = body.entries.map((e) => e.name);
+    // Folders first, then files, each alphabetical — and dotfiles are present,
+    // because a .env you can see in the tree is the point of showing them.
+    // `.git` is the one exclusion: plumbing, not project content.
+    assert.deepEqual(names, ["build", "src", ".env", ".gitignore", "ignored.log", "README.md"]);
+    const by = (n: string) => body.entries.find((e) => e.name === n)!;
+    assert.equal(by("src").dir, true);
+    assert.equal(by("README.md").dir, false);
+    assert.ok((by("README.md").size ?? 0) > 0, "files carry their size");
+    // .gitignore names both of these; nothing else is ignored.
+    assert.equal(by("ignored.log").ignored, true);
+    assert.equal(by("build").ignored, true);
+    assert.equal(by("README.md").ignored, undefined);
+    assert.equal(by(".env").ignored, undefined);
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/tree descends by path, and refuses a file", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const r = await get(q("/workspace/tree", { cwd: TREE, path: "src" }));
+    const body = await r.json() as TreeBody;
+    assert.equal(body.path, "src", "named relative to the conversation's folder");
+    assert.deepEqual(body.entries.map((e) => e.name), ["deep", "app.ts"]);
+
+    // A file is not a directory: 404, not an empty listing that reads as "this
+    // folder is empty".
+    const file = await get(q("/workspace/tree", { cwd: TREE, path: "README.md" }));
+    assert.equal(file.status, 404);
+    assert.equal((await file.json()).code, "not-found");
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/find matches on the whole relative path, dotfiles included, and skips what git ignores", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const hit = async (query: string) => {
+      const r = await get(q("/workspace/find", { cwd: TREE, q: query }));
+      assert.equal(r.status, 200);
+      return await r.json() as { files: Array<{ path: string }>; truncated: boolean; fromGit: boolean };
+    };
+
+    // A dotfile the tree shows must be findable; the composer's "@ file" walk
+    // skips these, which is why find() doesn't reuse it.
+    assert.deepEqual((await hit(".env")).files.map((f) => f.path), [".env"]);
+    // Nested, and matched on the directory part of the path too.
+    assert.deepEqual((await hit("deep/")).files.map((f) => f.path), ["src/deep/nested.ts"]);
+    // Ignored files are visible in the tree but are not search hits — the tree
+    // dims them for the same reason.
+    const ignored = await hit("ignored.log");
+    assert.deepEqual(ignored.files, []);
+    assert.equal(ignored.fromGit, true, "git supplied the list, so it excluded them");
+    assert.deepEqual((await hit("bundle")).files, []);
+    // A basename hit outranks a mid-path one.
+    assert.equal((await hit("nested")).files[0].path, "src/deep/nested.ts");
+    // An empty query is not "match everything".
+    assert.deepEqual((await hit("  ")).files, []);
+  } finally {
+    await close();
+  }
+});
+
 test("a path outside the project and outside ACPG_PREVIEW_ROOTS is refused, however it is spelled", async () => {
   const { get, close } = await startHttpServer();
   try {
-    for (const route of ["/workspace/file", "/workspace/diff", "/workspace/raw"]) {
+    for (const route of ["/workspace/file", "/workspace/diff", "/workspace/raw", "/workspace/tree", "/workspace/find"]) {
       assert.equal((await get(q(route, { cwd: REPO, path: "/etc/passwd" }))).status, 400, route + " absolute");
       assert.equal((await get(q(route, { cwd: REPO, path: "../../../../etc/passwd" }))).status, 400, route + " traversal");
       // cwd is not the client's to choose freely either — otherwise cwd=/ would
@@ -157,6 +252,9 @@ test("a path outside the project and outside ACPG_PREVIEW_ROOTS is refused, howe
       assert.equal((await get(q(route, { cwd: "/etc", path: "passwd" }))).status, 400, route + " cwd");
     }
     assert.equal((await get(q("/workspace/changes", { cwd: "/etc" }))).status, 400);
+    // The tree's root is the one path it may omit, and that must not become a
+    // way to list a cwd the client picked from outside the root.
+    assert.equal((await get(q("/workspace/tree", { cwd: "/etc" }))).status, 400);
   } finally {
     await close();
   }

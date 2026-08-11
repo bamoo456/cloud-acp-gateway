@@ -6,8 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   changes, fileDiff, preview, repoRoot,
-  parseStatusZ, parseNumstatZ, looksBinary, inlineImageType,
-  MAX_TEXT_BYTES,
+  parseStatusZ, parseNumstatZ, looksBinary, inlineImageType, sortTreeEntries,
+  MAX_TEXT_BYTES, type TreeEntry,
 } from "./workspace.ts";
 
 // A throwaway checkout per suite run. `changes`/`fileDiff` shell out to real
@@ -239,5 +239,25 @@ describe("preview", () => {
     const dir = makeRepo();
     assert.equal(await preview(path.join(dir, "nope.txt"), "nope.txt"), null);
     assert.equal(await preview(dir, "."), null);
+  });
+});
+
+describe("sortTreeEntries", () => {
+  const entry = (name: string, dir = false): TreeEntry => ({ name, abs: "/x/" + name, dir });
+
+  test("folders lead, then files, each read alphabetically by a human", async () => {
+    const sorted = sortTreeEntries([
+      entry("README.md"), entry("src", true), entry(".env"), entry("Makefile"),
+      entry(".github", true), entry("api.ts"),
+    ]).map((e) => e.name);
+    // Case-insensitive: an ASCII sort puts every capitalised file above every
+    // lowercase one, which is not how anyone scans a directory.
+    assert.deepEqual(sorted, [".github", "src", ".env", "api.ts", "Makefile", "README.md"]);
+  });
+
+  test("leaves its input alone", async () => {
+    const input = [entry("b"), entry("a")];
+    sortTreeEntries(input);
+    assert.deepEqual(input.map((e) => e.name), ["b", "a"]);
   });
 });

@@ -10,6 +10,7 @@ import { mergePanelFiles, type PanelFile } from "../lib/panelFiles.ts";
 import { fileKind, extensionOf } from "../lib/fileKind.ts";
 import { highlightBlock, highlightLanguageFor } from "../lib/highlight.ts";
 import { downloadFile } from "../lib/download.ts";
+import { FileTree } from "./FileTree.tsx";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
 import { HtmlPreview } from "./HtmlPreview.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -34,11 +35,15 @@ import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDow
 //             any tool call, so for those turns — and for every codex and
 //             opencode conversation, whose transcripts record no paths at all —
 //             this is the ONLY list that shows the work.
+//   Files   — the project itself, browsable. The three lists above are built
+//             from the conversation, so none of them knows about a file nobody
+//             has touched yet. Folded by default: it answers a question you
+//             have sometimes, not the one you opened the panel for.
 //
 // Opening a row shows its diff; a binary, an image, or an unchanged file falls
 // through to the contents view on its own.
 
-type Section = "Progress" | "Outputs" | "Context";
+type Section = "Progress" | "Outputs" | "Context" | "Files";
 
 // Drag the panel's left edge to set its width. A separator rather than a bare
 // div: it is focusable and answers the arrow keys, so the panel is resizable
@@ -197,9 +202,13 @@ export function FilePanel() {
   // Sections, not tabs — all three are on screen at once, and each remembers
   // whether it is folded. Progress leads because it is the answer to "where is
   // the agent up to", which is the question you open this panel mid-turn to ask.
-  const [folded, setFolded] = useState<Partial<Record<Section, boolean>>>({});
+  // Files starts folded: browsing the project is the occasional question, and
+  // an open tree would push the three conversation lists off the screen.
+  const [folded, setFolded] = useState<Partial<Record<Section, boolean>>>({ Files: true });
   const toggle = (name: Section) => setFolded((f) => ({ ...f, [name]: !f[name] }));
   const [changes, setChanges] = useState<ChangesResult | null>(null);
+  // Refresh re-lists the tree too, but nothing else does — see FileTree.
+  const [treeKey, setTreeKey] = useState(0);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // Only the newest request may write state: switching folders or hammering
@@ -285,7 +294,8 @@ export function FilePanel() {
             {target ? target.path : "Files"}
           </span>
           {!target && (
-            <button className="icon-btn" title="Refresh" onClick={loadChanges} disabled={loading}><IconRefresh /></button>
+            <button className="icon-btn" title="Refresh" disabled={loading}
+              onClick={() => { loadChanges(); setTreeKey((k) => k + 1); }}><IconRefresh /></button>
           )}
           <button className="icon-btn" title="Close" onClick={closeFiles}><IconX /></button>
         </div>
@@ -349,6 +359,12 @@ export function FilePanel() {
                 <ContextRow key={f.path} path={f.path} label={f.label} cwd={cwd}
                   onOpen={() => openFilePreview({ abs: f.path, path: relativeTo(f.path, cwd), mode: "file" })} />
               ))}
+            </Section>
+
+            {/* Mounted only while open, so a folded tree costs no requests. */}
+            <Section title="Files" open={!folded.Files} onToggle={() => toggle("Files")}>
+              <FileTree cwd={cwd} reloadKey={treeKey}
+                onOpenFile={(f) => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })} />
             </Section>
           </div>
         )}
