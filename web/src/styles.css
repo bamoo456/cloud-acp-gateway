@@ -483,7 +483,7 @@
     .sessions-btn { display: none; }            /* the panel is always shown, no toggle needed */
     #panel {
       position: static; display: flex !important; flex-direction: column; flex: 0 0 auto;
-      width: 284px; max-width: 284px; height: 100%; inset: auto;
+      width: 284px; max-width: 284px; height: 100%; max-height: none; inset: auto;
       border: none; border-right: 1px solid var(--border); border-radius: 0; box-shadow: none; animation: none;
     }
     /* folder browser slides out from the left as the sidebar's next layer
@@ -1293,7 +1293,7 @@
     #files-scrim { display: none !important; }
     #files {
       position: relative; flex: 0 0 auto; width: min(440px, 34vw); max-width: 440px;
-      height: 100%; inset: auto; margin: 0;
+      height: 100%; max-height: none; inset: auto; margin: 0;
       border: none; border-left: 1px solid var(--border); border-radius: 0;
       box-shadow: none; animation: none;
     }
