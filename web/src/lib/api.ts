@@ -234,6 +234,28 @@ export async function getWorkspaceTree(cwd: string, dir?: string): Promise<TreeR
   };
 }
 
+// ---- folders this conversation wrote into ----
+// The third source behind Outputs, for the files the other two cannot see: a
+// tool call names a path only when the tool takes one (`Bash` reports a command),
+// and `git status` only knows a checkout. `dirs` are candidates the thread
+// implies; the gateway refuses the ones inside the checkout — git's job — and
+// the ones that are somewhere everything on the host lives, like /tmp itself.
+export interface OutputFile { path: string; abs: string; size: number }
+export interface OutputFolder { abs: string; files: OutputFile[]; truncated: boolean }
+
+export async function getWorkspaceOutputs(cwd: string, dirs: string[]): Promise<OutputFolder[]> {
+  if (!dirs.length) return [];
+  const url = base() + "/workspace/outputs?cwd=" + encodeURIComponent(cwd)
+    + dirs.map((d) => "&dir=" + encodeURIComponent(d)).join("");
+  const r = await readJson(await fetch(url), "Couldn't list this conversation's output folders.");
+  if (!Array.isArray(r?.folders)) return [];
+  return r.folders.map((f: OutputFolder) => ({
+    abs: String(f?.abs ?? ""),
+    files: Array.isArray(f?.files) ? f.files : [],
+    truncated: !!f?.truncated,
+  }));
+}
+
 export async function findWorkspaceFiles(cwd: string, query: string): Promise<FindResult> {
   const url = base() + "/workspace/find?cwd=" + encodeURIComponent(cwd) + "&q=" + encodeURIComponent(query);
   const r = await readJson(await fetch(url), "Couldn't search this folder.");
@@ -305,11 +327,18 @@ export async function putLockConfig(configJson: string | null): Promise<void> {
   } catch { /* best-effort */ }
 }
 
-export async function postRecentSession(s: { agentName: string; cwd: string; sessionId: string; title: string; lastActiveAt: string }): Promise<void> {
+// `seedTitle` says the title was derived here (first user message, or "Untitled")
+// rather than chosen by the user, so the gateway may only apply it to a row that
+// doesn't exist yet — see Db.touchRecentSession.
+export async function postRecentSession(
+  s: { agentName: string; cwd: string; sessionId: string; title: string; lastActiveAt: string },
+  seedTitle = false,
+): Promise<void> {
   try {
     const url = base() + "/prefs/recent-session?agent=" + encodeURIComponent(s.agentName) +
       "&cwd=" + encodeURIComponent(s.cwd) + "&session=" + encodeURIComponent(s.sessionId) +
-      "&title=" + encodeURIComponent(s.title) + "&at=" + encodeURIComponent(s.lastActiveAt);
+      "&title=" + encodeURIComponent(s.title) + "&at=" + encodeURIComponent(s.lastActiveAt) +
+      (seedTitle ? "&seed=1" : "");
     await fetch(url, { method: "POST" });
   } catch { /* best-effort */ }
 }

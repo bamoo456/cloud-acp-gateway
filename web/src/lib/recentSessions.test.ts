@@ -101,6 +101,64 @@ describe("recent session storage", () => {
     expect(renameRecentSession("s1", "   ")).toEqual(after);
   });
 
+  test("a derived (seed) title never replaces a recorded one", () => {
+    // The regression this guards: touchSessionActivity runs on every frame of a
+    // running turn and has to DERIVE a title (the transcript's first user message)
+    // whenever the in-memory session carries none — after a deep-link join, an
+    // agent restart, or on a second device. Letting that derived title through
+    // reverts a renamed conversation to its old name mid-turn.
+    touchRecentSession({
+      agentName: "claude", cwd: "/repo", sessionId: "s1",
+      title: "My renamed chat", lastActiveAt: "2026-06-10T01:00:00.000Z",
+    });
+
+    const after = touchRecentSession({
+      agentName: "claude", cwd: "/repo", sessionId: "s1",
+      title: "fix the flaky test please", lastActiveAt: "2026-06-10T02:00:00.000Z",
+    }, true);
+
+    expect(after[0].title).toBe("My renamed chat");
+    expect(after[0].lastActiveAt).toBe("2026-06-10T02:00:00.000Z"); // recency still moves
+  });
+
+  test("a seed title carries across the other spellings of a conversation's folder", () => {
+    // The recorded title belongs to the conversation, not to one (agent, cwd) row —
+    // so a first touch under a second spelling of the folder must adopt the name
+    // already on record instead of seeding a duplicate row with the derived one.
+    touchRecentSession({
+      agentName: "claude", cwd: "/tmp/repo", sessionId: "s1",
+      title: "My renamed chat", lastActiveAt: "2026-06-10T01:00:00.000Z",
+    });
+
+    const after = touchRecentSession({
+      agentName: "claude-infra", cwd: "/private/tmp/repo", sessionId: "s1",
+      title: "fix the flaky test please", lastActiveAt: "2026-06-10T02:00:00.000Z",
+    }, true);
+
+    expect(after.map((it) => it.title)).toEqual(["My renamed chat", "My renamed chat"]);
+  });
+
+  test("a seed title still names a conversation with nothing on record", () => {
+    // Only the OVERWRITE is blocked. A brand-new conversation has no recorded name,
+    // so the derived first message is exactly what should label it — and the
+    // "Untitled" placeholder must not count as a name that blocks a later one.
+    const seeded = touchRecentSession({
+      agentName: "claude", cwd: "/repo", sessionId: "s1",
+      title: "fix the flaky test please", lastActiveAt: "2026-06-10T01:00:00.000Z",
+    }, true);
+    expect(seeded[0].title).toBe("fix the flaky test please");
+
+    touchRecentSession({
+      agentName: "claude", cwd: "/repo", sessionId: "s2",
+      title: "", lastActiveAt: "2026-06-10T02:00:00.000Z",
+    }, true);
+    const after = touchRecentSession({
+      agentName: "claude", cwd: "/repo", sessionId: "s2",
+      title: "and now it has a first message", lastActiveAt: "2026-06-10T03:00:00.000Z",
+    }, true);
+    expect(after.find((it) => it.sessionId === "s2")!.title).toBe("and now it has a first message");
+  });
+
   test("hydrating ignores corrupt payloads", () => {
     expect(hydrateRecentSessions("{bad json" as unknown)).toEqual([]);
     expect(hydrateRecentSessions([{ agentName: "claude" }, null] as unknown)).toEqual([]);

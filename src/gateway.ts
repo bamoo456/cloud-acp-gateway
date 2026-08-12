@@ -44,7 +44,7 @@ import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleUpload } from "./uploads.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
-  tree as workspaceTree, find as workspaceFind,
+  tree as workspaceTree, find as workspaceFind, outputFolder as workspaceOutputFolder,
   inlineImageType, repoRoot, MAX_RAW_BYTES,
 } from "./workspace.ts";
 import { buildClientConfig } from "./client-config.ts";
@@ -653,6 +653,58 @@ async function allowedPreviewPath(abs: string, cwd: string): Promise<string | nu
   if (direct) return direct;
   const repo = await repoRoot(cwd);
   return repo ? resolveWithinRootBase(abs, repo) : null;
+}
+
+// Folders whose *strict descendants* may be listed whole as output folders. Not
+// access grants — allowedPreviewPath still decides what is readable — but the
+// answer to "is this folder plausibly this turn's output, or is it somewhere
+// everything on the host lives?".
+//
+// $HOME and the temp dir are here rather than in PREVIEW_ROOTS because the two
+// lists answer different questions, and a deployment that widens one must not
+// silently widen the other: ACPG_PREVIEW_ROOTS says which files a client may
+// read, this says which folders are worth listing. That is also why the temp dir
+// is included unconditionally — a gateway running with the path filter off has
+// no PREVIEW_ROOTS at all, and without this the feature would quietly do nothing
+// on exactly the hosts that opted into reading everything.
+const OUTPUT_FOLDER_BOUNDARIES = [os.homedir(), os.tmpdir(), "/tmp"];
+// One panel's worth of folders. The client sends candidates derived from the
+// thread's own tool calls; a turn that scattered writes across more directories
+// than this is not a turn whose output a list can summarise anyway.
+const MAX_OUTPUT_FOLDERS = 8;
+
+// Whether `dir` may be listed whole as a folder this conversation wrote into.
+// Three gates, and it must pass all of them:
+//
+//   access    — allowedPreviewPath, exactly as every other /workspace route. A
+//               folder whose files the viewer would refuse to open must not be
+//               listed either.
+//   git       — anything inside the conversation's checkout is refused. There
+//               git status is the authority and already reports it; a second
+//               source over the top would duplicate every dirty file and drag
+//               in build output git deliberately ignores.
+//   relevance — it must be a boundary's STRICT descendant, and never a boundary
+//               itself. One `Write /tmp/report.html` makes /tmp a folder this
+//               conversation "wrote into", and listing that is the host's
+//               scratch space rather than this turn's work. Both halves are
+//               needed: a preview root under the temp dir would otherwise
+//               qualify as a descendant of the temp dir and be listed whole,
+//               which is the same mistake one level up. Requiring a strict
+//               descendant of *something* also refuses `/Users` for free.
+async function allowedOutputFolder(dir: string, cwd: string): Promise<string | null> {
+  const abs = await allowedPreviewPath(dir, cwd);
+  if (!abs) return null;
+  const repo = await repoRoot(cwd);
+  if (repo && resolveWithinRootBase(abs, repo)) return null;
+  // Resolved through the same function that resolved `abs`, so the comparisons
+  // below are between realpath'd values without a second copy of that logic.
+  // The filesystem root is dropped: every path is strictly inside it, so
+  // ACPG_FS_ROOT=/ would otherwise make every folder on the host an output one.
+  const boundaries = [cwd, FS_ROOT, ...PREVIEW_ROOTS, ...OUTPUT_FOLDER_BOUNDARIES]
+    .map((b) => resolveWithinRootBase(b, b))
+    .filter((b): b is string => !!b && b !== path.parse(b).root);
+  if (boundaries.includes(abs)) return null;
+  return boundaries.some((b) => abs.startsWith(b + path.sep)) ? abs : null;
 }
 
 // Resolve a /workspace/* request's target file. `cwd` supplies the git and
@@ -2620,6 +2672,19 @@ class Channel {
     return out;
   }
 
+  // Relabel a running task after a rename. `sessionTitle` is captured once, from
+  // the conversation's first prompt, and never revisited — so /running keeps
+  // announcing the old name to every device that has no other record of the
+  // conversation. Scoped to sessions this channel already tracks: a rename must
+  // not park labels in the maps of agents that have never seen the session. An
+  // empty title (a cleared rename with nothing derivable behind it) drops the
+  // label rather than keeping a stale one; the next prompt re-seeds it.
+  renameSession(sid: string, title: string): void {
+    if (!this.sessionCwd.has(sid) && !this.sessionTitle.has(sid) && !this.tasks.has(sid)) return;
+    if (title) this.sessionTitle.set(sid, title.length > 100 ? title.slice(0, 100) : title);
+    else this.sessionTitle.delete(sid);
+  }
+
   // Mark a session live and most-recently-active: refresh its idle window and, if
   // it's newly tracked, enforce the per-agent LRU cap first. No-op for agents we
   // don't reap. Called on every frame (either direction) that carries a session id.
@@ -3489,6 +3554,13 @@ export class Gateway {
     return this.observedSessionLoad.get(name);
   }
 
+  // Push a rename into every channel's running-task label. Fanned out across all
+  // of them rather than aimed at one: two agents can share a provider (and so a
+  // conversation), and each channel ignores an id it doesn't track.
+  renameSession(sessionId: string, title: string): void {
+    for (const ch of this.channels.values()) ch.renameSession(sessionId, title);
+  }
+
   // Sessions with a prompt still running, across every agent. The web UI polls
   // this so a device can see (and jump to) tasks running anywhere — including
   // ones started on another device, which its own SSE connection never observed.
@@ -4061,6 +4133,8 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   //   /workspace/changes  git status + line counts for the folder's checkout
   //   /workspace/diff     one file's unified diff (untracked files included)
   //   /workspace/file     one file's content as text / image metadata / binary
+  //   /workspace/outputs  whole folders the conversation wrote into, for the
+  //                       shell-written files neither git nor a tool call knows
   //   /workspace/raw      one file's bytes (the <img> source, and downloads)
   // What each may read is allowedPreviewPath's decision: the conversation's cwd,
   // its repo, and ACPG_PREVIEW_ROOTS — or anything at all, when a deployment
@@ -4130,6 +4204,29 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
         });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Folders this conversation wrote into that `git status` cannot describe — a
+  // scratch directory under /tmp, or the conversation's own folder when it isn't
+  // a checkout at all. `dir` repeats, once per candidate: the client derives them
+  // from the thread's own tool calls (it is the only side that knows what the
+  // conversation did), and allowedOutputFolder decides which of them get listed.
+  // A refused candidate is simply absent from the response — it was refused for
+  // being noise or for being git's job, and neither is news.
+  if (consoleEnabled && pathname === "/workspace/outputs") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
+    const wanted = q.getAll("dir").filter(Boolean).slice(0, MAX_OUTPUT_FOLDERS);
+    Promise.all(wanted.map(async (dir) => {
+      const abs = await allowedOutputFolder(path.isAbsolute(dir) ? dir : path.resolve(cwd, dir), cwd);
+      return abs ? workspaceOutputFolder(abs) : null;
+    }))
+      .then((folders) => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ folders: folders.filter(Boolean) }));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
@@ -4243,8 +4340,12 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       const sessionId = q.get("session") ?? "";
       const title = q.get("title") ?? "";
       const lastActiveAt = q.get("at") ?? new Date().toISOString();
+      // seed=1: the client DERIVED this title (no custom name in hand) and it may
+      // only name a row that doesn't exist yet — see Db.touchRecentSession. Absent
+      // on a rename, which is the one write that's allowed to replace a title.
+      const seedTitle = q.get("seed") === "1";
       if (!agentName || !cwd || !sessionId) { res.writeHead(400); res.end(); return; }
-      const recentSessions = db().touchRecentSession({ agentName, cwd, sessionId, title, lastActiveAt });
+      const recentSessions = db().touchRecentSession({ agentName, cwd, sessionId, title, lastActiveAt }, seedTitle);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ recentSessions }));
     } catch (e) {
@@ -4380,6 +4481,11 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         const effective = title || (await listAgentHistory(prof?.cmd ?? "", cwd, RENAME_DERIVE_LIMIT))
           .find((s) => s.sessionId === session)?.title;
         if (effective) db().renameRecentSession(session, effective);
+        // The running-task label is a third copy of the title, held in memory per
+        // channel, and /running is what the sidebar's Running section renders from
+        // while a conversation is working — leaving it stale is why a renamed
+        // conversation reverts to its old name for the length of a turn.
+        gateway.renameSession(session, effective ?? "");
         res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true }));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
@@ -4572,6 +4678,7 @@ export async function makeTestServer(): Promise<{
   port: number;
   agent: () => FakeAgentHandle;
   running: (now?: number) => Array<{ agentName: string; sessionId: string; state: TaskState; cwd?: string; title?: string }>;
+  renameSession: (sessionId: string, title: string) => void;
   sessionLoad: (name: string) => boolean | undefined;
   inbox: (opts?: { status?: InboxStatus; agentName?: string; limit?: number }) => InboxItem[];
   answerInbox: (agentName: string, reqId: string, optionId: string) => boolean;
@@ -4629,6 +4736,7 @@ export async function makeTestServer(): Promise<{
     port,
     agent: () => fake,
     running: (now?: number) => b.running(now),
+    renameSession: (sessionId: string, title: string) => b.renameSession(sessionId, title),
     sessionLoad: (name: string) => b.sessionLoad(name),
     inbox: (opts) => b.inbox(opts),
     answerInbox: (agentName, reqId, optionId) => b.answerInboxPermission(agentName, reqId, optionId),

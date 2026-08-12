@@ -98,6 +98,29 @@ test("with the filter off, a missing file is still 'not found', not 'outside the
 
 // The toggle governs which FILES are readable, not which folders a client may
 // claim to be working in — ACPG_FS_ROOT is a separate axis and stays on.
+test("with the filter off, an output folder is still listed — the temp dir is its own boundary", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    // ACPG_PREVIEW_ROOTS is empty here, which is the normal state once the filter
+    // is off. If the relevance rule depended on it, the whole feature would
+    // quietly do nothing on exactly the hosts that opted into reading anything —
+    // so the temp dir is a boundary unconditionally, and its children qualify.
+    const r = await get(q("/workspace/outputs", { cwd: REPO, dir: OUTSIDE }));
+    assert.equal(r.status, 200);
+    const body = await r.json() as { folders: Array<{ abs: string; files: Array<{ path: string }> }> };
+    assert.equal(body.folders.length, 1);
+    assert.equal(body.folders[0].abs, OUTSIDE);
+    assert.deepEqual(body.folders[0].files.map((f) => f.path).sort(), ["note.txt", "shot.png"]);
+    // The relevance rule is not the access rule, so turning the access rule off
+    // must not turn this one off with it: the temp dir itself is never a folder
+    // this conversation "produced".
+    const root = await get(q("/workspace/outputs", { cwd: REPO, dir: os.tmpdir() }));
+    assert.deepEqual((await root.json() as { folders: unknown[] }).folders, []);
+  } finally {
+    await close();
+  }
+});
+
 test("with the filter off, cwd is still bounded by ACPG_FS_ROOT", async () => {
   const { get, close } = await startHttpServer();
   try {

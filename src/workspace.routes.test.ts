@@ -19,6 +19,16 @@ fs.writeFileSync(path.join(SCRATCH, "note.txt"), "written outside the project on
 fs.writeFileSync(path.join(SCRATCH, "shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d]));
 fs.mkdirSync(SCRATCH + "-other", { recursive: true });
 fs.writeFileSync(path.join(SCRATCH + "-other", "note.txt"), "a sibling of an allowed root\n");
+// The scenario /workspace/outputs exists for: an agent makes itself a scratch
+// folder outside the project, writes ONE file there with a tool call, and
+// generates the rest through a shell. `mockup.html` is the only path any tool
+// call names; nothing else here can be reached by the panel's other two sources,
+// because git has never heard of this folder.
+const ICONS = path.join(SCRATCH, "icons");
+fs.mkdirSync(path.join(ICONS, "png"), { recursive: true });
+fs.writeFileSync(path.join(ICONS, "mockup.html"), '<html><body><img src="png/shot.png"></body></html>');
+fs.writeFileSync(path.join(ICONS, "generated.html"), "<html>written by a heredoc</html>");
+fs.writeFileSync(path.join(ICONS, "png", "shot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d]));
 const REPO = path.join(ROOT, "project");
 fs.mkdirSync(REPO);
 const run = (...args: string[]) => execFileSync("git", args, { cwd: REPO, stdio: "pipe" });
@@ -333,6 +343,56 @@ test("a conversation running in a subdirectory can still open the rest of its re
   }
 });
 
+test("/workspace/outputs lists a scratch folder whole, including what no tool call named", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const r = await get(q("/workspace/outputs", { cwd: REPO, dir: ICONS }));
+    assert.equal(r.status, 200);
+    const body = await r.json() as { folders: Array<{ abs: string; files: Array<{ path: string }>; truncated: boolean }> };
+    assert.equal(body.folders.length, 1);
+    assert.equal(body.folders[0].abs, ICONS);
+    // `generated.html` is the whole point: a shell wrote it, so no tool call
+    // names it, and it is outside every checkout, so git cannot see it either.
+    // `png/shot.png` proves the walk goes one level down.
+    assert.deepEqual(body.folders[0].files.map((f) => f.path).sort(),
+      ["generated.html", "mockup.html", "png/shot.png"]);
+    assert.equal(body.folders[0].truncated, false);
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/outputs refuses an allowed root itself, and anything inside the checkout", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    // The root itself would be the host's scratch space, not this turn's work:
+    // one `Write /tmp/report.html` must not turn Outputs into a listing of /tmp.
+    const root = await get(q("/workspace/outputs", { cwd: REPO, dir: SCRATCH }));
+    assert.deepEqual((await root.json() as { folders: unknown[] }).folders, []);
+    // Inside the checkout git is the authority and already reports it; a second
+    // source over the top would duplicate every dirty file and drag in build
+    // output git deliberately ignores.
+    const inRepo = await get(q("/workspace/outputs", { cwd: REPO, dir: REPO }));
+    assert.deepEqual((await inRepo.json() as { folders: unknown[] }).folders, []);
+    const sub = await get(q("/workspace/outputs", { cwd: TREE, dir: path.join(TREE, "src") }));
+    assert.deepEqual((await sub.json() as { folders: unknown[] }).folders, []);
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/outputs refuses a folder the viewer itself couldn't read", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    // Same gate as every other route: a folder whose files /workspace/file would
+    // refuse must not be listed either, or the panel shows rows that don't open.
+    const r = await get(q("/workspace/outputs", { cwd: REPO, dir: SCRATCH + "-other" }));
+    assert.deepEqual((await r.json() as { folders: unknown[] }).folders, []);
+  } finally {
+    await close();
+  }
+});
+
 test("a request missing cwd or path is a 400, not a read of the process's own directory", async () => {
   const { get, close } = await startHttpServer();
   try {
@@ -342,6 +402,7 @@ test("a request missing cwd or path is a 400, not a read of the process's own di
     }
     assert.equal((await get(q("/workspace/raw", { cwd: REPO, path: "" }))).status, 400);
     assert.equal((await get(q("/workspace/changes", { cwd: "" }))).status, 400);
+    assert.equal((await get(q("/workspace/outputs", { cwd: "", dir: ICONS }))).status, 400);
   } finally {
     await close();
   }
@@ -350,7 +411,8 @@ test("a request missing cwd or path is a 400, not a read of the process's own di
 test("every workspace route sits behind the gateway account", async () => {
   const { get, close } = await startHttpServer();
   try {
-    for (const route of ["/workspace/changes", "/workspace/file", "/workspace/diff", "/workspace/raw"]) {
+    for (const route of ["/workspace/changes", "/workspace/file", "/workspace/diff", "/workspace/raw",
+                         "/workspace/outputs"]) {
       const r = await get(q(route, { cwd: REPO, path: "kept.txt" }), {});
       assert.equal(r.status, 401, route);
     }
