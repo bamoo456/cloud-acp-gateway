@@ -44,7 +44,7 @@ import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleUpload } from "./uploads.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
-  tree as workspaceTree, find as workspaceFind,
+  tree as workspaceTree, find as workspaceFind, outputFolder as workspaceOutputFolder,
   inlineImageType, repoRoot, MAX_RAW_BYTES,
 } from "./workspace.ts";
 import { buildClientConfig } from "./client-config.ts";
@@ -653,6 +653,58 @@ async function allowedPreviewPath(abs: string, cwd: string): Promise<string | nu
   if (direct) return direct;
   const repo = await repoRoot(cwd);
   return repo ? resolveWithinRootBase(abs, repo) : null;
+}
+
+// Folders whose *strict descendants* may be listed whole as output folders. Not
+// access grants — allowedPreviewPath still decides what is readable — but the
+// answer to "is this folder plausibly this turn's output, or is it somewhere
+// everything on the host lives?".
+//
+// $HOME and the temp dir are here rather than in PREVIEW_ROOTS because the two
+// lists answer different questions, and a deployment that widens one must not
+// silently widen the other: ACPG_PREVIEW_ROOTS says which files a client may
+// read, this says which folders are worth listing. That is also why the temp dir
+// is included unconditionally — a gateway running with the path filter off has
+// no PREVIEW_ROOTS at all, and without this the feature would quietly do nothing
+// on exactly the hosts that opted into reading everything.
+const OUTPUT_FOLDER_BOUNDARIES = [os.homedir(), os.tmpdir(), "/tmp"];
+// One panel's worth of folders. The client sends candidates derived from the
+// thread's own tool calls; a turn that scattered writes across more directories
+// than this is not a turn whose output a list can summarise anyway.
+const MAX_OUTPUT_FOLDERS = 8;
+
+// Whether `dir` may be listed whole as a folder this conversation wrote into.
+// Three gates, and it must pass all of them:
+//
+//   access    — allowedPreviewPath, exactly as every other /workspace route. A
+//               folder whose files the viewer would refuse to open must not be
+//               listed either.
+//   git       — anything inside the conversation's checkout is refused. There
+//               git status is the authority and already reports it; a second
+//               source over the top would duplicate every dirty file and drag
+//               in build output git deliberately ignores.
+//   relevance — it must be a boundary's STRICT descendant, and never a boundary
+//               itself. One `Write /tmp/report.html` makes /tmp a folder this
+//               conversation "wrote into", and listing that is the host's
+//               scratch space rather than this turn's work. Both halves are
+//               needed: a preview root under the temp dir would otherwise
+//               qualify as a descendant of the temp dir and be listed whole,
+//               which is the same mistake one level up. Requiring a strict
+//               descendant of *something* also refuses `/Users` for free.
+async function allowedOutputFolder(dir: string, cwd: string): Promise<string | null> {
+  const abs = await allowedPreviewPath(dir, cwd);
+  if (!abs) return null;
+  const repo = await repoRoot(cwd);
+  if (repo && resolveWithinRootBase(abs, repo)) return null;
+  // Resolved through the same function that resolved `abs`, so the comparisons
+  // below are between realpath'd values without a second copy of that logic.
+  // The filesystem root is dropped: every path is strictly inside it, so
+  // ACPG_FS_ROOT=/ would otherwise make every folder on the host an output one.
+  const boundaries = [cwd, FS_ROOT, ...PREVIEW_ROOTS, ...OUTPUT_FOLDER_BOUNDARIES]
+    .map((b) => resolveWithinRootBase(b, b))
+    .filter((b): b is string => !!b && b !== path.parse(b).root);
+  if (boundaries.includes(abs)) return null;
+  return boundaries.some((b) => abs.startsWith(b + path.sep)) ? abs : null;
 }
 
 // Resolve a /workspace/* request's target file. `cwd` supplies the git and
@@ -4081,6 +4133,8 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   //   /workspace/changes  git status + line counts for the folder's checkout
   //   /workspace/diff     one file's unified diff (untracked files included)
   //   /workspace/file     one file's content as text / image metadata / binary
+  //   /workspace/outputs  whole folders the conversation wrote into, for the
+  //                       shell-written files neither git nor a tool call knows
   //   /workspace/raw      one file's bytes (the <img> source, and downloads)
   // What each may read is allowedPreviewPath's decision: the conversation's cwd,
   // its repo, and ACPG_PREVIEW_ROOTS — or anything at all, when a deployment
@@ -4150,6 +4204,29 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
         });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Folders this conversation wrote into that `git status` cannot describe — a
+  // scratch directory under /tmp, or the conversation's own folder when it isn't
+  // a checkout at all. `dir` repeats, once per candidate: the client derives them
+  // from the thread's own tool calls (it is the only side that knows what the
+  // conversation did), and allowedOutputFolder decides which of them get listed.
+  // A refused candidate is simply absent from the response — it was refused for
+  // being noise or for being git's job, and neither is news.
+  if (consoleEnabled && pathname === "/workspace/outputs") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
+    const wanted = q.getAll("dir").filter(Boolean).slice(0, MAX_OUTPUT_FOLDERS);
+    Promise.all(wanted.map(async (dir) => {
+      const abs = await allowedOutputFolder(path.isAbsolute(dir) ? dir : path.resolve(cwd, dir), cwd);
+      return abs ? workspaceOutputFolder(abs) : null;
+    }))
+      .then((folders) => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ folders: folders.filter(Boolean) }));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;

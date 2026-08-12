@@ -50,6 +50,78 @@ describe("applyUpdate", () => {
     expect(tools[0].content[0]).toMatchObject({ type: "diff", path: "a.ts" });
   });
 
+  // The ACP adapter maps Write and Edit by hand and lets the rest fall through to
+  // kind "other" with no locations, so a live NotebookEdit produced no Outputs
+  // row while the same conversation grew one after a resume (the gateway's
+  // transcript path does map it). Both facts are on the wire — see lib/toolInput.
+  test("a tool the adapter didn't map recovers its kind and path from rawInput", () => {
+    let s = makeSession("S");
+    s = run(s, up({
+      sessionUpdate: "tool_call", toolCallId: "t1", title: "NotebookEdit",
+      kind: "other", status: "pending", locations: [],
+      rawInput: { notebook_path: "/repo/analysis.ipynb", new_source: "print(1)" },
+      _meta: { claudeCode: { toolName: "NotebookEdit" } },
+    }));
+    const tool = s.items.find((i) => i.kind === "tool") as any;
+    expect(tool.toolKind).toBe("edit");
+    expect(tool.locations).toEqual(["/repo/analysis.ipynb"]);
+  });
+
+  test("recovery also lands on the update half of a tool call", () => {
+    // The adapter re-sends the same tool as a tool_call_update once the full
+    // assistant message arrives; that frame carries rawInput too.
+    let s = makeSession("S");
+    s = run(s,
+      up({ sessionUpdate: "tool_call", toolCallId: "t1", title: "MultiEdit", kind: "other", status: "pending" }),
+      up({
+        sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed", kind: "other",
+        rawInput: { file_path: "/repo/src/a.ts" },
+        _meta: { claudeCode: { toolName: "MultiEdit" } },
+      }),
+    );
+    const tool = s.items.find((i) => i.kind === "tool") as any;
+    expect(tool.toolKind).toBe("edit");
+    expect(tool.locations).toEqual(["/repo/src/a.ts"]);
+  });
+
+  test("what the adapter DID say is never overwritten by the recovery", () => {
+    let s = makeSession("S");
+    s = run(s, up({
+      sessionUpdate: "tool_call", toolCallId: "t1", title: "Read a.ts", kind: "read", status: "pending",
+      locations: [{ path: "/repo/src/a.ts" }],
+      rawInput: { file_path: "/repo/src/OTHER.ts" },
+      _meta: { claudeCode: { toolName: "Read" } },
+    }));
+    const tool = s.items.find((i) => i.kind === "tool") as any;
+    expect(tool.toolKind).toBe("read");
+    expect(tool.locations).toEqual(["/repo/src/a.ts"]);
+  });
+
+  test("an unrecognised tool keeps 'other' — a path argument is not proof it wrote there", () => {
+    let s = makeSession("S");
+    s = run(s, up({
+      sessionUpdate: "tool_call", toolCallId: "t1", title: "mcp__notes__read", kind: "other", status: "pending",
+      rawInput: { file_path: "/repo/notes.md" },
+      _meta: { claudeCode: { toolName: "mcp__notes__read" } },
+    }));
+    const tool = s.items.find((i) => i.kind === "tool") as any;
+    expect(tool.toolKind).toBe("other");
+    expect(tool.locations).toEqual([]);
+  });
+
+  test("a directory-valued `path` is not recovered as a file location", () => {
+    // Grep's `path` is a folder. A row for it would open a file viewer on a
+    // directory, which 404s — worse than the row not being there.
+    let s = makeSession("S");
+    s = run(s, up({
+      sessionUpdate: "tool_call", toolCallId: "t1", title: "grep", kind: "search", status: "pending",
+      rawInput: { pattern: "TODO", path: "/repo/src" },
+      _meta: { claudeCode: { toolName: "Grep" } },
+    }));
+    const tool = s.items.find((i) => i.kind === "tool") as any;
+    expect(tool.locations).toEqual([]);
+  });
+
   test("tool_call_update keeps prior status when update omits it", () => {
     let s = makeSession("S");
     s = run(s,
