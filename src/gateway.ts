@@ -2620,6 +2620,19 @@ class Channel {
     return out;
   }
 
+  // Relabel a running task after a rename. `sessionTitle` is captured once, from
+  // the conversation's first prompt, and never revisited — so /running keeps
+  // announcing the old name to every device that has no other record of the
+  // conversation. Scoped to sessions this channel already tracks: a rename must
+  // not park labels in the maps of agents that have never seen the session. An
+  // empty title (a cleared rename with nothing derivable behind it) drops the
+  // label rather than keeping a stale one; the next prompt re-seeds it.
+  renameSession(sid: string, title: string): void {
+    if (!this.sessionCwd.has(sid) && !this.sessionTitle.has(sid) && !this.tasks.has(sid)) return;
+    if (title) this.sessionTitle.set(sid, title.length > 100 ? title.slice(0, 100) : title);
+    else this.sessionTitle.delete(sid);
+  }
+
   // Mark a session live and most-recently-active: refresh its idle window and, if
   // it's newly tracked, enforce the per-agent LRU cap first. No-op for agents we
   // don't reap. Called on every frame (either direction) that carries a session id.
@@ -3489,6 +3502,13 @@ export class Gateway {
     return this.observedSessionLoad.get(name);
   }
 
+  // Push a rename into every channel's running-task label. Fanned out across all
+  // of them rather than aimed at one: two agents can share a provider (and so a
+  // conversation), and each channel ignores an id it doesn't track.
+  renameSession(sessionId: string, title: string): void {
+    for (const ch of this.channels.values()) ch.renameSession(sessionId, title);
+  }
+
   // Sessions with a prompt still running, across every agent. The web UI polls
   // this so a device can see (and jump to) tasks running anywhere — including
   // ones started on another device, which its own SSE connection never observed.
@@ -4243,8 +4263,12 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       const sessionId = q.get("session") ?? "";
       const title = q.get("title") ?? "";
       const lastActiveAt = q.get("at") ?? new Date().toISOString();
+      // seed=1: the client DERIVED this title (no custom name in hand) and it may
+      // only name a row that doesn't exist yet — see Db.touchRecentSession. Absent
+      // on a rename, which is the one write that's allowed to replace a title.
+      const seedTitle = q.get("seed") === "1";
       if (!agentName || !cwd || !sessionId) { res.writeHead(400); res.end(); return; }
-      const recentSessions = db().touchRecentSession({ agentName, cwd, sessionId, title, lastActiveAt });
+      const recentSessions = db().touchRecentSession({ agentName, cwd, sessionId, title, lastActiveAt }, seedTitle);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ recentSessions }));
     } catch (e) {
@@ -4380,6 +4404,11 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         const effective = title || (await listAgentHistory(prof?.cmd ?? "", cwd, RENAME_DERIVE_LIMIT))
           .find((s) => s.sessionId === session)?.title;
         if (effective) db().renameRecentSession(session, effective);
+        // The running-task label is a third copy of the title, held in memory per
+        // channel, and /running is what the sidebar's Running section renders from
+        // while a conversation is working — leaving it stale is why a renamed
+        // conversation reverts to its old name for the length of a turn.
+        gateway.renameSession(session, effective ?? "");
         res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ ok: true }));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
@@ -4572,6 +4601,7 @@ export async function makeTestServer(): Promise<{
   port: number;
   agent: () => FakeAgentHandle;
   running: (now?: number) => Array<{ agentName: string; sessionId: string; state: TaskState; cwd?: string; title?: string }>;
+  renameSession: (sessionId: string, title: string) => void;
   sessionLoad: (name: string) => boolean | undefined;
   inbox: (opts?: { status?: InboxStatus; agentName?: string; limit?: number }) => InboxItem[];
   answerInbox: (agentName: string, reqId: string, optionId: string) => boolean;
@@ -4629,6 +4659,7 @@ export async function makeTestServer(): Promise<{
     port,
     agent: () => fake,
     running: (now?: number) => b.running(now),
+    renameSession: (sessionId: string, title: string) => b.renameSession(sessionId, title),
     sessionLoad: (name: string) => b.sessionLoad(name),
     inbox: (opts) => b.inbox(opts),
     answerInbox: (agentName, reqId, optionId) => b.answerInboxPermission(agentName, reqId, optionId),

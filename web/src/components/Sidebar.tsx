@@ -188,6 +188,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       const merged = lists.flat().filter((it): it is TaggedHistory => it !== null)
         .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
       setItems(merged);
+      s.mergeHistoryTitles(merged);
     });
   }
   function loadDiscovered(reset: boolean) {
@@ -203,6 +204,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       const merged = lists.flat().filter((it): it is TaggedDiscoveredHistory => it !== null)
         .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
       setDiscovered(merged);
+      s.mergeHistoryTitles(merged);
     });
   }
   useEffect(() => { loadHistory(true); loadDiscovered(true); }, [open, s.cwd, histAgentsKey, discoverAgentsKey]);
@@ -378,12 +380,16 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     // Present in a freshly-fetched list → defer to the gateway title (matching
     // renderItem's fallback exactly, including null); otherwise the cached snapshot.
     const histKey = it.agentName + "\n" + it.sessionId;
-    const title = (historyTitleById.has(histKey) ? historyTitleById.get(histKey) : it.title)
-      || it.sessionId.slice(0, 8);
+    const named = (historyTitleById.has(histKey) ? historyTitleById.get(histKey) : it.title) || "";
+    const title = named || it.sessionId.slice(0, 8);
     return (
       <SessionRow key={"recent:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
         className={"sess-item recent with-folder" + (active ? " active" : "")}
-        onOpen={() => { void s.openRecentSession(it); onClose(); }}
+        // Opened with the name on screen, not the snapshot behind it: the opened
+        // session carries that title in memory and offers it back on every activity
+        // touch, so handing it the stale one is how the stale one gets re-recorded.
+        // `named`, not `title` — the short-id display fallback is not a name.
+        onOpen={() => { void s.openRecentSession(named ? { ...it, title: named } : it); onClose(); }}
         del={{ sessionId: it.sessionId, agentName: it.agentName, title }}
         running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}

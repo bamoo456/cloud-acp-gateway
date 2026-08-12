@@ -1001,6 +1001,33 @@ describe("store notification routing", () => {
     await sending;
   });
 
+  test("a turn on a session with no in-memory title must not undo a rename", async () => {
+    // The regression this guards, and the reason it keeps coming back: activity is
+    // recorded on every frame of a running turn, and a session whose in-memory copy
+    // carries no title — the deep-link join, the agent-restart rebuild, any second
+    // device — has to derive one from its first user message. Applying that derived
+    // title reverts a renamed conversation to its old name mid-turn, and the POST
+    // spreads it to every device. A derived title may SEED a name, never replace one.
+    setPrefs({ recentSessions: [{
+      agentName: "claude", cwd: "/new", sessionId: "new-session",
+      title: "My renamed chat", lastActiveAt: "2026-06-10T01:00:00.000Z",
+    }] });
+    const { useStore, ws } = await bootstrapThenSwitchFolder();
+    expect(useStore.getState().sessions["new-session"].title).toBe("Untitled");
+
+    const sending = useStore.getState().sendPrompt("fix the flaky test please");
+    await flush();
+
+    expect(useStore.getState().recentSessions[0]).toMatchObject({
+      sessionId: "new-session",
+      title: "My renamed chat",
+    });
+
+    const promptReq = JSON.parse(ws.sent[3]);
+    ws.recv({ jsonrpc: "2.0", id: promptReq.id, result: { stopReason: "end_turn" } });
+    await sending;
+  });
+
   test("replying to a saved view-only session resumes using that session's cwd", async () => {
     const { useStore, ws } = await bootstrapClaude();
     const { makeSession, addUserBubble } = await import("./reducers.ts");
