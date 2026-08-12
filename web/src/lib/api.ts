@@ -234,6 +234,33 @@ export async function getWorkspaceTree(cwd: string, dir?: string): Promise<TreeR
   };
 }
 
+// ---- an .html output, with its assets ----
+// A sandboxed iframe has an opaque origin and can load nothing from disk, so the
+// gateway inlines the document's own images, fonts and stylesheets as data: URIs
+// before it is rendered — the CSP the sandbox already carries allows exactly
+// those. `skipped` is what it could not inline (a remote URL, an external
+// <script src>, a file outside what the preview may read); the panel says so
+// rather than letting a partly-inlined page read as a broken document.
+export interface HtmlRender {
+  html: string;
+  inlined: number;
+  skipped: number;
+  truncated: boolean;      // an asset budget stopped the work
+  htmlTruncated: boolean;  // the document itself was too big to read whole
+}
+
+export async function getHtmlRender(cwd: string, filePath: string): Promise<HtmlRender> {
+  const url = base() + "/workspace/render?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+  const r = await readJson(await fetch(url), "Couldn't render this file.");
+  return {
+    html: typeof r?.html === "string" ? r.html : "",
+    inlined: typeof r?.inlined === "number" ? r.inlined : 0,
+    skipped: typeof r?.skipped === "number" ? r.skipped : 0,
+    truncated: !!r?.truncated,
+    htmlTruncated: !!r?.htmlTruncated,
+  };
+}
+
 // ---- folders this conversation wrote into ----
 // The third source behind Outputs, for the files the other two cannot see: a
 // tool call names a path only when the tool takes one (`Bash` reports a command),

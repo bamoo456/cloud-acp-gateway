@@ -17,7 +17,18 @@
 export async function downloadFile(url: string, filename: string): Promise<void> {
   const r = await fetch(url);
   if (!r.ok) throw new Error("Couldn't download this file.");
-  const blob = await r.blob();
+  saveBlob(await r.blob(), filename);
+}
+
+// Save text the client already holds. The HTML preview's "self-contained" save
+// is this: the bytes came back as JSON with every asset inlined, so there is no
+// URL to fetch — and going back to /workspace/raw for it would hand over exactly
+// the copy whose relative image paths don't resolve anywhere else.
+export function downloadText(text: string, type: string, filename: string): void {
+  saveBlob(new Blob([text], { type }), filename);
+}
+
+function saveBlob(blob: Blob, filename: string): void {
   const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = objectUrl;
