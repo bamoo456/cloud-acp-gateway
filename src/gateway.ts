@@ -553,6 +553,15 @@ const PREVIEW_ROOTS: string[] = (process.env.ACPG_PREVIEW_ROOTS ?? "")
   .map((p) => p.trim())
   .filter(Boolean)
   .map((p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } });
+// ACPG_PREVIEW_FILTER_ENABLED=0 drops the path filter entirely: the preview then
+// reads any file the gateway process can, and ACPG_PREVIEW_ROOTS stops mattering.
+// For a single-user gateway on a machine you already own, enumerating roots is
+// bookkeeping without a threat it answers. It is off-by-choice, not by default,
+// because the trade is real: with it disabled the gateway credential IS a
+// read-any-file capability on that host.
+const PREVIEW_FILTER_ENABLED = !["0", "off", "false"].includes(
+  (process.env.ACPG_PREVIEW_FILTER_ENABLED ?? "1").trim().toLowerCase(),
+);
 async function listDirs(dir: string) {
   const ents = await fs.promises.readdir(dir, { withFileTypes: true });
   const out: Array<{ name: string; git: boolean }> = [];
@@ -630,7 +639,14 @@ export async function listFiles(dir: string, query = "", limit = FILE_WALK_MAX_R
 // already failed — the ordinary case (a file inside the project) never pays for
 // it. `resolveWithinRootBase` realpaths both sides, so neither a "../" chain nor
 // a symlink out of the tree widens any of the three.
+//
+// ACPG_PREVIEW_FILTER_ENABLED=0 replaces all three rules with "yes". The path is
+// still realpath'd, so `display` below reads the same for symlinks either way.
+// The `cwd` → FS_ROOT check in resolveWorkspaceTarget is a separate axis and
+// stays on regardless: this toggle governs which FILES are readable, not which
+// folders a client may claim to be working in.
 async function allowedPreviewPath(abs: string, cwd: string): Promise<string | null> {
+  if (!PREVIEW_FILTER_ENABLED) return realpathLenient(abs);
   const direct = resolveWithinRootBase(abs, cwd) ?? PREVIEW_ROOTS.reduce<string | null>(
     (hit, root) => hit ?? resolveWithinRootBase(abs, root), null,
   );
@@ -4047,7 +4063,8 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   //   /workspace/file     one file's content as text / image metadata / binary
   //   /workspace/raw      one file's bytes (the <img> source, and downloads)
   // What each may read is allowedPreviewPath's decision: the conversation's cwd,
-  // its repo, and ACPG_PREVIEW_ROOTS. They stay read-only regardless — nothing
+  // its repo, and ACPG_PREVIEW_ROOTS — or anything at all, when a deployment
+  // sets ACPG_PREVIEW_FILTER_ENABLED=0. They stay read-only regardless — nothing
   // here writes, stages or reverts.
   if (consoleEnabled && pathname === "/workspace/changes") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
