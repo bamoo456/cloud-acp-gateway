@@ -1118,6 +1118,13 @@ git add web/src/lib/api.ts web/src/components/FileTree.tsx web/src/components/Fi
 git commit -m "feat(web): 60ms find debounce; top-K, pending and limited-index notes"
 ```
 
+**As shipped — two deliberate deviations from the spec above:**
+
+1. The truncation copy is `Showing the best {n} of {total} matches.`, not `Showing the {n} best matches of {total}` — the latter reads as "the 1 best matches" whenever a query matches just over the cap in only one place.
+2. The `limited` note is a ternary on `fromGit`, not `{meta.limited && !meta.fromGit && …}`. The spec's guard makes the note unreachable for a git corpus, but `find()` sets `limited` there too when `MAX_INDEX_PATHS` cuts the tracked list — so the field would have been plumbed end to end and then dropped. The git wording names the other cap: "This project is too large to index whole, so part of it wasn't searched."
+
+Step 3 also has to extend `findWorkspaceFiles`'s return mapping, not just the `FindResult` interface — the function builds its object field by field, so `total` would otherwise be `undefined` at runtime.
+
 ---
 
 ## Final verification (orchestrator runs after all tasks)
