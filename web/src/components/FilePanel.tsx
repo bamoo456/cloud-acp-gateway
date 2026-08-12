@@ -12,6 +12,7 @@ import { highlightBlock, highlightLanguageFor } from "../lib/highlight.ts";
 import { downloadFile } from "../lib/download.ts";
 import { FileTree } from "./FileTree.tsx";
 import { FileMenu, useRowMenu, type FileMenuTarget } from "./FileMenu.tsx";
+import { ResizeHandle } from "./ResizeHandle.tsx";
 import { makeAbsFile, makeRangeFile } from "../lib/mentions.ts";
 import { rangeFromOffsets, sliceLines, formatRange, type LineRange } from "../lib/lineRange.ts";
 import { copyText } from "../lib/clipboard.ts";
@@ -60,57 +61,6 @@ import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDow
 
 type Section = "Progress" | "Outputs" | "Context";
 type Mode = "session" | "project";
-
-// Drag the panel's left edge to set its width. A separator rather than a bare
-// div: it is focusable and answers the arrow keys, so the panel is resizable
-// without a pointer.
-function ResizeHandle({ width, onWidth, onCommit }: {
-  width: number; onWidth: (px: number) => void; onCommit: (px: number) => void;
-}) {
-  const latest = useRef(width);
-  latest.current = width;
-
-  const onPointerDown = (e: React.PointerEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = width;
-    // Dragging over the chat would otherwise select its text, and the cursor
-    // would flicker back to a caret the moment it left the 6px handle.
-    document.body.classList.add("resizing");
-    const move = (ev: PointerEvent) => {
-      const next = clampPanelWidth(startW + (startX - ev.clientX));
-      latest.current = next;
-      onWidth(next);
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      document.body.classList.remove("resizing");
-      onCommit(latest.current);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    const step = e.shiftKey ? 60 : 12;
-    // Left widens: the panel is anchored to the right edge, so its border moving
-    // left is the panel growing.
-    const delta = e.key === "ArrowLeft" ? step : e.key === "ArrowRight" ? -step : 0;
-    if (!delta) return;
-    e.preventDefault();
-    const next = clampPanelWidth(width + delta);
-    onWidth(next);
-    onCommit(next);
-  };
-
-  return (
-    <div className="wf-resize" role="separator" aria-orientation="vertical" tabIndex={0}
-      aria-label="Resize the files panel" aria-valuenow={width}
-      aria-valuemin={MIN_PANEL_WIDTH} aria-valuemax={MAX_PANEL_WIDTH}
-      onPointerDown={onPointerDown} onKeyDown={onKeyDown} />
-  );
-}
 
 const STATUS_MARK: Record<ChangeStatus, string> = {
   added: "A", modified: "M", deleted: "D", renamed: "R", untracked: "U",
@@ -330,7 +280,9 @@ export function FilePanel() {
       <div id="files-scrim" className={open ? "open" : ""} onClick={closeFiles} />
       <aside id="files" className={open ? "open" : ""} aria-hidden={!open}
         style={desktop ? { width, maxWidth: width } : undefined}>
-        {desktop && <ResizeHandle width={width} onWidth={setWidth} onCommit={savePanelWidth} />}
+        {desktop && <ResizeHandle className="wf-resize" label="Resize the files panel" edge="left"
+          width={width} min={MIN_PANEL_WIDTH} max={MAX_PANEL_WIDTH} clamp={clampPanelWidth}
+          onWidth={setWidth} onCommit={savePanelWidth} />}
         <div className="wf-head">
           {target && (
             <button className="icon-btn" title="Back to file list" onClick={clearFilePreview}><IconBack /></button>

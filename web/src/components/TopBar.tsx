@@ -5,6 +5,7 @@ import { AgentPill } from "./AgentPill.tsx";
 import { PendingPermissions } from "./PendingPermissions.tsx";
 import { RunningTasks } from "./RunningTasks.tsx";
 import { basename } from "../lib/format.ts";
+import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { IconClock, IconPlus, IconDots, IconFolder, IconChevronDown, IconPanel } from "../lib/icons.tsx";
 import type { AgentRef } from "../types.ts";
 export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void; onPicker: () => void; onOpenLogin?: (agent: AgentRef) => void }) {
@@ -15,7 +16,12 @@ export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void
   const [menu, setMenu] = useState(false);
   return (
     <header>
-      <button className="icon-btn sessions-btn" title="Sessions" onClick={onPanel}><IconClock /></button>
+      {/* One button, two doors: on desktop it collapses/expands the sidebar
+          column (store state); below 860px it opens the overlay sheet (App
+          state), which keeps the sheet's open-reset behavior intact. */}
+      <button className={"icon-btn sessions-btn" + (s.sidebarOpen ? " on" : "")} title="Sessions"
+        aria-pressed={s.sidebarOpen}
+        onClick={() => { if (isDesktopSidebarWidth()) s.toggleSidebar(); else onPanel(); }}><IconClock /></button>
       <span className="title">{sess ? sess.title : "Untitled"}</span>
       {/* mobile-only (CSS): the title gives way to the folder switcher */}
       <button className="folder-chip" title={s.cwd} onClick={onPicker}>

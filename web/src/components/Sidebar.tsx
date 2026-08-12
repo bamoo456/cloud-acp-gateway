@@ -6,7 +6,13 @@ import { useStore } from "../store/store.ts";
 import { AgentMark } from "./AgentPill.tsx";
 import { SearchResults } from "./SearchResults.tsx";
 import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
-import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
+import { ResizeHandle } from "./ResizeHandle.tsx";
+import { useRowMenu } from "./FileMenu.tsx";
+import {
+  clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
+  DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
+} from "../lib/sidebarWidth.ts";
+import { IconFolder, IconChevron, IconTrash, WorkingDots } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
 
@@ -49,6 +55,67 @@ function discoverable(agent: AgentRef) {
 function sessionTitle(id: string, title?: string | null) {
   return title && title !== "Untitled" ? title : id.slice(0, 8);
 }
+// What identifies a row's conversation to DELETE /history/session (the id is
+// enough — the gateway resolves the owning provider itself), plus what the
+// confirm card should call it.
+type DeleteTarget = { sessionId: string; agentName: string; title: string };
+// One list row: the session button and its delete affordance as SIBLINGS — a
+// <button> cannot legally nest another. A component rather than a render
+// helper because useRowMenu is a hook. Rows with no `del` (Running, Current)
+// render without the affordance or the menu gestures.
+function SessionRow({ className, onOpen, del, running, onAskDelete, onMenu, children }: {
+  className: string; onOpen: () => void;
+  del?: DeleteTarget; running?: boolean;
+  onAskDelete: (t: DeleteTarget) => void;
+  onMenu: (t: DeleteTarget, x: number, y: number) => void;
+  children: React.ReactNode;
+}) {
+  const menu = useRowMenu((x, y) => { if (del && !running) onMenu(del, x, y); });
+  return (
+    <div className="sess-row">
+      <button className={className} onClick={onOpen} {...(del ? menu : {})}>{children}</button>
+      {del && (
+        <button className="sess-del" title="Delete conversation" aria-label="Delete conversation"
+          disabled={running} onClick={() => onAskDelete(del)}><IconTrash /></button>
+      )}
+    </div>
+  );
+}
+// The row's right-click / long-press menu: FileMenu's sheet-or-dropdown
+// pattern with a single destructive action.
+const MENU_W = 214;
+const MENU_H = 120;
+const SHEET_QUERY = "(max-width: 640px)"; // matches .wf-menu's own sheet breakpoint
+function SessionRowMenu({ target, onDelete, onClose }: {
+  target: DeleteTarget & { x: number; y: number };
+  onDelete: () => void; onClose: () => void;
+}) {
+  // Read once, on open: the menu lives for a few seconds and a device does not
+  // cross the breakpoint inside them.
+  const [sheet] = useState(() => !!window.matchMedia?.(SHEET_QUERY).matches);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  // Inline positioning only in the dropdown case: as a sheet the stylesheet
+  // owns the geometry, and a left/top here would override it.
+  const style = sheet ? undefined : {
+    left: Math.max(8, Math.min(target.x, window.innerWidth - MENU_W - 8)),
+    top: Math.max(8, Math.min(target.y, window.innerHeight - MENU_H - 8)),
+  };
+  return (
+    <>
+      <div className="wf-menu-scrim" onPointerDown={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
+      <div className={"wf-menu" + (sheet ? " sheet" : "")} style={style} role="menu" aria-label={target.title}>
+        <div className="wf-menu-head"><div className="nm">{target.title}</div></div>
+        <button className="wf-menu-row danger" role="menuitem" onClick={onDelete}>
+          <IconTrash /><span>Delete conversation</span>
+        </button>
+      </div>
+    </>
+  );
+}
 export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClose: () => void; onOpenPicker: () => void }) {
   const s = useStore();
   const [items, setItems] = useState<TaggedHistory[] | null>(null);
@@ -64,6 +131,21 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
   const [searchRes, setSearchRes] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
+  // Width is applied inline, so it must only exist in column mode — below the
+  // breakpoint the panel is an overlay sheet whose width the stylesheet owns,
+  // and an inline value would override it.
+  const [width, setWidth] = useState(readSidebarWidth);
+  const [desktop, setDesktop] = useState(isDesktopSidebarWidth);
+  useEffect(() => {
+    const mq = window.matchMedia?.(DESKTOP_SIDEBAR_QUERY);
+    if (!mq) return;
+    // Re-clamp on resize too: a width chosen on a wide window would otherwise
+    // leave no room for the chat after the window shrinks.
+    const sync = () => { setDesktop(mq.matches); setWidth((w) => clampSidebarWidth(w)); };
+    mq.addEventListener("change", sync);
+    window.addEventListener("resize", sync);
+    return () => { mq.removeEventListener("change", sync); window.removeEventListener("resize", sync); };
+  }, []);
   // Every content search — debounced or cursor-resumed — stamps a generation, and
   // only a response whose stamp is still current is allowed to reach state. A
   // resumed page can take seconds, so without this it could land after the query
@@ -128,7 +210,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // collapsed back to the first few recents. The search filters reset with it:
   // they're deliberately unpersisted, and the panel stays mounted while closed
   // (desktop keeps it as a column), so nothing else would ever drop them.
-  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setFilters(DEFAULT_FILTERS); } }, [open]);
+  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setQ(""); setFilters(DEFAULT_FILTERS); } }, [open]);
   // refresh the list in place (no loading flash) when something renames a session
   useEffect(() => {
     if (s.historyNonce === 0) return;
@@ -139,14 +221,11 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // Tier 2: the server content search. Tier 1 (the local title filter above it) stays
   // instant and untouched — this only ADDS the matches a title filter cannot see.
   useEffect(() => {
-    // Only this tab renders the results, and one search reads transcripts off
-    // disk — so a folder or filter change with Conversations hidden would spend
-    // a full scan on a term nobody can see. Deliberately NOT gated on `open`:
-    // above 860px the panel is a persistent column (CSS `display: flex
-    // !important`) whose toggle button is hidden, so `open` is false there for
-    // a panel the user is looking at, and an `open` gate would kill search on
-    // desktop entirely.
-    if (tab !== "conversations") return;
+    // A term takes over the whole panel (the tab strip gives way to results),
+    // so no scan is ever spent on a hidden query. Deliberately NOT gated on
+    // `open`: above 860px the panel is a persistent column, so `open` is false
+    // there for a panel the user is looking at, and an `open` gate would kill
+    // search on desktop entirely.
     const term = q.trim();
     const gen = ++searchGen.current;
     // Clearing `searching` here too: without it, backspacing from a pending query
@@ -163,7 +242,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     // retires this generation so nothing already in flight — from here or from the
     // cursor-resume below — can still write state, including after unmount.
     return () => { clearTimeout(t); searchGen.current++; };
-  }, [q, filters, s.cwd, tab]);
+  }, [q, filters, s.cwd]);
 
   // Running indicator, reusing the polled runningTasks. Rows can belong to any
   // agent now, so match on agent + sessionId (a bare sessionId could collide
@@ -240,16 +319,31 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // 搜尋全部 button re-run the identical query forever and the resume cursor dead code.
   const rangeExplicit = filters.window === "custom" || filters.window === "all";
   const hasServerHits = (searchRes?.results.length ?? 0) > 0;
+  // A term takes over the panel from the first character (the instant tier-1
+  // title filter), replacing the tab strip with the results list; clearing the
+  // box hands back whichever tab was active.
+  const searchOpen = q.trim().length > 0;
+  // Delete is two-step everywhere: the trash (or menu row) only nominates a
+  // target; the fixed confirm card is what actually calls the store.
+  const [confirmDel, setConfirmDel] = useState<DeleteTarget | null>(null);
+  const [rowMenu, setRowMenu] = useState<(DeleteTarget & { x: number; y: number }) | null>(null);
+  const rowActions = {
+    onAskDelete: setConfirmDel,
+    onMenu: (t: DeleteTarget, x: number, y: number) => setRowMenu({ ...t, x, y }),
+  };
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
     const active = !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
     return (
-      <button className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "")} key={variant + ":" + it.agentName + ":" + it.sessionId}
-        onClick={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}>
+      <SessionRow key={variant + ":" + it.agentName + ":" + it.sessionId}
+        className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "")}
+        onOpen={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}
+        del={{ sessionId: it.sessionId, agentName: it.agentName, title: it.title || it.sessionId.slice(0, 8) }}
+        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="name">{it.title || it.sessionId.slice(0, 8)}</span>
         <span className="when">{it.updatedAt ? timeAgo(it.updatedAt) : ""}</span>
-      </button>
+      </SessionRow>
     );
   };
   // coolingAt set → the task finished within the grace window: a muted "recently
@@ -287,8 +381,11 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     const title = (historyTitleById.has(histKey) ? historyTitleById.get(histKey) : it.title)
       || it.sessionId.slice(0, 8);
     return (
-      <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"recent:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
-        onClick={() => { void s.openRecentSession(it); onClose(); }}>
+      <SessionRow key={"recent:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
+        className={"sess-item recent with-folder" + (active ? " active" : "")}
+        onOpen={() => { void s.openRecentSession(it); onClose(); }}
+        del={{ sessionId: it.sessionId, agentName: it.agentName, title }}
+        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -296,14 +393,17 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
           <span className="folder-name">{basename(it.cwd)}</span>
         </span>
         <span className="when">{it.lastActiveAt ? timeAgo(it.lastActiveAt) : ""}</span>
-      </button>
+      </SessionRow>
     );
   };
   const renderDiscoveredItem = (it: TaggedDiscoveredHistory) => {
     const active = s.cwd === it.cwd && s.agentName === it.agentName && !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
     return (
-      <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"discovered:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
-        onClick={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}>
+      <SessionRow key={"discovered:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
+        className={"sess-item recent with-folder" + (active ? " active" : "")}
+        onOpen={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}
+        del={{ sessionId: it.sessionId, agentName: it.agentName, title: it.title || it.sessionId.slice(0, 8) }}
+        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -311,7 +411,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
           <span className="folder-name">{basename(it.cwd)}</span>
         </span>
         <span className="when">{it.updatedAt ? timeAgo(it.updatedAt) : ""}</span>
-      </button>
+      </SessionRow>
     );
   };
   const renderCurrentItem = (it: typeof currentItems[number]) => {
@@ -329,7 +429,11 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   return (
     <>
       <div id="scrim" className={open ? "open" : ""} onClick={onClose} />
-      <div id="panel" className={open ? "open" : ""}>
+      <div id="panel" className={(open ? "open" : "") + (s.sidebarOpen ? "" : " collapsed")}
+        style={desktop ? { width, maxWidth: width } : undefined}>
+        {desktop && <ResizeHandle className="sb-resize" label="Resize the sidebar" edge="right"
+          width={width} min={MIN_SIDEBAR_WIDTH} max={MAX_SIDEBAR_WIDTH} clamp={clampSidebarWidth}
+          onWidth={setWidth} onCommit={saveSidebarWidth} />}
         <div className="folder-bar" title={s.cwd} onClick={() => { onOpenPicker(); onClose(); }}>
           <span className="fi"><IconFolder /></span>
           <span className="meta"><span className="lbl">Folder</span><span className="name">{basename(s.cwd)}</span></span>
@@ -344,15 +448,24 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
         )}
         {anyHistSupported && (
           <>
-            <div className="sidebar-tabs" role="tablist">
-              <button className={"sidebar-tab" + (tab === "recent" ? " active" : "")}
-                data-tab="recent" role="tab" aria-selected={tab === "recent"}
-                onClick={() => setTab("recent")}>Recent</button>
-              <button className={"sidebar-tab" + (tab === "conversations" ? " active" : "")}
-                data-tab="conversations" role="tab" aria-selected={tab === "conversations"}
-                onClick={() => setTab("conversations")}>Conversations</button>
+            {/* Above the tabs so searching is reachable from both of them. */}
+            <div className="search">
+              <input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
             </div>
-            {tab === "recent" && (
+            {searchOpen && (
+              <SearchFilters value={filters} agents={s.cfg.agents.map((a) => a.name)} onChange={setFilters} />
+            )}
+            {!searchOpen && (
+              <div className="sidebar-tabs" role="tablist">
+                <button className={"sidebar-tab" + (tab === "recent" ? " active" : "")}
+                  data-tab="recent" role="tab" aria-selected={tab === "recent"}
+                  onClick={() => setTab("recent")}>Recent</button>
+                <button className={"sidebar-tab" + (tab === "conversations" ? " active" : "")}
+                  data-tab="conversations" role="tab" aria-selected={tab === "conversations"}
+                  onClick={() => setTab("conversations")}>Conversations</button>
+              </div>
+            )}
+            {!searchOpen && tab === "recent" && (
               <div className="recent-tab">
                 {(activeTasks.length > 0 || coolingTasks.length > 0) && (
                   <div className="running-section recent-section">
@@ -388,12 +501,8 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                 )}
               </div>
             )}
-            {tab === "conversations" && (
+            {(searchOpen || tab === "conversations") && (
               <div className="all-section">
-                <div className="search">
-                  <input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
-                </div>
-                <SearchFilters value={filters} agents={s.cfg.agents.map((a) => a.name)} onChange={setFilters} />
                 <div className="sess-list">
                   {err && <div className="panel-empty">Couldn't load conversations.</div>}
                   {!err && items === null && <div className="panel-empty">Loading…</div>}
@@ -431,6 +540,27 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                 </div>
               </div>
             )}
+          </>
+        )}
+        {rowMenu && (
+          <SessionRowMenu target={rowMenu} onClose={() => setRowMenu(null)}
+            onDelete={() => { setConfirmDel(rowMenu); setRowMenu(null); }} />
+        )}
+        {confirmDel && (
+          <>
+            <div className="sess-confirm-scrim" onPointerDown={() => setConfirmDel(null)} />
+            <div className="sess-confirm" role="dialog" aria-label="Delete conversation">
+              <div className="delete-title">{confirmDel.title}</div>
+              <div className="amenu-note">
+                Permanently deletes this conversation's transcript from the agent's own history.
+                It can't be undone, and it won't be resumable from your terminal afterwards either.
+              </div>
+              <div className="actions">
+                <button className="btn" onClick={() => setConfirmDel(null)}>Cancel</button>
+                <button className="btn danger"
+                  onClick={() => { void s.deleteSession(confirmDel.sessionId); setConfirmDel(null); }}>Delete</button>
+              </div>
+            </div>
           </>
         )}
       </div>

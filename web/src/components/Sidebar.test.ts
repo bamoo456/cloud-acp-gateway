@@ -740,9 +740,9 @@ describe("Sidebar recent conversations", () => {
     expect(container.querySelector(".all-section")).toBeNull();
   });
 
-  test("shows the search box only on the Conversations tab", async () => {
+  test("shows the search box on both tabs", async () => {
     await renderSidebar();
-    expect(container.querySelector(".search")).toBeNull();
+    expect(container.querySelector(".search")).not.toBeNull();
     await clickConversationsTab();
     expect(container.querySelector(".search")).not.toBeNull();
   });
@@ -881,8 +881,11 @@ describe("Sidebar recent conversations", () => {
         await flush();
       });
     }
-    await clickConversationsTab();
 
+    // The reopen dropped the query along with the filters (same rationale), so
+    // the filters only re-mount once a new term is typed.
+    expect(container.querySelector<HTMLInputElement>(".search input")!.value).toBe("");
+    await typeInSearchBox("liquid");
     expect(folderOnly().checked).toBe(false);
   });
 
@@ -1027,25 +1030,25 @@ describe("Sidebar recent conversations", () => {
     expect(searchSessions).toHaveBeenLastCalledWith("liquid", { all: true });
   });
 
-  // A content search reads transcripts off disk. Only the Conversations tab
-  // renders its results, so a folder change with that tab hidden must not spend
-  // a full scan on a term nobody can see.
-  test("changing folders with the Conversations tab hidden does not scan", async () => {
+  // A term takes over the panel, so its results can never be hidden behind a
+  // tab — a folder change while one is showing re-runs the search against the
+  // new folder's scope instead of leaving stale hits on screen.
+  test("changing folders while a term is showing re-runs the search", async () => {
     searchSessions.mockResolvedValue({
       results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
     });
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
-    expect(searchSessions).toHaveBeenCalledTimes(1);
+    const folderOnly = container.querySelectorAll<HTMLInputElement>(".search-filters input[type=checkbox]")[0];
+    await act(async () => { folderOnly.click(); });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { cwd: "/repo" });
 
-    const recentTab = container.querySelector<HTMLButtonElement>('[data-tab="recent"]')!;
-    await act(async () => { recentTab.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     const { useStore } = await import("../store/store.ts");
     await act(async () => { useStore.setState({ cwd: "/other-repo" } as any); await flush(); });
     await act(async () => { vi.advanceTimersByTime(300); await flush(); });
 
-    expect(searchSessions).toHaveBeenCalledTimes(1);
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { cwd: "/other-repo" });
   });
 
   // The local title filter and the server content search share one box and one
@@ -1079,7 +1082,41 @@ describe("Sidebar recent conversations", () => {
     expect(recentTab?.getAttribute("aria-selected")).toBe("true");
     expect(container.textContent).toContain("No recent conversations yet.");
     expect(container.querySelector(".all-section")).toBeNull();
-    expect(container.querySelector(".search")).toBeNull();
+    expect(container.querySelector(".search")).not.toBeNull();
+  });
+
+  test("typing from the Recent tab runs the server search and shows hits", async () => {
+    searchSessions.mockResolvedValue({
+      results: [{
+        sessionId: "hit-1", source: "claude-cli", agentName: "claude", cwd: "/elsewhere",
+        title: "Liquid glass timeline", updatedAt: "2026-06-10T03:00:00.000Z", hitCount: 1,
+        hits: [{ index: 42, role: "user", snippet: "make it liquid", offsets: [[8, 14]] }],
+      }],
+      truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 1, ms: 1 },
+    });
+    await renderSidebar();
+    // No clickConversationsTab: the box is reachable straight from Recent.
+    await typeInSearchBox("liquid");
+
+    expect(searchSessions).toHaveBeenCalledWith("liquid", {});
+    expect(container.textContent).toContain("Liquid glass timeline");
+  });
+
+  test("a term replaces the tab strip; clearing it restores the previous tab", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    expect(container.querySelector(".sidebar-tabs")).not.toBeNull();
+
+    await typeInSearchBox("liquid");
+    expect(container.querySelector(".sidebar-tabs")).toBeNull();
+    expect(container.querySelector(".all-section")).not.toBeNull();
+
+    await typeInSearchBox("");
+    expect(container.querySelector(".sidebar-tabs")).not.toBeNull();
+    expect(container.querySelector('[data-tab="recent"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector(".all-section")).toBeNull();
   });
 
   test("reopening the panel resets to the Recent tab", async () => {
@@ -1096,5 +1133,130 @@ describe("Sidebar recent conversations", () => {
       await flush();
     });
     expect(container.querySelector('[data-tab="recent"]')?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  test("a conversation row's trash asks for confirmation before deleting", async () => {
+    const deleteSession = vi.fn(async () => {});
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ deleteSession } as any);
+    await clickConversationsTab();
+
+    const del = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-del");
+    expect(del).not.toBeNull();
+    await act(async () => { del!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(container.textContent).toContain("can't be undone");
+
+    // Cancel closes without deleting.
+    const cancel = [...container.querySelectorAll<HTMLButtonElement>(".sess-confirm .btn")]
+      .find((b) => b.textContent === "Cancel")!;
+    await act(async () => { cancel.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(container.querySelector(".sess-confirm")).toBeNull();
+
+    // Confirming deletes the ROW's conversation, by id.
+    await act(async () => { del!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const danger = container.querySelector<HTMLButtonElement>(".sess-confirm .btn.danger")!;
+    await act(async () => { danger.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(deleteSession).toHaveBeenCalledWith("s-recent");
+    expect(container.querySelector(".sess-confirm")).toBeNull();
+  });
+
+  test("a running conversation's trash is disabled", async () => {
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => {
+      useStore.setState({
+        runningTasks: [{ agentName: "claude", sessionId: "s-recent", state: "active", cwd: "/repo" }],
+      } as any);
+    });
+    await clickConversationsTab();
+    const del = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-del");
+    expect(del).not.toBeNull();
+    expect(del!.disabled).toBe(true);
+  });
+
+  test("Running rows offer no delete affordance", async () => {
+    await seedRecentSessions(sixteenRecents());
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => {
+      useStore.setState({
+        runningTasks: [{ agentName: "claude", sessionId: "run-a", state: "active", cwd: "/repo", title: "Running task" }],
+      } as any);
+    });
+    const running = container.querySelector(".running-section");
+    expect(running).not.toBeNull();
+    expect(running!.querySelector(".sess-del")).toBeNull();
+    // …while ordinary Recent rows next to it do have one.
+    expect(container.querySelector(".recent-section:not(.running-section) .sess-del")).not.toBeNull();
+  });
+
+  test("right-clicking a row offers Delete conversation in a menu", async () => {
+    const deleteSession = vi.fn(async () => {});
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ deleteSession } as any);
+    await clickConversationsTab();
+
+    const rowBtn = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-item")!;
+    await act(async () => { rowBtn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+
+    const menuRow = container.querySelector<HTMLButtonElement>(".wf-menu .wf-menu-row.danger");
+    expect(menuRow?.textContent).toContain("Delete conversation");
+    await act(async () => { menuRow!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    // The menu hands over to the same confirm card; nothing is deleted yet.
+    expect(container.querySelector(".wf-menu")).toBeNull();
+    expect(container.textContent).toContain("can't be undone");
+    expect(deleteSession).not.toHaveBeenCalled();
+  });
+
+  test("the desktop column collapses and expands via sidebarOpen", async () => {
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    // No matchMedia in jsdom → sidebarOpen initializes false, like a phone.
+    expect(container.querySelector("#panel")?.classList.contains("collapsed")).toBe(true);
+
+    await act(async () => { useStore.setState({ sidebarOpen: true }); });
+    expect(container.querySelector("#panel")?.classList.contains("collapsed")).toBe(false);
+
+    await act(async () => { useStore.getState().toggleSidebar(); });
+    expect(container.querySelector("#panel")?.classList.contains("collapsed")).toBe(true);
+  });
+
+  test("the column is draggable to a new width, and remembers it", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    await renderSidebar();
+
+    const panel = container.querySelector<HTMLElement>("#panel");
+    const handle = container.querySelector<HTMLElement>(".sb-resize");
+    expect(handle).not.toBeNull();
+    const before = panel!.style.width;
+
+    // Drag the right edge 100px right — the column is left-anchored, so that
+    // makes it wider.
+    await act(async () => {
+      handle!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 300 }) as PointerEvent);
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 400 }) as PointerEvent);
+      window.dispatchEvent(new MouseEvent("pointerup", {}) as PointerEvent);
+    });
+
+    expect(panel!.style.width).not.toBe(before);
+    expect(parseInt(panel!.style.width, 10)).toBe(parseInt(before, 10) + 100);
+    // Committed on release, so the next visit opens at the chosen width.
+    expect(localStorage.getItem("acpg.sidebarWidth")).toBe(String(parseInt(panel!.style.width, 10)));
+    // The drag must not leave the whole page unselectable.
+    expect(document.body.classList.contains("resizing")).toBe(false);
+  });
+
+  test("below the column breakpoint there is nothing to drag", async () => {
+    await renderSidebar();
+    // No matchMedia in jsdom → the sheet: no handle, no inline width — the
+    // sheet's layout is the stylesheet's to own.
+    expect(container.querySelector(".sb-resize")).toBeNull();
+    expect(container.querySelector<HTMLElement>("#panel")!.style.width).toBe("");
   });
 });
