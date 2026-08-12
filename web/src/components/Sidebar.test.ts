@@ -1110,4 +1110,39 @@ describe("Sidebar recent conversations", () => {
     await act(async () => { useStore.getState().toggleSidebar(); });
     expect(container.querySelector("#panel")?.classList.contains("collapsed")).toBe(true);
   });
+
+  test("the column is draggable to a new width, and remembers it", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    await renderSidebar();
+
+    const panel = container.querySelector<HTMLElement>("#panel");
+    const handle = container.querySelector<HTMLElement>(".sb-resize");
+    expect(handle).not.toBeNull();
+    const before = panel!.style.width;
+
+    // Drag the right edge 100px right — the column is left-anchored, so that
+    // makes it wider.
+    await act(async () => {
+      handle!.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 300 }) as PointerEvent);
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 400 }) as PointerEvent);
+      window.dispatchEvent(new MouseEvent("pointerup", {}) as PointerEvent);
+    });
+
+    expect(panel!.style.width).not.toBe(before);
+    expect(parseInt(panel!.style.width, 10)).toBe(parseInt(before, 10) + 100);
+    // Committed on release, so the next visit opens at the chosen width.
+    expect(localStorage.getItem("acpg.sidebarWidth")).toBe(String(parseInt(panel!.style.width, 10)));
+    // The drag must not leave the whole page unselectable.
+    expect(document.body.classList.contains("resizing")).toBe(false);
+  });
+
+  test("below the column breakpoint there is nothing to drag", async () => {
+    await renderSidebar();
+    // No matchMedia in jsdom → the sheet: no handle, no inline width — the
+    // sheet's layout is the stylesheet's to own.
+    expect(container.querySelector(".sb-resize")).toBeNull();
+    expect(container.querySelector<HTMLElement>("#panel")!.style.width).toBe("");
+  });
 });

@@ -6,6 +6,11 @@ import { useStore } from "../store/store.ts";
 import { AgentMark } from "./AgentPill.tsx";
 import { SearchResults } from "./SearchResults.tsx";
 import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
+import { ResizeHandle } from "./ResizeHandle.tsx";
+import {
+  clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
+  DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
+} from "../lib/sidebarWidth.ts";
 import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
@@ -64,6 +69,21 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
   const [searchRes, setSearchRes] = useState<SearchResponse | null>(null);
   const [searching, setSearching] = useState(false);
+  // Width is applied inline, so it must only exist in column mode — below the
+  // breakpoint the panel is an overlay sheet whose width the stylesheet owns,
+  // and an inline value would override it.
+  const [width, setWidth] = useState(readSidebarWidth);
+  const [desktop, setDesktop] = useState(isDesktopSidebarWidth);
+  useEffect(() => {
+    const mq = window.matchMedia?.(DESKTOP_SIDEBAR_QUERY);
+    if (!mq) return;
+    // Re-clamp on resize too: a width chosen on a wide window would otherwise
+    // leave no room for the chat after the window shrinks.
+    const sync = () => { setDesktop(mq.matches); setWidth((w) => clampSidebarWidth(w)); };
+    mq.addEventListener("change", sync);
+    window.addEventListener("resize", sync);
+    return () => { mq.removeEventListener("change", sync); window.removeEventListener("resize", sync); };
+  }, []);
   // Every content search — debounced or cursor-resumed — stamps a generation, and
   // only a response whose stamp is still current is allowed to reach state. A
   // resumed page can take seconds, so without this it could land after the query
@@ -329,7 +349,11 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   return (
     <>
       <div id="scrim" className={open ? "open" : ""} onClick={onClose} />
-      <div id="panel" className={(open ? "open" : "") + (s.sidebarOpen ? "" : " collapsed")}>
+      <div id="panel" className={(open ? "open" : "") + (s.sidebarOpen ? "" : " collapsed")}
+        style={desktop ? { width, maxWidth: width } : undefined}>
+        {desktop && <ResizeHandle className="sb-resize" label="Resize the sidebar" edge="right"
+          width={width} min={MIN_SIDEBAR_WIDTH} max={MAX_SIDEBAR_WIDTH} clamp={clampSidebarWidth}
+          onWidth={setWidth} onCommit={saveSidebarWidth} />}
         <div className="folder-bar" title={s.cwd} onClick={() => { onOpenPicker(); onClose(); }}>
           <span className="fi"><IconFolder /></span>
           <span className="meta"><span className="lbl">Folder</span><span className="name">{basename(s.cwd)}</span></span>
