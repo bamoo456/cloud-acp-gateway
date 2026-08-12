@@ -148,7 +148,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // collapsed back to the first few recents. The search filters reset with it:
   // they're deliberately unpersisted, and the panel stays mounted while closed
   // (desktop keeps it as a column), so nothing else would ever drop them.
-  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setFilters(DEFAULT_FILTERS); } }, [open]);
+  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setQ(""); setFilters(DEFAULT_FILTERS); } }, [open]);
   // refresh the list in place (no loading flash) when something renames a session
   useEffect(() => {
     if (s.historyNonce === 0) return;
@@ -159,14 +159,11 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // Tier 2: the server content search. Tier 1 (the local title filter above it) stays
   // instant and untouched — this only ADDS the matches a title filter cannot see.
   useEffect(() => {
-    // Only this tab renders the results, and one search reads transcripts off
-    // disk — so a folder or filter change with Conversations hidden would spend
-    // a full scan on a term nobody can see. Deliberately NOT gated on `open`:
-    // above 860px the panel is a persistent column (CSS `display: flex
-    // !important`) whose toggle button is hidden, so `open` is false there for
-    // a panel the user is looking at, and an `open` gate would kill search on
-    // desktop entirely.
-    if (tab !== "conversations") return;
+    // A term takes over the whole panel (the tab strip gives way to results),
+    // so no scan is ever spent on a hidden query. Deliberately NOT gated on
+    // `open`: above 860px the panel is a persistent column, so `open` is false
+    // there for a panel the user is looking at, and an `open` gate would kill
+    // search on desktop entirely.
     const term = q.trim();
     const gen = ++searchGen.current;
     // Clearing `searching` here too: without it, backspacing from a pending query
@@ -183,7 +180,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     // retires this generation so nothing already in flight — from here or from the
     // cursor-resume below — can still write state, including after unmount.
     return () => { clearTimeout(t); searchGen.current++; };
-  }, [q, filters, s.cwd, tab]);
+  }, [q, filters, s.cwd]);
 
   // Running indicator, reusing the polled runningTasks. Rows can belong to any
   // agent now, so match on agent + sessionId (a bare sessionId could collide
@@ -260,6 +257,10 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // 搜尋全部 button re-run the identical query forever and the resume cursor dead code.
   const rangeExplicit = filters.window === "custom" || filters.window === "all";
   const hasServerHits = (searchRes?.results.length ?? 0) > 0;
+  // A term takes over the panel from the first character (the instant tier-1
+  // title filter), replacing the tab strip with the results list; clearing the
+  // box hands back whichever tab was active.
+  const searchOpen = q.trim().length > 0;
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
     const active = !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
     return (
@@ -368,15 +369,24 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
         )}
         {anyHistSupported && (
           <>
-            <div className="sidebar-tabs" role="tablist">
-              <button className={"sidebar-tab" + (tab === "recent" ? " active" : "")}
-                data-tab="recent" role="tab" aria-selected={tab === "recent"}
-                onClick={() => setTab("recent")}>Recent</button>
-              <button className={"sidebar-tab" + (tab === "conversations" ? " active" : "")}
-                data-tab="conversations" role="tab" aria-selected={tab === "conversations"}
-                onClick={() => setTab("conversations")}>Conversations</button>
+            {/* Above the tabs so searching is reachable from both of them. */}
+            <div className="search">
+              <input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
             </div>
-            {tab === "recent" && (
+            {searchOpen && (
+              <SearchFilters value={filters} agents={s.cfg.agents.map((a) => a.name)} onChange={setFilters} />
+            )}
+            {!searchOpen && (
+              <div className="sidebar-tabs" role="tablist">
+                <button className={"sidebar-tab" + (tab === "recent" ? " active" : "")}
+                  data-tab="recent" role="tab" aria-selected={tab === "recent"}
+                  onClick={() => setTab("recent")}>Recent</button>
+                <button className={"sidebar-tab" + (tab === "conversations" ? " active" : "")}
+                  data-tab="conversations" role="tab" aria-selected={tab === "conversations"}
+                  onClick={() => setTab("conversations")}>Conversations</button>
+              </div>
+            )}
+            {!searchOpen && tab === "recent" && (
               <div className="recent-tab">
                 {(activeTasks.length > 0 || coolingTasks.length > 0) && (
                   <div className="running-section recent-section">
@@ -412,12 +422,8 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                 )}
               </div>
             )}
-            {tab === "conversations" && (
+            {(searchOpen || tab === "conversations") && (
               <div className="all-section">
-                <div className="search">
-                  <input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
-                </div>
-                <SearchFilters value={filters} agents={s.cfg.agents.map((a) => a.name)} onChange={setFilters} />
                 <div className="sess-list">
                   {err && <div className="panel-empty">Couldn't load conversations.</div>}
                   {!err && items === null && <div className="panel-empty">Loading…</div>}
