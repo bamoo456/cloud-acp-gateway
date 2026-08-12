@@ -740,9 +740,9 @@ describe("Sidebar recent conversations", () => {
     expect(container.querySelector(".all-section")).toBeNull();
   });
 
-  test("shows the search box only on the Conversations tab", async () => {
+  test("shows the search box on both tabs", async () => {
     await renderSidebar();
-    expect(container.querySelector(".search")).toBeNull();
+    expect(container.querySelector(".search")).not.toBeNull();
     await clickConversationsTab();
     expect(container.querySelector(".search")).not.toBeNull();
   });
@@ -881,8 +881,11 @@ describe("Sidebar recent conversations", () => {
         await flush();
       });
     }
-    await clickConversationsTab();
 
+    // The reopen dropped the query along with the filters (same rationale), so
+    // the filters only re-mount once a new term is typed.
+    expect(container.querySelector<HTMLInputElement>(".search input")!.value).toBe("");
+    await typeInSearchBox("liquid");
     expect(folderOnly().checked).toBe(false);
   });
 
@@ -1027,25 +1030,25 @@ describe("Sidebar recent conversations", () => {
     expect(searchSessions).toHaveBeenLastCalledWith("liquid", { all: true });
   });
 
-  // A content search reads transcripts off disk. Only the Conversations tab
-  // renders its results, so a folder change with that tab hidden must not spend
-  // a full scan on a term nobody can see.
-  test("changing folders with the Conversations tab hidden does not scan", async () => {
+  // A term takes over the panel, so its results can never be hidden behind a
+  // tab — a folder change while one is showing re-runs the search against the
+  // new folder's scope instead of leaving stale hits on screen.
+  test("changing folders while a term is showing re-runs the search", async () => {
     searchSessions.mockResolvedValue({
       results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
     });
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
-    expect(searchSessions).toHaveBeenCalledTimes(1);
+    const folderOnly = container.querySelectorAll<HTMLInputElement>(".search-filters input[type=checkbox]")[0];
+    await act(async () => { folderOnly.click(); });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { cwd: "/repo" });
 
-    const recentTab = container.querySelector<HTMLButtonElement>('[data-tab="recent"]')!;
-    await act(async () => { recentTab.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     const { useStore } = await import("../store/store.ts");
     await act(async () => { useStore.setState({ cwd: "/other-repo" } as any); await flush(); });
     await act(async () => { vi.advanceTimersByTime(300); await flush(); });
 
-    expect(searchSessions).toHaveBeenCalledTimes(1);
+    expect(searchSessions).toHaveBeenLastCalledWith("liquid", { cwd: "/other-repo" });
   });
 
   // The local title filter and the server content search share one box and one
@@ -1079,7 +1082,41 @@ describe("Sidebar recent conversations", () => {
     expect(recentTab?.getAttribute("aria-selected")).toBe("true");
     expect(container.textContent).toContain("No recent conversations yet.");
     expect(container.querySelector(".all-section")).toBeNull();
-    expect(container.querySelector(".search")).toBeNull();
+    expect(container.querySelector(".search")).not.toBeNull();
+  });
+
+  test("typing from the Recent tab runs the server search and shows hits", async () => {
+    searchSessions.mockResolvedValue({
+      results: [{
+        sessionId: "hit-1", source: "claude-cli", agentName: "claude", cwd: "/elsewhere",
+        title: "Liquid glass timeline", updatedAt: "2026-06-10T03:00:00.000Z", hitCount: 1,
+        hits: [{ index: 42, role: "user", snippet: "make it liquid", offsets: [[8, 14]] }],
+      }],
+      truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 1, ms: 1 },
+    });
+    await renderSidebar();
+    // No clickConversationsTab: the box is reachable straight from Recent.
+    await typeInSearchBox("liquid");
+
+    expect(searchSessions).toHaveBeenCalledWith("liquid", {});
+    expect(container.textContent).toContain("Liquid glass timeline");
+  });
+
+  test("a term replaces the tab strip; clearing it restores the previous tab", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    expect(container.querySelector(".sidebar-tabs")).not.toBeNull();
+
+    await typeInSearchBox("liquid");
+    expect(container.querySelector(".sidebar-tabs")).toBeNull();
+    expect(container.querySelector(".all-section")).not.toBeNull();
+
+    await typeInSearchBox("");
+    expect(container.querySelector(".sidebar-tabs")).not.toBeNull();
+    expect(container.querySelector('[data-tab="recent"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector(".all-section")).toBeNull();
   });
 
   test("reopening the panel resets to the Recent tab", async () => {
