@@ -219,7 +219,15 @@ export interface FoundFile { path: string; abs: string }
 // `fromGit`: the search used git's file list, so ignored files were never
 // candidates. The panel says so rather than letting a visible-but-ignored file
 // look like a search that missed.
-export interface FindResult { files: FoundFile[]; truncated: boolean; fromGit: boolean }
+// `total` is how many files matched in all, of which `files` is the best slice;
+// `pending` means the untracked half of the index hadn't arrived yet, and
+// `limited` that a cap cut the indexed corpus short. All three exist so the
+// panel can be honest about an incomplete answer instead of implying it is the
+// whole one.
+export interface FindResult {
+  files: FoundFile[]; truncated: boolean; fromGit: boolean;
+  total: number; pending?: boolean; limited?: boolean;
+}
 
 // `dir` omitted lists the conversation's own folder — the tree's root.
 export async function getWorkspaceTree(cwd: string, dir?: string): Promise<TreeResult> {
@@ -286,10 +294,16 @@ export async function getWorkspaceOutputs(cwd: string, dirs: string[]): Promise<
 export async function findWorkspaceFiles(cwd: string, query: string): Promise<FindResult> {
   const url = base() + "/workspace/find?cwd=" + encodeURIComponent(cwd) + "&q=" + encodeURIComponent(query);
   const r = await readJson(await fetch(url), "Couldn't search this folder.");
+  const files = Array.isArray(r?.files) ? r.files : [];
   return {
-    files: Array.isArray(r?.files) ? r.files : [],
+    files,
     truncated: !!r?.truncated,
     fromGit: !!r?.fromGit,
+    // A gateway too old to send `total` still returns the matches it found, so
+    // fall back to counting them rather than reporting a match set of zero.
+    total: typeof r?.total === "number" ? r.total : files.length,
+    pending: !!r?.pending,
+    limited: !!r?.limited,
   };
 }
 
