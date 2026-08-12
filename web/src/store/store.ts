@@ -144,7 +144,9 @@ interface State {
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
   renameSession: (title: string) => void;
-  deleteSession: () => Promise<void>;
+  // No argument = the active conversation (the ActionMenu path); an id = any
+  // conversation, active or not (the sidebar's per-row delete).
+  deleteSession: (sessionId?: string) => Promise<void>;
   answerPermission: (reqId: number | string, optionId: string) => void;
   answerElicitation: (reqId: number | string, response: ElicitationResponse, summary: string) => void;
   answerInboxItem: (agentName: string, reqId: string, optionId: string) => void;
@@ -1068,8 +1070,8 @@ export const useStore = create<State>((set, get) => {
     // Unlike rename, this is NOT optimistic: the gateway can refuse (a running
     // turn), and removing the conversation from the UI first would leave the
     // sidebar disagreeing with a transcript that's still on disk.
-    async deleteSession() {
-      const sid = get().activeId;
+    async deleteSession(sessionId) {
+      const sid = sessionId ?? get().activeId;
       if (!sid || sid.startsWith("pending-")) return;
       const { ok, running } = await apiDelete(sid);
       if (!ok) {
@@ -1080,9 +1082,14 @@ export const useStore = create<State>((set, get) => {
       set((st) => {
         const sessions = { ...st.sessions };
         delete sessions[sid];
-        // Nothing to activate — land on the empty state rather than picking an
-        // arbitrary neighbour. historyNonce re-pulls both sidebar lists.
-        return { sessions, activeId: null, recentSessions, historyNonce: st.historyNonce + 1, tip: "" };
+        // When the deleted conversation was the open one there's nothing to
+        // activate — land on the empty state rather than picking an arbitrary
+        // neighbour. Deleting any other row leaves the open thread alone.
+        // historyNonce re-pulls both sidebar lists.
+        return {
+          sessions, activeId: st.activeId === sid ? null : st.activeId,
+          recentSessions, historyNonce: st.historyNonce + 1, tip: "",
+        };
       });
     },
     answerPermission(reqId, optionId) {

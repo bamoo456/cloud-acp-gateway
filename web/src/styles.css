@@ -401,6 +401,32 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .sess-item .when { font-size: 13px; color: var(--muted); flex: 0 0 auto; }
+  /* Row wrapper: the session button and its delete control are siblings (a
+     <button> can't nest another). The trash overlays the row's right edge and
+     is revealed on hover — or on focus, so it stays keyboard-reachable
+     (opacity, not display: a display:none control can never take focus). */
+  .sess-row { position: relative; }
+  .sess-del {
+    position: absolute; top: 50%; right: 8px; transform: translateY(-50%);
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    color: var(--muted); background: var(--surface-2);
+    opacity: 0; pointer-events: none;
+  }
+  .sess-row:hover .sess-del, .sess-row:focus-within .sess-del { opacity: 1; pointer-events: auto; }
+  .sess-row:hover .sess-del:disabled, .sess-row:focus-within .sess-del:disabled { opacity: .45; cursor: default; }
+  .sess-del svg { width: 15px; height: 15px; }
+  .sess-del:hover:not(:disabled), .sess-del:focus-visible { color: var(--err); }
+  /* The delete confirm card — .amenu's delete view, detached from the menu. */
+  .sess-confirm-scrim { position: fixed; inset: 0; z-index: 40; background: #00000055; }
+  .sess-confirm {
+    position: fixed; z-index: 50; left: 50%; top: 28%; transform: translateX(-50%);
+    width: min(340px, calc(100vw - 32px)); background: var(--surface);
+    border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: var(--shadow);
+    padding: 12px 0 14px; animation: pop .12s ease-out;
+  }
+  .sess-confirm .delete-title { padding: 0 14px 2px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess-confirm .actions { display: flex; gap: 8px; padding: 10px 14px 0; }
+  .sess-confirm .actions .btn { flex: 1; }
   /* Per-row agent mark in the unified (cross-agent) list — a touch smaller than
      the AgentPill's, vertically centered against the title row. */
   .sess-item .mark { width: 16px; height: 16px; flex: 0 0 auto; align-self: center; }
@@ -1143,6 +1169,7 @@
   .wf-menu-row:hover { background: var(--surface-2); }
   .wf-menu-row svg { width: 17px; height: 17px; flex: 0 0 auto; color: var(--muted); }
   .wf-menu-row.accent, .wf-menu-row.accent svg { color: var(--accent); }
+  .wf-menu-row.danger, .wf-menu-row.danger svg { color: var(--err); }
   @media (max-width: 640px) {
     .wf-menu-scrim { background: #00000070; backdrop-filter: blur(2px); }
     .wf-menu.sheet {
