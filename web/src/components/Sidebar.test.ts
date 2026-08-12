@@ -582,6 +582,39 @@ describe("Sidebar recent conversations", () => {
     expect(container.textContent).not.toContain("No recent conversations yet.");
   });
 
+  test("a working conversation shows the renamed title, not the first-prompt label", async () => {
+    // Everything the Running row could otherwise draw on is a snapshot from before
+    // the rename: the recents row is what the conversation was called when last
+    // touched, and the /running label is the text of its first prompt, captured
+    // once by the gateway. The rename landed in the titles sidecar, which only the
+    // listings read back — so the fetched list has to reach the Running row, and a
+    // working conversation is drawn ONLY there (it's excluded from Recent below).
+    getHistory.mockResolvedValue([
+      { sessionId: "run-r", title: "My renamed chat", updatedAt: "2026-06-10T03:59:00.000Z" },
+    ]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "run-r", title: "old name", lastActiveAt: "2026-06-10T03:00:00.000Z" },
+    ]);
+    const { Sidebar } = await import("./Sidebar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      agentName: "claude", cwd: "/repo", agentReady: true,
+      sessions: {}, activeId: null, openHistorySession, newSession: vi.fn(), historyNonce: 0,
+      jumpToTask: vi.fn(),
+      runningTasks: [{ agentName: "claude", sessionId: "run-r", state: "active", cwd: "/repo", title: "fix the flaky test please" }],
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Sidebar, { open: true, onClose: vi.fn(), onOpenPicker: vi.fn() }));
+      await flush();
+    });
+
+    const running = container.querySelector(".running-section");
+    expect(running!.textContent).toContain("My renamed chat");
+    expect(running!.textContent).not.toContain("old name");
+    expect(running!.textContent).not.toContain("fix the flaky test please");
+  });
+
   test("clicking a running task jumps to it and closes the panel", async () => {
     const jumpToTask = vi.fn();
     const onClose = vi.fn();

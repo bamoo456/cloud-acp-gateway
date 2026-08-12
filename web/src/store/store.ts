@@ -97,6 +97,15 @@ interface State {
   joining: boolean; // resolving a ?session= deep-link (show a loading state, not "Ready to code?")
   historyNonce: number; // bumped to ask the sidebar to refresh its conversation list (e.g. after rename)
   recentSessions: RecentSession[];
+  // "agent\nsessionId" -> the title the gateway's own listings report, which is
+  // where a rename actually lands (the per-cwd titles sidecar). Filled by the
+  // sidebar as it fetches /history and /history/discovered, and read back by
+  // anything rendering a conversation from a staler source — recents rows are
+  // snapshots taken when a conversation was last touched, and a running task's
+  // label is the text of its first prompt. Lives in the store rather than in the
+  // sidebar so jumpToTask and the TopBar's task popup resolve the same name the
+  // sidebar shows.
+  historyTitles: Record<string, string>;
   runningTasks: RunningTask[]; // polled from the gateway: sessions with a prompt in flight, across all agents
   // Tasks seen running, stamped with last-seen time — keeps a just-finished
   // conversation in the sidebar's Running section for a short grace window.
@@ -151,6 +160,10 @@ interface State {
   answerElicitation: (reqId: number | string, response: ElicitationResponse, summary: string) => void;
   answerInboxItem: (agentName: string, reqId: string, optionId: string) => void;
   jumpToTask: (task: RunningTask) => void;
+  // Record what a freshly-fetched listing calls these conversations. Merge-only:
+  // a listing covers one folder (or one provider's discoverable store), so absence
+  // from it means "not asked about", never "no longer named".
+  mergeHistoryTitles: (rows: Array<{ agentName: string; sessionId: string; title: string | null }>) => void;
   ingestRunningTasks: (tasks: RunningTask[]) => void;
   ingestInboxItems: (items: InboxItem[], expectedRevision: number) => void;
   ensureConnected: () => void;
@@ -380,6 +393,13 @@ export const useStore = create<State>((set, get) => {
     return text || null;
   }
 
+  // `title` is passed only by a rename — the one caller that knows the name the
+  // user chose. Every other call has to derive one, and a derived title is a SEED:
+  // it may name a conversation with nothing on record, never replace what is. This
+  // runs on every frame of a running turn, so without that distinction a session
+  // whose in-memory copy has no title (a deep-link join, an agent restart) reverts
+  // a renamed conversation to its first user message mid-turn — on every device,
+  // since the derived name is POSTed to the shared recents table too.
   function touchSessionActivity(id: string, title?: string) {
     if (!id || id.startsWith("pending-")) return;
     if (!agentCanLoadSession()) return;
@@ -395,7 +415,7 @@ export const useStore = create<State>((set, get) => {
       sessionId: id,
       title: title ?? known ?? firstUserTitle(session) ?? "Untitled",
       lastActiveAt: new Date().toISOString(),
-    });
+    }, title === undefined);
     set({ recentSessions: next });
   }
 
@@ -952,6 +972,7 @@ export const useStore = create<State>((set, get) => {
     joining: !!linkParams().session, // deep-link present → show "Joining…" from first paint
     historyNonce: 0,
     recentSessions: readRecentSessions(),
+    historyTitles: {},
     runningTasks: [],
     runningSeen: {},
     inboxItems: [],
@@ -1277,6 +1298,25 @@ export const useStore = create<State>((set, get) => {
       // Cross-agent or cross-folder → reconnect and let the deep-link join flow
       // (the same one shared links use) open it once the agent is ready.
       openViaDeepLink(task.agentName, task.sessionId, cwd, "Opening task…");
+    },
+
+    mergeHistoryTitles(rows) {
+      set((st) => {
+        let changed = false;
+        const historyTitles = { ...st.historyTitles };
+        for (const r of rows) {
+          // Only real names: a listing reports `null` for a conversation it can't
+          // derive a title for, and storing that would blank a name we already have.
+          if (!r.title) continue;
+          const key = r.agentName + "\n" + r.sessionId;
+          if (historyTitles[key] === r.title) continue;
+          historyTitles[key] = r.title;
+          changed = true;
+        }
+        // Same object back when nothing moved — this runs on every list fetch, and
+        // a fresh map each time would re-render every subscriber for no reason.
+        return changed ? { historyTitles } : st;
+      });
     },
 
     // Called by the /running poll: store the live snapshot and fold it into the

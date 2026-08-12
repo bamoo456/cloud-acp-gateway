@@ -80,10 +80,24 @@ export function renameRecentSession(sessionId: string, title: string): RecentSes
   return cache;
 }
 
-export function touchRecentSession(session: RecentSession): RecentSession[] {
-  const title = session.title.trim() || "Untitled";
+// "Untitled" is the placeholder a client falls back to, not a name a conversation
+// answers to — so it never counts as a recorded title.
+const recordedTitle = (sessionId: string) =>
+  cache.find((it) => it.sessionId === sessionId && it.title && it.title !== "Untitled")?.title ?? null;
+
+// `seedTitle` marks a title this client DERIVED (the transcript's first user
+// message, or the "Untitled" fallback) rather than one the user chose. A derived
+// title may only name a conversation with no title on record: this runs on every
+// frame of a running turn, and a session whose in-memory copy carries no title —
+// a deep-link join, an agent restart, another device — would otherwise re-derive
+// the first message and overwrite a rename mid-turn. Matched on the session id
+// alone, like renameRecentSession: the recorded title belongs to the
+// conversation, not to one spelling of its folder. The gateway enforces the same
+// rule on the row it stores, so the two can't disagree.
+export function touchRecentSession(session: RecentSession, seedTitle = false): RecentSession[] {
+  const title = (seedTitle ? recordedTitle(session.sessionId) : null) ?? (session.title.trim() || "Untitled");
   const entry: RecentSession = { ...session, title };
   cache = normalize([entry, ...cache.filter((it) => keyOf(it) !== keyOf(session))]);
-  void postRecentSession(entry);
+  void postRecentSession(entry, seedTitle);
   return cache;
 }

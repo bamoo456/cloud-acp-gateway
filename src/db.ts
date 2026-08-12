@@ -174,14 +174,44 @@ export class Db {
     }));
   }
 
+  // The title a conversation already answers to, from ANY of its recency rows.
+  // Rows are per (agent, cwd, session) but a title belongs to the conversation,
+  // so the id alone identifies it — the same reasoning spelled out above
+  // deleteRecentSession. "" and "Untitled" are placeholders a client fell back to,
+  // not answers, so they don't count as recorded.
+  //
+  // Newest row first, matching how the client's own cache is ordered: with no
+  // ORDER BY, SQLite would answer in rowid (insertion) order while the client
+  // answers in recency order, so two rows carrying different real titles — two
+  // devices that each seeded one before seeing the other's — would have the two
+  // sides adopt different names and the next /prefs load flip the display.
+  private recordedTitle(sessionId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT title FROM recent_sessions
+        WHERE session_id = ? AND title <> '' AND title <> 'Untitled'
+        ORDER BY last_active_at DESC LIMIT 1`)
+      .get(sessionId) as { title: string } | undefined;
+    return row ? row.title : null;
+  }
+
   // Upsert one session's recency, then trim to the newest MAX_RECENT_SESSIONS.
-  touchRecentSession(s: RecentSession): RecentSession[] {
+  //
+  // `seedTitle` marks a title the caller DERIVED (from the transcript's first user
+  // message, or a bare "Untitled") rather than one the user chose. A derived title
+  // must never overwrite a recorded one: clients touch this on every frame of a
+  // running turn, and any client whose in-memory session carries no title — a
+  // deep-link join, an agent restart, a second device — re-derives the first
+  // message and would otherwise clobber a rename mid-turn, on every device at once.
+  // Enforced here rather than in each client because this is the one choke point
+  // every device writes through.
+  touchRecentSession(s: RecentSession, seedTitle = false): RecentSession[] {
+    const title = (seedTitle ? this.recordedTitle(s.sessionId) : null) ?? s.title;
     this.db
       .prepare(`INSERT INTO recent_sessions (agent_name, cwd, session_id, title, last_active_at)
         VALUES (@agentName, @cwd, @sessionId, @title, @lastActiveAt)
         ON CONFLICT(agent_name, cwd, session_id)
         DO UPDATE SET title = excluded.title, last_active_at = excluded.last_active_at`)
-      .run(s);
+      .run({ ...s, title });
     this.trimRecentSessions();
     return this.recentSessions();
   }
@@ -236,12 +266,18 @@ export class Db {
         .run(s.at, s.agentName, s.sessionId);
       return;
     }
+    // The caller's title is the task label (the first prompt's text), so it is a
+    // seed in exactly the sense touchRecentSession means: it may only name a row
+    // this creates. The insert below fires whenever the conversation has no row
+    // for THIS spelling of its folder, and without this a renamed conversation
+    // gains a second recency row wearing the name it was renamed away from.
+    const title = this.recordedTitle(s.sessionId) ?? s.title;
     this.db
       .prepare(`INSERT INTO recent_sessions (agent_name, cwd, session_id, title, last_active_at, last_message_at)
         VALUES (@agentName, @cwd, @sessionId, @title, @at, @at)
         ON CONFLICT(agent_name, cwd, session_id)
         DO UPDATE SET last_message_at = excluded.last_message_at`)
-      .run(s);
+      .run({ ...s, title });
     this.trimRecentSessions();
   }
 
