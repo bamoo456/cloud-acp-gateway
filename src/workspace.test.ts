@@ -5,10 +5,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  changes, fileDiff, preview, repoRoot,
+  changes, fileDiff, find, preview, repoRoot,
   parseStatusZ, parseNumstatZ, looksBinary, inlineImageType, sortTreeEntries,
   MAX_TEXT_BYTES, type TreeEntry,
 } from "./workspace.ts";
+import { fileIndex } from "./file-index.ts";
 
 // A throwaway checkout per suite run. `changes`/`fileDiff` shell out to real
 // git, so the fixture has to be a real repo — parsing tests below cover the
@@ -239,6 +240,91 @@ describe("preview", () => {
     const dir = makeRepo();
     assert.equal(await preview(path.join(dir, "nope.txt"), "nope.txt"), null);
     assert.equal(await preview(dir, "."), null);
+  });
+});
+
+describe("find", () => {
+  test("fuzzy basename hits work, and substring hits always outrank them", async () => {
+    const dir = makeRepo();
+    fs.mkdirSync(path.join(dir, "web/src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "web/src/filepanel.tsx"), "x");
+    fs.writeFileSync(path.join(dir, "web/src/fip-appendix.txt"), "x");
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "pipe" });
+    fileIndex.clear();
+    const fuzzy = await find(dir, dir, "fipa");
+    assert.ok(fuzzy.files.some((f) => f.path === "web/src/filepanel.tsx"), "subsequence match found");
+    // "fip" is a substring of fip-appendix and only a subsequence-prefix of filepanel:
+    const sub = await find(dir, dir, "fip");
+    assert.equal(sub.files[0].path, "web/src/fip-appendix.txt", "tier 1/2 beats tier 4");
+    assert.equal(sub.total, sub.files.length);
+  });
+
+  test("results are ranked before the cap, not truncated alphabetically-first", async () => {
+    const dir = makeRepo();
+    // 250 alphabetically-early mid-path matches + 1 late basename match.
+    for (let i = 0; i < 250; i++) {
+      const p = path.join(dir, "aaa", `x${String(i).padStart(3, "0")}-hit.ts`);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, "x");
+    }
+    fs.mkdirSync(path.join(dir, "zzz"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "zzz/hit.ts"), "x");
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "pipe" });
+    fileIndex.clear();
+    const r = await find(dir, dir, "hit");
+    assert.equal(r.truncated, true);
+    assert.equal(r.total, 251);
+    // The basename-prefix match must be present and first despite sorting last
+    // alphabetically — the old code cut at 200 before ranking and lost it.
+    assert.equal(r.files[0].path, "zzz/hit.ts");
+  });
+
+  test("changes() feeds the index: untracked files are findable with no --others walk", async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, "brand-new.ts"), "x");
+    fileIndex.clear();
+    const before = await find(dir, dir, "brand-new");
+    assert.equal(before.pending, true, "no status snapshot yet");
+    assert.equal(before.files.length, 0);
+    await changes(dir); // the panel's own status run — this is the wiring under test
+    const after = await find(dir, dir, "brand-new");
+    assert.equal(after.pending, undefined);
+    assert.deepEqual(after.files.map((f) => f.path), ["brand-new.ts"]);
+  });
+
+  test("searching from a subdirectory re-bases paths, same as before", async () => {
+    const dir = makeRepo();
+    fs.mkdirSync(path.join(dir, "src/deep"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "src/deep/nested.ts"), "x");
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "pipe" });
+    fileIndex.clear();
+    const r = await find(dir, path.join(dir, "src"), "nested");
+    assert.deepEqual(r.files.map((f) => f.path), ["deep/nested.ts"]);
+    assert.equal(r.files[0].abs, path.join(dir, "src", "deep", "nested.ts"));
+  });
+
+  test("a non-git folder still finds files (walk corpus), flagged fromGit:false", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpg-nongit-"));
+    fs.mkdirSync(path.join(dir, "notes"));
+    fs.writeFileSync(path.join(dir, "notes/idea.md"), "x");
+    fileIndex.clear();
+    const r = await find(dir, dir, "idea");
+    assert.deepEqual(r.files.map((f) => f.path), ["notes/idea.md"]);
+    assert.equal(r.fromGit, false);
+  });
+
+  test("a search root outside cwd's checkout is walked, not answered from that repo's index", async () => {
+    // /workspace/find takes a `path`, and ACPG_PREVIEW_ROOTS lets it name a
+    // folder in another project entirely — whose files cwd's repo index cannot
+    // list, so searching it against that index would answer nothing at all.
+    const repo = makeRepo();
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-outside-")));
+    fs.writeFileSync(path.join(outside, "note-outside.txt"), "x");
+    fileIndex.clear();
+    const r = await find(repo, outside, "note-outside");
+    assert.deepEqual(r.files.map((f) => f.path), ["note-outside.txt"]);
+    assert.equal(r.files[0].abs, path.join(outside, "note-outside.txt"));
+    assert.equal(r.fromGit, false);
   });
 });
 
