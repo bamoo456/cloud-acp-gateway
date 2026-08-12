@@ -4,6 +4,7 @@ import type {
 } from "../types.ts";
 import type { ViewMessage } from "../lib/api.ts";
 import { describeFileUri } from "../lib/mentions.ts";
+import { recoverToolFacts } from "../lib/toolInput.ts";
 
 // Updates that are part of a session/load replay; dropped during a lazy resume
 // because /history/messages already rendered the history.
@@ -143,14 +144,18 @@ function upsertTool(s0: Session, up: SessionUpdate, isUpdate: boolean): Session 
   const existingId = s.toolItemId[tcId];
   // ACP carries tool content under `up.content` (array); see types.ts note.
   const upContent = (up as { content?: ToolContentItem[] }).content;
+  // The kind and locations the ACP adapter didn't map, read back out of the raw
+  // tool input it forwards anyway. Absent fields mean the adapter's own values
+  // stand — see lib/toolInput.ts.
+  const fix = recoverToolFacts(up);
   if (!existingId) {
     const [id, seq] = nextId(s);
     const item: ThreadItem = {
       id, kind: "tool", toolCallId: tcId,
       title: up.title || up.kind || "Tool",
-      toolKind: up.kind || "other",
+      toolKind: fix.kind || up.kind || "other",
       status: up.status || (isUpdate ? "pending" : "pending"),
-      locations: (up.locations || []).map((l) => l.path || l.uri || ""),
+      locations: fix.locations ?? (up.locations || []).map((l) => l.path || l.uri || ""),
       content: Array.isArray(upContent) ? upContent : [],
     };
     return { ...s, seq, items: [...s.items, item], toolItemId: { ...s.toolItemId, [tcId]: id } };
@@ -160,9 +165,9 @@ function upsertTool(s0: Session, up: SessionUpdate, isUpdate: boolean): Session 
     return {
       ...it,
       title: up.title || it.title,
-      toolKind: up.kind || it.toolKind,
+      toolKind: fix.kind || up.kind || it.toolKind,
       status: up.status || it.status,
-      locations: up.locations ? up.locations.map((l) => l.path || l.uri || "") : it.locations,
+      locations: fix.locations ?? (up.locations ? up.locations.map((l) => l.path || l.uri || "") : it.locations),
       content: Array.isArray(upContent) ? upContent : it.content,
     };
   });

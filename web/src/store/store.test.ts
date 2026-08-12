@@ -143,6 +143,31 @@ describe("store notification routing", () => {
     expect(recents[0].cwd).toBe("/old");
   });
 
+  test("a tool_call's rawInput survives the wire, so an unmapped tool still lists its file", async () => {
+    // applyUpdate's own tests build the update object by hand, which cannot prove
+    // the fields are still there after the frame has crossed SSE and the store's
+    // dispatch. If either dropped `rawInput` or `_meta`, the recovery would be
+    // inert in production with every unit test still green.
+    const { useStore, ws } = await bootstrapThenSwitchFolder();
+    ws.recv({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "new-session",
+        update: {
+          sessionUpdate: "tool_call", toolCallId: "t1", title: "NotebookEdit",
+          kind: "other", status: "pending", locations: [],
+          rawInput: { notebook_path: "/repo/analysis.ipynb" },
+          _meta: { claudeCode: { toolName: "NotebookEdit" } },
+        },
+      },
+    });
+    await flush();
+    const tool = useStore.getState().sessions["new-session"].items.find((i: any) => i.kind === "tool") as any;
+    expect(tool.toolKind).toBe("edit");
+    expect(tool.locations).toEqual(["/repo/analysis.ipynb"]);
+  });
+
   test("selectSession activates a live session without hitting /history and restores its cwd", async () => {
     const { useStore } = await bootstrapThenCreateSecondSession(); // first-session(/old), second-session(/old) active
     // stamp distinct cwds to prove cwd follows the active session

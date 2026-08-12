@@ -32,6 +32,7 @@ describe("FilePanel", () => {
   let getFileDiff: ReturnType<typeof vi.fn>;
   let getFilePreview: ReturnType<typeof vi.fn>;
   let getWorkspaceTree: ReturnType<typeof vi.fn>;
+  let getWorkspaceOutputs: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -55,11 +56,15 @@ describe("FilePanel", () => {
       abs: "/repo", path: "", truncated: false,
       entries: [{ name: "src", abs: "/repo/src", dir: true }],
     });
+    // Nothing in this conversation wrote outside the checkout, which is the
+    // ordinary case: the tests that care about output folders set their own.
+    getWorkspaceOutputs = vi.fn().mockResolvedValue([]);
     vi.doMock("../lib/api.ts", () => ({
       getWorkspaceChanges,
       getFileDiff,
       getFilePreview,
       getWorkspaceTree,
+      getWorkspaceOutputs,
       findWorkspaceFiles: vi.fn().mockResolvedValue({ files: [], truncated: false, fromGit: true }),
       rawFileUrl: (cwd: string, p: string) => `/workspace/raw?cwd=${cwd}&path=${p}`,
     }));
@@ -410,6 +415,51 @@ describe("FilePanel", () => {
     const rows = [...section("outputs")!.querySelectorAll("button.wf-row")].map((r) => r.textContent);
     expect(rows[0]).toContain("raven.sql");
     expect(rows.slice(1).join(" ")).toContain("gateway.ts");
+  });
+
+  test("a shell-written file outside the checkout reaches Outputs through its folder", async () => {
+    // The gap both other sources have at once: `Bash` names no path, so the
+    // thread doesn't know it, and /tmp is outside every checkout, so git can't
+    // see it. Only the folder listing can — asked for because a tool call DID
+    // name a sibling of it.
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    getWorkspaceOutputs.mockResolvedValue([{
+      abs: "/tmp/icons",
+      files: [{ path: "generated.html", abs: "/tmp/icons/generated.html", size: 120 }],
+      truncated: false,
+    }]);
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", activeId: "s1",
+      sessions: {
+        s1: {
+          ...makeSession("s1"), cwd: "/repo",
+          items: [{
+            id: "t1", kind: "tool", toolCallId: "t1", title: "Write", toolKind: "edit",
+            status: "completed", locations: ["/tmp/icons/mockup.html"], content: [],
+          }],
+        },
+      },
+    });
+    await render();
+
+    // Only the folder of a file the conversation WROTE is asked about.
+    expect(getWorkspaceOutputs).toHaveBeenCalledWith("/repo", ["/tmp/icons"]);
+    const rows = [...section("outputs")!.querySelectorAll("button.wf-row")].map((r) => r.textContent);
+    expect(rows.join(" ")).toContain("generated.html");
+    const groups = [...section("outputs")!.querySelectorAll(".wf-group")].map((g) => g.textContent);
+    expect(groups).toContain("Also in folders this conversation wrote to");
+  });
+
+  test("a failed folder listing leaves the rest of Outputs standing", async () => {
+    // A gateway too old to know the route, or a folder deleted since the turn:
+    // neither is a reason to replace the git half of the list with an error.
+    getWorkspaceOutputs.mockRejectedValue(new Error("no such route"));
+    await withTouchedSession();
+
+    const rows = [...section("outputs")!.querySelectorAll("button.wf-row")].map((r) => r.textContent);
+    expect(rows.join(" ")).toContain("raven.sql");
+    expect(rows.join(" ")).toContain("gateway.ts");
   });
 
   test("with nothing from the thread, the folder's changes still say where they came from", async () => {
