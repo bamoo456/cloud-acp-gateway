@@ -117,6 +117,11 @@
      not on body (whose only child is #root). Without this, a long thread grows
      #root past the viewport and pushes the composer off-screen. */
   #root { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  /* sidebar + chat + files row, stacked above the terminal panel (if open) —
+     #root's own column direction is what docks the terminal at the bottom
+     full-width, so the row-vs-column (mobile stack vs desktop side-by-side)
+     behavior for sidebar/chat/files lives here instead, one level down. */
+  .app-row { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
   /* the header/main/composer column; sits right of the desktop sidebar */
   .content { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
   /* S4 edge accent: a thin identity-coloured rail down the chat column's left edge
@@ -504,7 +509,7 @@
 
   /* ---- desktop: history panel is a persistent left column (not an overlay) ---- */
   @media (min-width: 860px) {
-    #root { flex-direction: row; }
+    .app-row { flex-direction: row; }
     #scrim { display: none !important; }
     /* The clock button becomes the column's collapse toggle up here (below the
        breakpoint it opens the overlay sheet instead). */
@@ -923,13 +928,23 @@
   .lock-input:focus { border-color: var(--accent); }
   .lock-input.error { border-color: var(--err); }
   .lockscreen .btn.primary { width: 100%; }
-  /* full-screen shell (Terminal) — its own always-dark surface regardless of
-     the active theme, since that's what every terminal emulator looks like */
-  .term-overlay { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column;
-    background: #0b0f14; }
+  /* bottom-docked shell (Terminal), DevTools-style — its own always-dark
+     surface regardless of the active theme, since that's what every terminal
+     emulator looks like. A flex item under #root (a sibling of .app-row), not
+     an overlay: sidebar/chat/files stay visible above it. Height is inline
+     (dragged via .term-resize); available at every breakpoint, unlike the
+     sidebar/files width handles, which only apply once they're a column. */
+  .term-panel { position: relative; flex: 0 0 auto; width: 100%; display: flex; flex-direction: column;
+    background: #0b0f14; border-top: 1px solid #ffffff1a; z-index: 5; }
+  .term-resize { position: absolute; top: -3px; left: 0; right: 0; height: 7px; z-index: 2;
+    cursor: row-resize; touch-action: none; }
+  .term-resize:hover, .term-resize:focus-visible { background: var(--accent); opacity: .5; outline: none; }
+  /* Set on <body> for the length of a vertical drag — same reason as
+     body.resizing (avoids text selection + cursor flicker), separate class so
+     the two drag axes don't fight over which cursor to show. */
+  body.resizing-v { user-select: none; cursor: row-resize; }
   .term-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    padding: 10px 14px; padding-top: calc(10px + env(safe-area-inset-top));
-    border-bottom: 1px solid #ffffff1a; color: #eeede9; font-weight: 600; flex: none; }
+    padding: 10px 14px; border-bottom: 1px solid #ffffff1a; color: #eeede9; font-weight: 600; flex: none; }
   .term-view { flex: 1; min-height: 0; padding: 4px 8px; }
   .term-view .xterm { height: 100%; }
   /* folder picker sheet — reuses .amenu chrome */

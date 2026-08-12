@@ -308,9 +308,9 @@ export function FilePanel() {
       <div id="files-scrim" className={open ? "open" : ""} onClick={closeFiles} />
       <aside id="files" className={open ? "open" : ""} aria-hidden={!open}
         style={desktop ? { width, maxWidth: width } : undefined}>
-        {desktop && <ResizeHandle className="wf-resize" label="Resize the files panel" edge="left"
-          width={width} min={MIN_PANEL_WIDTH} max={MAX_PANEL_WIDTH} clamp={clampPanelWidth}
-          onWidth={setWidth} onCommit={savePanelWidth} />}
+        {desktop && <ResizeHandle className="wf-resize" label="Resize the files panel" edge="left" axis="x"
+          size={width} min={MIN_PANEL_WIDTH} max={MAX_PANEL_WIDTH} clamp={clampPanelWidth}
+          onSize={setWidth} onCommit={savePanelWidth} />}
         <div className="wf-head">
           {target && (
             <button className="icon-btn" title="Back to file list" onClick={clearFilePreview}><IconBack /></button>

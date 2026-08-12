@@ -1,4 +1,4 @@
-import { useEffect, useState, lazy, Suspense } from "react";
+import { useEffect, useState } from "react";
 import { useStore } from "./store/store.ts";
 import { getRunning, getInboxPending } from "./lib/api.ts";
 import { TopBar } from "./components/TopBar.tsx";
@@ -9,13 +9,22 @@ import { Composer } from "./components/Composer.tsx";
 import { FolderPicker } from "./components/FolderPicker.tsx";
 import { LockScreen } from "./components/LockScreen.tsx";
 import { LoginTerminal } from "./components/LoginTerminal.tsx";
+// Static on purpose. Code-splitting this component — via React.lazy() or via a
+// plain dynamic import() into state — makes it throw "Invalid hook call" on
+// mount in this project's Vite build. Verified: it reproduces with a one-hook
+// stub in place of the real component (so it is not xterm, ResizeHandle, or
+// anything else here), it survives removing StrictMode, and the emitted chunk
+// imports React from the main chunk rather than bundling its own copy. Whatever
+// the cause, code splitting is broken here, so don't reintroduce it without
+// re-testing in a browser — the type checker and the jsdom suite both pass
+// either way.
+//
+// Cost of going static: xterm (~86 kB gzipped) lands in the main bundle even
+// when ACPG_TERMINAL is off, and the jsdom tests log a harmless
+// "HTMLCanvasElement.getContext not implemented" warning (xterm degrades
+// gracefully; no test fails).
+import { Terminal } from "./components/Terminal.tsx";
 import type { AgentRef } from "./types.ts";
-
-// Lazy: xterm needs real DOM measurement APIs jsdom doesn't provide, so a
-// static import would drag it into every test that imports App.tsx. This also
-// keeps it out of the main bundle for the (default) common case where the
-// gateway never turns ACPG_TERMINAL on.
-const Terminal = lazy(() => import("./components/Terminal.tsx").then((m) => ({ default: m.Terminal })));
 
 export function App() {
   const bootstrap = useStore((s) => s.bootstrap);
@@ -74,24 +83,26 @@ export function App() {
   }, [ensureConnected]);
   return (
     <>
-      <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)} />
-      <div className="content">
-        <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} onOpenLogin={(a) => setLoginAgent(a)} onOpenTerminal={() => setTerminalOpen(true)} />
-        <main id="main"><Thread session={sess} agentReady={agentReady} loading={joining} /></main>
-        <Composer />
+      <div className="app-row">
+        <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)} />
+        <div className="content">
+          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} onOpenLogin={(a) => setLoginAgent(a)} onOpenTerminal={() => setTerminalOpen(true)} />
+          <main id="main"><Thread session={sess} agentReady={agentReady} loading={joining} /></main>
+          <Composer />
+        </div>
+        {/* Right of the chat column on desktop, an overlay on mobile. Always
+            mounted: it holds the fetched change list across open/close so
+            reopening it is instant rather than a fresh `git status`. */}
+        <FilePanel />
       </div>
-      {/* Right of the chat column on desktop, an overlay on mobile. Always
-          mounted: it holds the fetched change list across open/close so
-          reopening it is instant rather than a fresh `git status`. */}
-      <FilePanel />
       {picker && <FolderPicker onClose={() => setPicker(false)} />}
       {loginAgent && <LoginTerminal agent={loginAgent} onClose={() => setLoginAgent(null)} />}
       {/* loginAgent carries the full AgentRef so LoginTerminal can key device-auth on kind */}
-      {terminalOpen && (
-        <Suspense fallback={null}>
-          <Terminal cwd={cwd} onClose={() => setTerminalOpen(false)} />
-        </Suspense>
-      )}
+      {/* A sibling of .app-row, not inside it — docks full-width below the
+          sidebar/chat/files row (like DevTools), so it needs to be a direct
+          #root flex child to stack under that row instead of becoming a 4th
+          column inside it. */}
+      {terminalOpen && <Terminal cwd={cwd} onClose={() => setTerminalOpen(false)} />}
       {locked && <LockScreen />}
     </>
   );

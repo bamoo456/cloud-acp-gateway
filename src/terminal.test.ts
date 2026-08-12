@@ -60,8 +60,10 @@ test("handleTerminal ignores an unknown /terminal/* path", () => {
 // only wraps the /terminal/* block when ACPG_TERMINAL=on) — handleTerminal
 // itself has no allowlist to unit-test against, unlike login.ts's knownAgents.
 // So this exercises the real HTTP surface via handleRequest, same as
-// gateway.e2e.test.ts's startHttpServer helper. The test suite never sets
-// ACPG_TERMINAL, so this asserts the documented default: off.
+// gateway.e2e.test.ts's startHttpServer helper. The npm `test` script pins
+// ACPG_TERMINAL=off, alongside the other ambient config it neutralizes — the
+// gateway reads a developer's .env at import, and one that legitimately turns
+// the terminal on must not silently turn this gating test into a no-op.
 const authHeader = (user: string, pass: string) =>
   "Basic " + Buffer.from(`${user}:${pass}`, "utf8").toString("base64");
 
@@ -79,8 +81,9 @@ function startHttpServer(): Promise<{ authed: (p: string) => Promise<Response>; 
   });
 }
 
-test("with ACPG_TERMINAL unset, /terminal/* 404s through the real gateway", async () => {
-  assert.equal(process.env.ACPG_TERMINAL, undefined, "test env must not set ACPG_TERMINAL — this asserts the off-by-default gate");
+test("without ACPG_TERMINAL=on, /terminal/* 404s through the real gateway", async () => {
+  assert.notEqual((process.env.ACPG_TERMINAL ?? "").toLowerCase(), "on",
+    "ACPG_TERMINAL must not be 'on' here — otherwise this stops testing the gate");
   const { authed, close } = await startHttpServer();
   try {
     const r = await authed("/terminal/status");
