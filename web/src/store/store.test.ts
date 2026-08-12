@@ -2215,6 +2215,29 @@ describe("store notification routing", () => {
     expect(st.historyNonce).toBe(nonceBefore + 1);
   });
 
+  test("deleting a non-active conversation by id leaves the open thread alone", async () => {
+    setPrefs({ recentSessions: [
+      { agentName: "claude", cwd: "/old", sessionId: "home-session", title: "Keeper", lastActiveAt: "2026-07-20T02:00:00.000Z" },
+      { agentName: "claude", cwd: "/other", sessionId: "other-session", title: "Doomed", lastActiveAt: "2026-07-20T01:00:00.000Z" },
+    ] });
+    const { useStore } = await bootstrapClaude();
+    let seen = "";
+    setHistoryFetch(async (url, init) => {
+      seen = `${init?.method} ${url}`;
+      return { ok: true, status: 200, json: async () => ({ ok: true, deleted: true }) };
+    });
+
+    await useStore.getState().deleteSession("other-session");
+
+    expect(seen).toContain("DELETE ");
+    expect(seen).toContain("/history/session?session=other-session");
+    const st = useStore.getState();
+    // The sidebar row is gone, but the conversation on screen is untouched.
+    expect(st.activeId).toBe("home-session");
+    expect(st.sessions["home-session"]).toBeDefined();
+    expect(st.recentSessions.map((r) => r.sessionId)).toEqual(["home-session"]);
+  });
+
   test("a refused delete (running turn) leaves the conversation alone", async () => {
     setPrefs({ recentSessions: [
       { agentName: "claude", cwd: "/old", sessionId: "home-session", title: "Busy", lastActiveAt: "2026-07-20T01:00:00.000Z" },

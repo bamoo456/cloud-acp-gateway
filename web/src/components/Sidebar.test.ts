@@ -1135,6 +1135,83 @@ describe("Sidebar recent conversations", () => {
     expect(container.querySelector('[data-tab="recent"]')?.getAttribute("aria-selected")).toBe("true");
   });
 
+  test("a conversation row's trash asks for confirmation before deleting", async () => {
+    const deleteSession = vi.fn(async () => {});
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ deleteSession } as any);
+    await clickConversationsTab();
+
+    const del = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-del");
+    expect(del).not.toBeNull();
+    await act(async () => { del!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(container.textContent).toContain("can't be undone");
+
+    // Cancel closes without deleting.
+    const cancel = [...container.querySelectorAll<HTMLButtonElement>(".sess-confirm .btn")]
+      .find((b) => b.textContent === "Cancel")!;
+    await act(async () => { cancel.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(container.querySelector(".sess-confirm")).toBeNull();
+
+    // Confirming deletes the ROW's conversation, by id.
+    await act(async () => { del!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const danger = container.querySelector<HTMLButtonElement>(".sess-confirm .btn.danger")!;
+    await act(async () => { danger.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(deleteSession).toHaveBeenCalledWith("s-recent");
+    expect(container.querySelector(".sess-confirm")).toBeNull();
+  });
+
+  test("a running conversation's trash is disabled", async () => {
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => {
+      useStore.setState({
+        runningTasks: [{ agentName: "claude", sessionId: "s-recent", state: "active", cwd: "/repo" }],
+      } as any);
+    });
+    await clickConversationsTab();
+    const del = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-del");
+    expect(del).not.toBeNull();
+    expect(del!.disabled).toBe(true);
+  });
+
+  test("Running rows offer no delete affordance", async () => {
+    await seedRecentSessions(sixteenRecents());
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => {
+      useStore.setState({
+        runningTasks: [{ agentName: "claude", sessionId: "run-a", state: "active", cwd: "/repo", title: "Running task" }],
+      } as any);
+    });
+    const running = container.querySelector(".running-section");
+    expect(running).not.toBeNull();
+    expect(running!.querySelector(".sess-del")).toBeNull();
+    // …while ordinary Recent rows next to it do have one.
+    expect(container.querySelector(".recent-section:not(.running-section) .sess-del")).not.toBeNull();
+  });
+
+  test("right-clicking a row offers Delete conversation in a menu", async () => {
+    const deleteSession = vi.fn(async () => {});
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ deleteSession } as any);
+    await clickConversationsTab();
+
+    const rowBtn = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-item")!;
+    await act(async () => { rowBtn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+
+    const menuRow = container.querySelector<HTMLButtonElement>(".wf-menu .wf-menu-row.danger");
+    expect(menuRow?.textContent).toContain("Delete conversation");
+    await act(async () => { menuRow!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    // The menu hands over to the same confirm card; nothing is deleted yet.
+    expect(container.querySelector(".wf-menu")).toBeNull();
+    expect(container.textContent).toContain("can't be undone");
+    expect(deleteSession).not.toHaveBeenCalled();
+  });
+
   test("the desktop column collapses and expands via sidebarOpen", async () => {
     await renderSidebar();
     const { useStore } = await import("../store/store.ts");

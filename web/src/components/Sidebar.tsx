@@ -7,11 +7,12 @@ import { AgentMark } from "./AgentPill.tsx";
 import { SearchResults } from "./SearchResults.tsx";
 import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
+import { useRowMenu } from "./FileMenu.tsx";
 import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, WorkingDots } from "../lib/icons.tsx";
+import { IconFolder, IconChevron, IconTrash, WorkingDots } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
 
@@ -53,6 +54,67 @@ function discoverable(agent: AgentRef) {
 }
 function sessionTitle(id: string, title?: string | null) {
   return title && title !== "Untitled" ? title : id.slice(0, 8);
+}
+// What identifies a row's conversation to DELETE /history/session (the id is
+// enough — the gateway resolves the owning provider itself), plus what the
+// confirm card should call it.
+type DeleteTarget = { sessionId: string; agentName: string; title: string };
+// One list row: the session button and its delete affordance as SIBLINGS — a
+// <button> cannot legally nest another. A component rather than a render
+// helper because useRowMenu is a hook. Rows with no `del` (Running, Current)
+// render without the affordance or the menu gestures.
+function SessionRow({ className, onOpen, del, running, onAskDelete, onMenu, children }: {
+  className: string; onOpen: () => void;
+  del?: DeleteTarget; running?: boolean;
+  onAskDelete: (t: DeleteTarget) => void;
+  onMenu: (t: DeleteTarget, x: number, y: number) => void;
+  children: React.ReactNode;
+}) {
+  const menu = useRowMenu((x, y) => { if (del && !running) onMenu(del, x, y); });
+  return (
+    <div className="sess-row">
+      <button className={className} onClick={onOpen} {...(del ? menu : {})}>{children}</button>
+      {del && (
+        <button className="sess-del" title="Delete conversation" aria-label="Delete conversation"
+          disabled={running} onClick={() => onAskDelete(del)}><IconTrash /></button>
+      )}
+    </div>
+  );
+}
+// The row's right-click / long-press menu: FileMenu's sheet-or-dropdown
+// pattern with a single destructive action.
+const MENU_W = 214;
+const MENU_H = 120;
+const SHEET_QUERY = "(max-width: 640px)"; // matches .wf-menu's own sheet breakpoint
+function SessionRowMenu({ target, onDelete, onClose }: {
+  target: DeleteTarget & { x: number; y: number };
+  onDelete: () => void; onClose: () => void;
+}) {
+  // Read once, on open: the menu lives for a few seconds and a device does not
+  // cross the breakpoint inside them.
+  const [sheet] = useState(() => !!window.matchMedia?.(SHEET_QUERY).matches);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  // Inline positioning only in the dropdown case: as a sheet the stylesheet
+  // owns the geometry, and a left/top here would override it.
+  const style = sheet ? undefined : {
+    left: Math.max(8, Math.min(target.x, window.innerWidth - MENU_W - 8)),
+    top: Math.max(8, Math.min(target.y, window.innerHeight - MENU_H - 8)),
+  };
+  return (
+    <>
+      <div className="wf-menu-scrim" onPointerDown={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
+      <div className={"wf-menu" + (sheet ? " sheet" : "")} style={style} role="menu" aria-label={target.title}>
+        <div className="wf-menu-head"><div className="nm">{target.title}</div></div>
+        <button className="wf-menu-row danger" role="menuitem" onClick={onDelete}>
+          <IconTrash /><span>Delete conversation</span>
+        </button>
+      </div>
+    </>
+  );
 }
 export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClose: () => void; onOpenPicker: () => void }) {
   const s = useStore();
@@ -261,16 +323,27 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // title filter), replacing the tab strip with the results list; clearing the
   // box hands back whichever tab was active.
   const searchOpen = q.trim().length > 0;
+  // Delete is two-step everywhere: the trash (or menu row) only nominates a
+  // target; the fixed confirm card is what actually calls the store.
+  const [confirmDel, setConfirmDel] = useState<DeleteTarget | null>(null);
+  const [rowMenu, setRowMenu] = useState<(DeleteTarget & { x: number; y: number }) | null>(null);
+  const rowActions = {
+    onAskDelete: setConfirmDel,
+    onMenu: (t: DeleteTarget, x: number, y: number) => setRowMenu({ ...t, x, y }),
+  };
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
     const active = !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
     return (
-      <button className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "")} key={variant + ":" + it.agentName + ":" + it.sessionId}
-        onClick={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}>
+      <SessionRow key={variant + ":" + it.agentName + ":" + it.sessionId}
+        className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "")}
+        onOpen={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}
+        del={{ sessionId: it.sessionId, agentName: it.agentName, title: it.title || it.sessionId.slice(0, 8) }}
+        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="name">{it.title || it.sessionId.slice(0, 8)}</span>
         <span className="when">{it.updatedAt ? timeAgo(it.updatedAt) : ""}</span>
-      </button>
+      </SessionRow>
     );
   };
   // coolingAt set → the task finished within the grace window: a muted "recently
@@ -308,8 +381,11 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     const title = (historyTitleById.has(histKey) ? historyTitleById.get(histKey) : it.title)
       || it.sessionId.slice(0, 8);
     return (
-      <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"recent:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
-        onClick={() => { void s.openRecentSession(it); onClose(); }}>
+      <SessionRow key={"recent:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
+        className={"sess-item recent with-folder" + (active ? " active" : "")}
+        onOpen={() => { void s.openRecentSession(it); onClose(); }}
+        del={{ sessionId: it.sessionId, agentName: it.agentName, title }}
+        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -317,14 +393,17 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
           <span className="folder-name">{basename(it.cwd)}</span>
         </span>
         <span className="when">{it.lastActiveAt ? timeAgo(it.lastActiveAt) : ""}</span>
-      </button>
+      </SessionRow>
     );
   };
   const renderDiscoveredItem = (it: TaggedDiscoveredHistory) => {
     const active = s.cwd === it.cwd && s.agentName === it.agentName && !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
     return (
-      <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"discovered:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
-        onClick={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}>
+      <SessionRow key={"discovered:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
+        className={"sess-item recent with-folder" + (active ? " active" : "")}
+        onOpen={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}
+        del={{ sessionId: it.sessionId, agentName: it.agentName, title: it.title || it.sessionId.slice(0, 8) }}
+        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -332,7 +411,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
           <span className="folder-name">{basename(it.cwd)}</span>
         </span>
         <span className="when">{it.updatedAt ? timeAgo(it.updatedAt) : ""}</span>
-      </button>
+      </SessionRow>
     );
   };
   const renderCurrentItem = (it: typeof currentItems[number]) => {
@@ -461,6 +540,27 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
                 </div>
               </div>
             )}
+          </>
+        )}
+        {rowMenu && (
+          <SessionRowMenu target={rowMenu} onClose={() => setRowMenu(null)}
+            onDelete={() => { setConfirmDel(rowMenu); setRowMenu(null); }} />
+        )}
+        {confirmDel && (
+          <>
+            <div className="sess-confirm-scrim" onPointerDown={() => setConfirmDel(null)} />
+            <div className="sess-confirm" role="dialog" aria-label="Delete conversation">
+              <div className="delete-title">{confirmDel.title}</div>
+              <div className="amenu-note">
+                Permanently deletes this conversation's transcript from the agent's own history.
+                It can't be undone, and it won't be resumable from your terminal afterwards either.
+              </div>
+              <div className="actions">
+                <button className="btn" onClick={() => setConfirmDel(null)}>Cancel</button>
+                <button className="btn danger"
+                  onClick={() => { void s.deleteSession(confirmDel.sessionId); setConfirmDel(null); }}>Delete</button>
+              </div>
+            </div>
           </>
         )}
       </div>
