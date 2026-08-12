@@ -904,6 +904,35 @@ test("running() surfaces the first prompt's text as the task title", async () =>
   await close();
 });
 
+test("a rename relabels the running task, and only for sessions the channel knows", async () => {
+  const { port, running, renameSession, close } = await makeTestServer();
+  const a = sse(port);
+  const conn = await a.conn;
+
+  await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S", prompt: [{ type: "text", text: "Fix the bug in products" }] } });
+
+  // The label is captured from the first prompt and never revisited, so a rename
+  // has to reach in — /running is what the sidebar's Running section draws from
+  // while a conversation is working, and that is the one row it renders without
+  // consulting the listings the rename actually wrote to.
+  renameSession("S", "My renamed chat");
+  assert.equal(running()[0]?.title, "My renamed chat");
+
+  // A rename for a conversation this channel has never seen must not park a label
+  // in its map: the fan-out hits every agent, and most of them don't hold the
+  // session at all.
+  renameSession("never-seen", "Nobody's chat");
+  assert.deepEqual(running().map((t) => t.sessionId), ["S"]);
+
+  // Clearing a rename with nothing derivable behind it drops the label rather than
+  // keeping a name the user just deleted; the next prompt re-seeds one.
+  renameSession("S", "");
+  assert.equal(running()[0]?.title, undefined);
+
+  a.close();
+  await close();
+});
+
 test("a reused permission request id is answerable again (gate resets per request)", async () => {
   const { port, agent, close } = await makeTestServer();
   const a = sse(port);
@@ -1213,6 +1242,17 @@ test("/history/rename writes the sidecar AND retitles every recency row for the 
     assert.deepEqual(titles(), { [sid]: "My renamed chat" }, "the listing's source of truth");
     assert.deepEqual(await recentTitles(), ["My renamed chat", "My renamed chat"],
       "no row is left rehydrating the old name onto the next device that loads");
+
+    // A client bumps a conversation's recency on every frame of a running turn,
+    // and re-derives its title from the transcript whenever its in-memory session
+    // carries none (a deep-link join, an agent restart, a second device). That
+    // derived title arrives as a seed, and a seed may not undo a rename — this
+    // write path is what kept bringing the old name back mid-turn.
+    const touched = await authedPost(
+      `/prefs/recent-session?agent=claude&cwd=${enc(cwd)}&session=${sid}&title=${enc("the first prompt it ever saw")}&at=2026-07-20T02:00:00.000Z&seed=1`);
+    assert.equal(touched.status, 200);
+    assert.deepEqual(await recentTitles(), ["My renamed chat", "My renamed chat"],
+      "a derived title POSTed mid-turn must not undo the rename");
 
     // Clearing the rename hands the conversation back to its derived title — and
     // the rows have to follow, or they keep serving a name the user just deleted.

@@ -14,6 +14,7 @@ export interface ResolvedTask {
 
 export interface RunningTaskContext {
   recentSessions: RecentSession[];
+  historyTitles: Record<string, string>;
   agentName: string;
   sessions: Record<string, Session>;
   cwd: string;
@@ -70,9 +71,14 @@ export function resolveRunningTask(task: RunningTask, ctx: RunningTaskContext): 
   const sameAgent = task.agentName === ctx.agentName;
   const local = sameAgent ? ctx.sessions[task.sessionId] : undefined;
   return {
-    // Recents/live title win (they reflect any rename); the gateway-reported first
-    // prompt is the fallback for tasks this device never opened (e.g. cross-device).
-    title: rec?.title ?? local?.title ?? task.title ?? null,
+    // Freshest first. The gateway's listings are where a rename lands, so they
+    // outrank both a recents row (a snapshot of what the conversation was called
+    // when it was last touched) and the gateway's own task label (the text of the
+    // first prompt, captured once). Without that overlay a working conversation
+    // reverts to its old name for the length of the turn: the Running section is
+    // the only place its row is drawn, and it is the one row the sidebar renders
+    // without consulting the listings.
+    title: ctx.historyTitles[task.agentName + "\n" + task.sessionId] ?? rec?.title ?? local?.title ?? task.title ?? null,
     cwd: task.cwd ?? rec?.cwd ?? (sameAgent ? ctx.cwd : undefined),
   };
 }

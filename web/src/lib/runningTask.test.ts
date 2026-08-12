@@ -4,7 +4,7 @@ import type { RunningTask } from "./api.ts";
 import type { Session } from "../types.ts";
 
 function ctx(over: Partial<RunningTaskContext> = {}): RunningTaskContext {
-  return { recentSessions: [], agentName: "claude", sessions: {}, cwd: "/here", ...over };
+  return { recentSessions: [], historyTitles: {}, agentName: "claude", sessions: {}, cwd: "/here", ...over };
 }
 const session = (title: string): Session => ({ title } as Session);
 const rec = (over: Partial<RunningTaskContext["recentSessions"][number]>) => ({
@@ -41,6 +41,27 @@ describe("resolveRunningTask", () => {
     // to a bare session id and read as duplicates.
     expect(resolveRunningTask({ ...task, title: "First prompt text" }, ctx()).title).toBe("First prompt text");
     expect(resolveRunningTask(task, ctx()).title).toBeNull();
+  });
+
+  test("the gateway's listing title outranks every staler source", () => {
+    // A rename lands in the gateway's titles sidecar, which its listings read back.
+    // Everything else here is a snapshot taken before it: the recents row is what
+    // the conversation was called when last touched, the live session holds the
+    // title it was opened with, and task.title is the text of the first prompt,
+    // captured once and never revisited. The Running section is the ONLY place a
+    // working conversation's row is drawn, so if this doesn't win the rename
+    // visibly reverts for the length of the turn.
+    const r = resolveRunningTask({ ...task, title: "First prompt text" }, ctx({
+      historyTitles: { "claude\ns": "Renamed" },
+      recentSessions: [rec({ title: "Old snapshot" })],
+      sessions: { s: session("Older still") },
+    }));
+    expect(r.title).toBe("Renamed");
+  });
+
+  test("an overlay for another agent's session of the same id is not borrowed", () => {
+    const r = resolveRunningTask(task, ctx({ historyTitles: { "codex\ns": "Codex's" } }));
+    expect(r.title).toBeNull();
   });
 
   test("does not read a same-id local session belonging to another agent", () => {
