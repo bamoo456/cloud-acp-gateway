@@ -76,6 +76,30 @@ describe("FileIndex git corpus", () => {
   });
 });
 
+describe("FileIndex git corpus (edge cases)", () => {
+  test("a merge conflict does not multi-list the conflicted file", async () => {
+    const { dir, run } = makeRepo(["f.txt"]);
+    run("checkout", "-q", "-b", "side");
+    fs.writeFileSync(path.join(dir, "f.txt"), "side\n");
+    run("commit", "-qam", "side");
+    run("checkout", "-q", "main");
+    fs.writeFileSync(path.join(dir, "f.txt"), "main\n");
+    run("commit", "-qam", "main");
+    try { run("merge", "side"); } catch { /* the conflict is the fixture */ }
+    const c = await new FileIndex().corpusGit(dir);
+    assert.deepEqual(c.paths.filter((p) => p === "f.txt"), ["f.txt"],
+      "ls-files lists one entry per conflict stage; the corpus must not");
+  });
+
+  test("clear() drops cached roots", async () => {
+    const { dir } = makeRepo(["a.ts"]);
+    const idx = new FileIndex();
+    const c1 = await idx.corpusGit(dir);
+    idx.clear();
+    assert.notEqual(await idx.corpusGit(dir), c1, "post-clear query rebuilds");
+  });
+});
+
 describe("FileIndex walk corpus", () => {
   test("lists files under a non-git folder, honoring the ignore list and depth", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpg-fw-"));
@@ -88,6 +112,19 @@ describe("FileIndex walk corpus", () => {
     assert.deepEqual(c.paths, ["src/a.ts"]);
     assert.equal(c.fromGit, false);
     assert.equal(c.pending, false);
+  });
+
+  test("a tree deeper than the walk bound is flagged limited", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpg-fw-"));
+    // 9 nested levels: the file at the bottom sits past WALK_MAX_DEPTH (8).
+    const deep = path.join(dir, ..."abcdefghi".split(""));
+    fs.mkdirSync(deep, { recursive: true });
+    fs.writeFileSync(path.join(deep, "buried.ts"), "x");
+    fs.writeFileSync(path.join(dir, "top.ts"), "x");
+    const c = await new FileIndex().corpusWalk(dir);
+    assert.equal(c.limited, true);
+    assert.ok(c.paths.includes("top.ts"));
+    assert.ok(!c.paths.some((p) => p.endsWith("buried.ts")));
   });
 
   test("caches within the TTL and re-walks after it", async () => {
