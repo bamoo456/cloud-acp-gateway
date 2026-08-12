@@ -120,7 +120,8 @@ function Results({ cwd, query, onOpenFile, onMenu }: {
   onMenu: (e: { abs: string; name: string }, x: number, y: number) => void;
 }) {
   const [files, setFiles] = useState<FoundFile[] | null>(null);
-  const [meta, setMeta] = useState<{ truncated: boolean; fromGit: boolean }>({ truncated: false, fromGit: false });
+  const [meta, setMeta] = useState<{ truncated: boolean; fromGit: boolean; total: number; pending?: boolean; limited?: boolean }>(
+    { truncated: false, fromGit: false, total: 0 });
   const [err, setErr] = useState<string | null>(null);
   // Only the newest query may paint: typing "app" fires three requests and the
   // first one must not land on top of the last.
@@ -128,12 +129,14 @@ function Results({ cwd, query, onOpenFile, onMenu }: {
 
   useEffect(() => {
     const mine = ++gen.current;
-    // Debounced, because this walks a repo's file list on every keystroke.
+    // The server answers from an in-memory index now, not a git run per
+    // keystroke, so the debounce is only here to coalesce a fast typist's
+    // keystrokes into one request rather than to hide a slow call.
     const t = window.setTimeout(() => {
       findWorkspaceFiles(cwd, query)
         .then((r) => { if (mine === gen.current) { setFiles(r.files); setMeta(r); setErr(null); } })
         .catch((e: Error) => { if (mine === gen.current) { setFiles([]); setErr(e.message || "Couldn't search this folder."); } });
-    }, 160);
+    }, 60);
     return () => { window.clearTimeout(t); gen.current++; };
   }, [cwd, query]);
 
@@ -157,7 +160,20 @@ function Results({ cwd, query, onOpenFile, onMenu }: {
             onMenu={(x, y) => onMenu(found, x, y)} />
         );
       })}
-      {meta.truncated && <div className="wf-note">Showing the first {files.length} matches.</div>}
+      {meta.pending && (
+        <div className="wf-note">Files that aren't in git yet are missing from this search — Refresh to include them.</div>
+      )}
+      {meta.limited && (
+        <div className="wf-note">
+          {meta.fromGit
+            ? "This project is too large to index whole, so part of it wasn't searched."
+            : "This folder isn't a git checkout, so only part of it could be indexed."}
+        </div>
+      )}
+      {/* Ranked before it was cut, so this really is the best slice and not the
+          first one git happened to list — worth saying on a query that matches
+          tens of thousands of files. */}
+      {meta.truncated && <div className="wf-note">Showing the best {files.length} of {meta.total} matches.</div>}
     </>
   );
 }
