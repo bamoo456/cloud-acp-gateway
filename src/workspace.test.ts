@@ -5,9 +5,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  changes, fileDiff, preview, repoRoot,
+  changes, fileDiff, preview, repoRoot, outputFolder,
   parseStatusZ, parseNumstatZ, looksBinary, inlineImageType, sortTreeEntries,
-  MAX_TEXT_BYTES, type TreeEntry,
+  MAX_TEXT_BYTES, MAX_OUTPUT_FILES, type TreeEntry,
 } from "./workspace.ts";
 
 // A throwaway checkout per suite run. `changes`/`fileDiff` shell out to real
@@ -259,5 +259,72 @@ describe("sortTreeEntries", () => {
     const input = [entry("b"), entry("a")];
     sortTreeEntries(input);
     assert.deepEqual(input.map((e) => e.name), ["b", "a"]);
+  });
+});
+
+describe("outputFolder", () => {
+  // A scratch folder the way an agent actually leaves one: one file it wrote
+  // with a tool call, several it generated through a shell, and a subfolder of
+  // assets. None of it is in a checkout, so this walk is the only thing that can
+  // see any of it.
+  function makeScratch(): string {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-out-")));
+    fs.mkdirSync(path.join(dir, "png"));
+    fs.writeFileSync(path.join(dir, "mockup.html"), "<html></html>");
+    fs.writeFileSync(path.join(dir, "generated.html"), "<html>heredoc</html>");
+    fs.writeFileSync(path.join(dir, "png", "shot.png"), "x");
+    return dir;
+  }
+
+  test("lists the folder whole, one level down, newest first", async () => {
+    const dir = makeScratch();
+    // mtimes are set explicitly: the panel is opened right after a turn, so the
+    // order has to be "what was just written", and a fixture written in one tick
+    // cannot demonstrate that on its own.
+    const t = Date.now();
+    fs.utimesSync(path.join(dir, "mockup.html"), t / 1000 - 60, t / 1000 - 60);
+    fs.utimesSync(path.join(dir, "png", "shot.png"), t / 1000 - 30, t / 1000 - 30);
+    fs.utimesSync(path.join(dir, "generated.html"), t / 1000, t / 1000);
+    const out = await outputFolder(dir);
+    assert.deepEqual(out?.files.map((f) => f.path), ["generated.html", "png/shot.png", "mockup.html"]);
+    assert.equal(out?.truncated, false);
+    assert.equal(out?.files[0].abs, path.join(dir, "generated.html"));
+    assert.equal(out?.files[0].size, "<html>heredoc</html>".length);
+  });
+
+  test("says so when a level below the walk was left out", async () => {
+    const dir = makeScratch();
+    fs.mkdirSync(path.join(dir, "png", "thumbs"));
+    fs.writeFileSync(path.join(dir, "png", "thumbs", "deep.png"), "x");
+    const out = await outputFolder(dir);
+    // The file two levels down is absent, which is the cap doing its job — but a
+    // listing that quietly stopped would read as "that's all there is".
+    assert.ok(!out?.files.some((f) => f.path.includes("thumbs")));
+    assert.equal(out?.truncated, true);
+  });
+
+  test("caps the list and says so", async () => {
+    const dir = makeScratch();
+    for (let i = 0; i < MAX_OUTPUT_FILES + 10; i++) {
+      fs.writeFileSync(path.join(dir, "frame-" + i + ".png"), "x");
+    }
+    const out = await outputFolder(dir);
+    assert.equal(out?.files.length, MAX_OUTPUT_FILES);
+    assert.equal(out?.truncated, true);
+  });
+
+  test("never follows a symlinked directory", async () => {
+    const dir = makeScratch();
+    // A loop here would hang the request, and the interesting case is generated
+    // files rather than wherever a link happens to point.
+    fs.symlinkSync(dir, path.join(dir, "loop"));
+    const out = await outputFolder(dir);
+    assert.ok(!out?.files.some((f) => f.path.startsWith("loop/")));
+  });
+
+  test("a file or a missing path yields null, not an empty folder", async () => {
+    const dir = makeScratch();
+    assert.equal(await outputFolder(path.join(dir, "mockup.html")), null);
+    assert.equal(await outputFolder(path.join(dir, "nope")), null);
   });
 });

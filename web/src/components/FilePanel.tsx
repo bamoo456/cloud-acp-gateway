@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store/store.ts";
 import type { FilePreviewTarget, PreviewMode } from "../store/store.ts";
 import {
-  getWorkspaceChanges, getFileDiff, getFilePreview, rawFileUrl,
+  getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, rawFileUrl,
   type ChangeStatus, type ChangesResult, type FileDiffResult, type FilePreviewResult,
+  type OutputFolder,
 } from "../lib/api.ts";
 import { touchedFiles } from "../lib/touchedFiles.ts";
-import { mergePanelFiles, type PanelFile } from "../lib/panelFiles.ts";
+import { mergePanelFiles, outputFolderCandidates, type PanelFile } from "../lib/panelFiles.ts";
 import { fileKind, extensionOf } from "../lib/fileKind.ts";
 import { highlightBlock, highlightLanguageFor } from "../lib/highlight.ts";
 import { downloadFile } from "../lib/download.ts";
@@ -43,6 +44,10 @@ import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDow
 //             in any tool call, so for those turns — and for every codex and
 //             opencode conversation, whose transcripts record no paths at all —
 //             this is the ONLY source that shows the work.
+//   Folders — everything in a folder the conversation wrote into that git cannot
+//             describe. Also merged into Outputs, and also not optional: a shell
+//             writing OUTSIDE the checkout defeats both sources above at once,
+//             which is what generating a mockup into /tmp does every time.
 //
 // PROJECT is the folder itself, browsable. A separate mode rather than a fourth
 // section: every list in Session is built FROM the conversation, so none of them
@@ -182,6 +187,7 @@ export function FilePanel() {
   const [folded, setFolded] = useState<Partial<Record<Section, boolean>>>({});
   const toggle = (name: Section) => setFolded((f) => ({ ...f, [name]: !f[name] }));
   const [changes, setChanges] = useState<ChangesResult | null>(null);
+  const [folders, setFolders] = useState<OutputFolder[]>([]);
   // The panel is closed and reopened rather than unmounted, so the mode
   // survives — someone browsing a folder and glancing away should come back to
   // where they were. A new folder is a different project, so that resets.
@@ -195,6 +201,11 @@ export function FilePanel() {
   // refresh must not let a slow earlier `git status` land on top of a later one.
   const gen = useRef(0);
 
+  // What the conversation wrote, as the thread itself recorded it. Also the
+  // source of the folder candidates below, so it is computed before the loader
+  // that needs them rather than alongside the lists it feeds.
+  const touched = touchedFiles(session?.items ?? []);
+
   function loadChanges() {
     const mine = ++gen.current;
     setLoading(true);
@@ -202,6 +213,12 @@ export function FilePanel() {
       .then((r) => { if (mine === gen.current) { setChanges(r); setErr(null); } })
       .catch((e: Error) => { if (mine === gen.current) { setChanges(null); setErr(e.message || "Couldn't read this folder's changes."); } })
       .finally(() => { if (mine === gen.current) setLoading(false); });
+    // A separate request with a separate failure: a gateway too old to know the
+    // route, or a folder that has since been deleted, must leave the git half of
+    // Outputs alone rather than replacing the whole list with an error.
+    getWorkspaceOutputs(cwd, outputFolderCandidates(touched.filter((f) => f.role === "output")))
+      .then((r) => { if (mine === gen.current) setFolders(r); })
+      .catch(() => { if (mine === gen.current) setFolders([]); });
   }
 
   // Fetched whenever the panel is open, because Outputs now depends on it: git
@@ -258,17 +275,28 @@ export function FilePanel() {
     if (!desktop) closeFiles();
   }
 
-  const touched = touchedFiles(session?.items ?? []);
   const context = touched.filter((f) => f.role === "context");
-  const outputs = mergePanelFiles(touched.filter((f) => f.role === "output"), changes?.files ?? []);
-  // The two halves of Outputs, labelled rather than blended. `git status` runs
-  // at the repo root, so its half carries work from other conversations, from
-  // your own editor, from a reverted branch — and a row that reads as "this
+  const outputs = mergePanelFiles(
+    touched.filter((f) => f.role === "output"),
+    changes?.files ?? [],
+    folders.flatMap((f) => f.files),
+  );
+  // The three parts of Outputs, labelled rather than blended, because they are
+  // three different strengths of claim. `git status` runs at the repo root, so
+  // its part carries work from other conversations, from your own editor, from a
+  // reverted branch; a folder listing is weaker still — it only says the file
+  // sits next to something this conversation wrote. A row that reads as "this
   // conversation produced it" when nothing here wrote it is the panel lying.
-  // mergePanelFiles already emits the thread's files first, so this only names
-  // the boundary that was there.
+  // mergePanelFiles already emits them in this order, so this only names the
+  // boundaries that were there.
   const written = outputs.filter((f) => f.fromThread);
-  const alsoChanged = outputs.filter((f) => !f.fromThread);
+  const alsoChanged = outputs.filter((f) => !f.fromThread && !f.inWrittenFolder);
+  const alsoInFolder = outputs.filter((f) => f.inWrittenFolder);
+  // Only the thread's own heading is conditional. "Outputs" already reads as
+  // "what this conversation produced", so naming that group when it is the only
+  // one says nothing — while the weaker two must label themselves even alone,
+  // or a row nothing here wrote inherits the section title's claim.
+  const labelWritten = written.length > 0 && (alsoChanged.length > 0 || alsoInFolder.length > 0);
   // The agent's current plan, if it has published one. The last plan update wins
   // — ACP re-sends the whole list every time an entry changes.
   const plan = [...(session?.items ?? [])].reverse().find((it) => it.kind === "plan");
@@ -341,9 +369,7 @@ export function FilePanel() {
               {!err && outputs.length === 0 && !loading && (
                 <div className="wf-empty">Nothing written in this conversation yet.</div>
               )}
-              {/* Only worth a heading when there is something to tell it apart
-                  from; on its own, the section title already says it. */}
-              {written.length > 0 && alsoChanged.length > 0 && (
+              {labelWritten && (
                 <div className="wf-group">Written in this conversation</div>
               )}
               {written.map((f) => (
@@ -359,6 +385,20 @@ export function FilePanel() {
                   onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
                   onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
               ))}
+              {alsoInFolder.length > 0 && (
+                <div className="wf-group">Also in folders this conversation wrote to</div>
+              )}
+              {/* Opens on the file, not on a diff: these rows exist precisely
+                  because git cannot describe them, so there is no diff to show
+                  and the viewer would only bounce itself to the contents view. */}
+              {alsoInFolder.map((f) => (
+                <PanelRow key={f.abs} file={f} cwd={cwd}
+                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })}
+                  onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
+              ))}
+              {folders.some((f) => f.truncated) && (
+                <div className="wf-note">Those folders hold more than this list shows.</div>
+              )}
               {/* Without git the list is only what tool calls named — no
                   shell-written file, nothing another conversation changed. Say
                   so rather than letting a short list read as a quiet turn. */}
