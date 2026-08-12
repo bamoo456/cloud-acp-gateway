@@ -3829,10 +3829,11 @@ function renderConsole(
 }
 
 const consoleEnabled = (process.env.ACPG_CONSOLE ?? "on").toLowerCase() !== "off";
-// Opt-in, general-shell PTY terminal (like ttyd) — see terminal.ts. OFF by
-// default and only reachable when the console is: unlike the scoped /login/*
-// PTY, this hands anyone holding the gateway credential a real host shell.
-const terminalEnabled = consoleEnabled && (process.env.ACPG_TERMINAL ?? "off").toLowerCase() === "on";
+// General-shell PTY terminal (like ttyd) — see terminal.ts. On by default, and
+// only ever reachable when the console is. Set ACPG_TERMINAL=off to withhold
+// it: unlike the scoped /login/* PTY, this hands anyone holding the gateway
+// credential a real shell on the host.
+const terminalEnabled = consoleEnabled && (process.env.ACPG_TERMINAL ?? "on").toLowerCase() !== "off";
 // Ephemeral token the console auto-authenticates with; rotated each start so the
 // long-lived ACPG_AUTH_TOKEN is never embedded in served HTML.
 const consoleToken = crypto.randomBytes(18).toString("base64url");
@@ -4083,8 +4084,9 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   if (consoleEnabled && pathname.startsWith("/login/")) {
     if (handleLogin(req, res, pathname, cfg.maxPayload)) return;
   }
-  // Opt-in general shell (ACPG_TERMINAL=on) — real host shell access, so it
-  // gets its own flag on top of the Basic-auth gate above. See terminal.ts.
+  // General shell — real host shell access, so it gets its own flag
+  // (ACPG_TERMINAL=off withholds it) on top of the Basic-auth gate above.
+  // See terminal.ts.
   if (terminalEnabled && pathname.startsWith("/terminal/")) {
     if (handleTerminal(req, res, pathname, cfg.maxPayload)) return;
   }

@@ -26,8 +26,8 @@ export type NativeClientConfig = {
   agents: NativeAgentConfig[];
   features: {
     nativeConsole: true;
-    // Whether the opt-in general-shell terminal (ACPG_TERMINAL) is reachable
-    // on this gateway — see terminal.ts. Off on most gateways.
+    // Whether the general-shell terminal (ACPG_TERMINAL) is reachable on this
+    // gateway — see terminal.ts. On unless the deployment withheld it.
     terminal: boolean;
   };
 };
