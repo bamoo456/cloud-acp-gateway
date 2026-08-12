@@ -16,8 +16,9 @@ available on the same host or inside the same container as the gateway.
 - SSE downstream + POST upstream ACP transport for remote clients.
 - Multiple named agents via `agents.json`, with runtime agent switching.
 - File preview side panel: the agent's plan, every file the work touched (tool
-  calls merged with `git status`), what it only read, per-file diffs, and image
-  previews.
+  calls merged with `git status` and with the folders it wrote into outside the
+  checkout, so shell-generated files aren't invisible), what it only read,
+  per-file diffs, and image previews.
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
 - History browsing for supported agents: Claude Code, Codex, and opencode.
@@ -147,7 +148,7 @@ sections. The default.
 | Section | What it shows |
 |---|---|
 | Progress | The agent's current plan, when it has published one. |
-| Outputs | Every file this turn's work touched: what the conversation wrote (from its own tool calls) merged with what `git status` reports dirty in the checkout. One row per file. A file git tracks leads with git's status letter (`A`/`M`/`D`/`R`/`U`) and its `+`/`−` line counts; anything git has nothing to say about — a file written to `/tmp`, written and reverted, or already committed — leads with its type icon instead. |
+| Outputs | Every file this turn's work touched, from three sources merged into one list: what the conversation wrote (its own tool calls), what `git status` reports dirty in the checkout, and — for work no tool call named and no checkout contains — everything in the folders the conversation wrote into outside the repo. One row per file, grouped by how strong the claim is, because only the first group means "this conversation produced it". A file git tracks leads with git's status letter (`A`/`M`/`D`/`R`/`U`) and its `+`/`−` line counts; anything git has nothing to say about — a file written to `/tmp`, written and reverted, or already committed — leads with its type icon instead. |
 | Context | Files the conversation only consulted — read, searched, fetched. |
 
 **Project** — the folder itself, as a lazily-expanded tree with a pinned **Find
@@ -223,22 +224,37 @@ types with their real content type and **everything else** as an opaque
 or `.svg` can never run as script in the console's origin — plus a 25 MB cap per
 raw response and caps on diff and text size.
 
-The two sources are merged because neither subsumes the other, and having to
-know which one knew about a given file was the panel's own bookkeeping leaking
-into the UI. Tool calls see files that git cannot — written and reverted,
-already committed, or outside any checkout. `git status` sees files no tool call
-names: **anything an agent writes through a shell** (`Bash`, and every codex or
-opencode edit) reports a command, never a path. `git status` runs when the panel
-opens and again when a turn finishes; without a git checkout the list falls back
-to tool calls alone and says so.
+The sources are merged because none subsumes the others, and having to know which
+one knew about a given file was the panel's own bookkeeping leaking into the UI.
+Tool calls see files that git cannot — written and reverted, already committed, or
+outside any checkout. `git status` sees files no tool call names: **anything an
+agent writes through a shell** (`Bash`, and every codex or opencode edit) reports
+a command, never a path.
 
-It reads through six authenticated endpoints (`/workspace/changes`,
+Those two still miss the same file whenever a shell writes *outside* the
+checkout, which is what "generate the mockup in `/tmp`" does every time — the
+tool call names nothing and git has never heard of the folder. So the third
+source lists such a folder whole. Which folders qualify is decided on the
+gateway, and deliberately narrowly: the parent of a file this conversation
+actually wrote, outside the checkout (inside it, `git status` is the authority),
+one level deep, and never a folder everything on the host lives in — `/tmp`
+itself is a boundary, not an output folder, or one `Write /tmp/report.html` would
+turn Outputs into a listing of your temp directory. There is no mtime cutoff and
+no parsing of shell commands for path-looking strings: a cutoff means nothing for
+a conversation replayed from a transcript, which is exactly when you reopen a
+session to find a file again.
+
+`git status` and the folder listings run when the panel opens and again when a
+turn finishes; without a git checkout the list falls back to the other two
+sources and says so.
+
+It reads through seven authenticated endpoints (`/workspace/changes`,
 `/workspace/diff`, `/workspace/file`, `/workspace/raw`, `/workspace/tree`,
-`/workspace/find`) — see *What the preview can reach* above for their boundary,
-which is deliberately the same one for all six: a tree that listed more than the
-viewer can open would offer rows it then refuses. Listing changed files requires
-`git` on the gateway host; a folder that isn't a checkout simply shows nothing to
-compare.
+`/workspace/find`, `/workspace/outputs`) — see *What the preview can reach* above
+for their boundary, which is deliberately the same one for all seven: a tree that
+listed more than the viewer can open would offer rows it then refuses. Listing
+changed files requires `git` on the gateway host; a folder that isn't a checkout
+simply shows nothing to compare.
 
 Find files asks `git` for the file list, so it never walks into `node_modules`
 and never misses a dotfile — the same rule that dims a row in the tree decides

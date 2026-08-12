@@ -118,6 +118,11 @@ export interface SessionUpdate {
   status?: string;
   locations?: Array<{ path?: string; uri?: string }>;
   toolContent?: ToolContentItem[]; // see note: ACP field is `content`; reducer reads up.content
+  // Claude's own tool arguments and tool name, passed through by the ACP adapter.
+  // Read only to recover the `kind`/`locations` the adapter didn't map — see
+  // lib/toolInput.ts for why that recovery exists and what it refuses to guess.
+  rawInput?: unknown;
+  _meta?: { claudeCode?: { toolName?: string } };
   entries?: PlanEntry[];
   availableCommands?: SlashCommand[];
   currentModeId?: string;
