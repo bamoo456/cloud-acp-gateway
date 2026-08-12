@@ -155,7 +155,13 @@ export class FileIndex {
       st.indexStat = null;
       return;
     }
-    st.tracked = r.tokens;
+    // A merge conflict lists a path once per index stage. ls-files emits index
+    // order, so the duplicates are adjacent and one pass drops them — no Set,
+    // and no dependency on a git new enough for --deduplicate.
+    const toks = r.tokens;
+    const tracked: string[] = [];
+    for (let i = 0; i < toks.length; i++) if (i === 0 || toks[i] !== toks[i - 1]) tracked.push(toks[i]);
+    st.tracked = tracked;
     st.trackedLimited = r.truncated;
     st.indexStat = statNow;
     st.corpus = null;
@@ -205,6 +211,9 @@ async function walkFiles(absRoot: string): Promise<{ paths: string[]; limited: b
       if (e.isSymbolicLink()) continue;
       if (e.isDirectory()) {
         if (WALK_IGNORE_DIRS.has(e.name)) continue;
+        // Conservative: a skipped directory flags the walk as limited even if
+        // it happens to be empty — for an advisory "part of this folder wasn't
+        // indexed" note, a rare false positive beats a false negative.
         if (depth >= WALK_MAX_DEPTH) { limited = true; continue; }
         await walk(path.join(cur, e.name), childRel, depth + 1);
       } else if (e.isFile()) {
