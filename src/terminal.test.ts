@@ -56,14 +56,16 @@ test("handleTerminal ignores an unknown /terminal/* path", () => {
   assert.equal(handled, false);
 });
 
-// Gating lives one layer up, in gateway.ts's route dispatch (terminalEnabled
-// only wraps the /terminal/* block when ACPG_TERMINAL=on) — handleTerminal
-// itself has no allowlist to unit-test against, unlike login.ts's knownAgents.
-// So this exercises the real HTTP surface via handleRequest, same as
-// gateway.e2e.test.ts's startHttpServer helper. The npm `test` script pins
-// ACPG_TERMINAL=off, alongside the other ambient config it neutralizes — the
-// gateway reads a developer's .env at import, and one that legitimately turns
-// the terminal on must not silently turn this gating test into a no-op.
+// The kill switch lives one layer up, in gateway.ts's route dispatch
+// (terminalEnabled stops wrapping the /terminal/* block at ACPG_TERMINAL=off)
+// — handleTerminal itself has no allowlist to unit-test against, unlike
+// login.ts's knownAgents. So this exercises the real HTTP surface via
+// handleRequest, same as gateway.e2e.test.ts's startHttpServer helper.
+//
+// The npm `test` script pins ACPG_TERMINAL=off, alongside the other ambient
+// config it neutralizes. That pin is what this test asserts against: the
+// terminal is ON by default, so an unset value would leave the route mounted
+// and this test would fail rather than silently pass.
 const authHeader = (user: string, pass: string) =>
   "Basic " + Buffer.from(`${user}:${pass}`, "utf8").toString("base64");
 
@@ -81,9 +83,9 @@ function startHttpServer(): Promise<{ authed: (p: string) => Promise<Response>; 
   });
 }
 
-test("without ACPG_TERMINAL=on, /terminal/* 404s through the real gateway", async () => {
-  assert.notEqual((process.env.ACPG_TERMINAL ?? "").toLowerCase(), "on",
-    "ACPG_TERMINAL must not be 'on' here — otherwise this stops testing the gate");
+test("with ACPG_TERMINAL=off, /terminal/* 404s through the real gateway", async () => {
+  assert.equal((process.env.ACPG_TERMINAL ?? "").toLowerCase(), "off",
+    "the test script must pin ACPG_TERMINAL=off — the terminal is on by default, so there is no kill switch to test otherwise");
   const { authed, close } = await startHttpServer();
   try {
     const r = await authed("/terminal/status");

@@ -17,8 +17,9 @@ export interface AppConfig {
   defaultAgent: string;
   agents: AgentRef[];
   fsRoot: string;
-  // Whether the gateway's opt-in general-shell terminal (ACPG_TERMINAL) is
-  // reachable — absent/false on gateways that don't have it turned on.
+  // Whether the gateway's general-shell terminal (ACPG_TERMINAL) is reachable.
+  // Absent on gateways too old to report it, which is why the client treats
+  // "missing" as false rather than assuming the current default.
   terminalEnabled?: boolean;
 }
 

@@ -1,10 +1,10 @@
 // -------------------------------------------------------------- terminal ----
-// An opt-in, PTY-backed general shell (like ttyd), reusing the same node-pty +
+// A PTY-backed general shell (like ttyd), reusing the same node-pty +
 // SSE/POST plumbing as login.ts's scoped agent-login terminal. Unlike
 // login.ts, this runs the user's actual shell with no command allowlist — it
 // is real host shell access to anyone holding the gateway credential, so the
-// caller (gateway.ts) must keep it behind ACPG_TERMINAL (default off) in
-// addition to the existing Basic-auth gate.
+// caller (gateway.ts) keeps it behind its own ACPG_TERMINAL switch (on by
+// default, `off` to withhold) in addition to the Basic-auth gate.
 //
 // One global session for the whole gateway (not per-agent, not multi-tab) —
 // a shell isn't scoped to an agent's identity the way a login flow is. Unlike
