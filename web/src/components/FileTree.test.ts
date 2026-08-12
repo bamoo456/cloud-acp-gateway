@@ -7,9 +7,9 @@ const flush = async () => {
   await Promise.resolve();
   await Promise.resolve();
 };
-// The find box debounces at 160ms; these tests wait it out rather than faking
+// The find box debounces at 60ms; these tests wait it out rather than faking
 // timers, because the debounce is the behaviour under test in one of them.
-const settle = () => new Promise((r) => setTimeout(r, 220));
+const settle = () => new Promise((r) => setTimeout(r, 120));
 
 const ROOT: TreeEntry[] = [
   { name: "src", abs: "/repo/src", dir: true },
@@ -40,7 +40,7 @@ describe("FileTree", () => {
         entries: dir === "/repo/src" ? SRC : ROOT,
       }));
     findWorkspaceFiles = vi.fn().mockResolvedValue({
-      files: [{ path: "src/app.ts", abs: "/repo/src/app.ts" }], truncated: false, fromGit: true,
+      files: [{ path: "src/app.ts", abs: "/repo/src/app.ts" }], truncated: false, fromGit: true, total: 1,
     });
     vi.doMock("../lib/api.ts", () => ({ getWorkspaceTree, findWorkspaceFiles }));
   });
@@ -164,8 +164,28 @@ describe("FileTree", () => {
     expect(onMenu).toHaveBeenCalledWith({ abs: "/repo/src/app.ts", name: "app.ts" }, 5, 6);
   });
 
+  test("says when results are the best slice of a much larger match set", async () => {
+    findWorkspaceFiles.mockResolvedValue({
+      files: [{ path: "src/app.ts", abs: "/repo/src/app.ts" }],
+      truncated: true, fromGit: true, total: 4321,
+    });
+    await render();
+    const input = container.querySelector<HTMLInputElement>(".wf-find input")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "app");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await settle(); });
+
+    // "the first 200" was a lie even when the count was right: the server now
+    // ranks the whole corpus before cutting, and the note has to say so or a
+    // 32k-match query looks like the box gave up.
+    expect(container.textContent).toContain("Showing the best 1 of 4321 matches");
+  });
+
   test("an empty result says why an ignored file wasn't found", async () => {
-    findWorkspaceFiles.mockResolvedValue({ files: [], truncated: false, fromGit: true });
+    findWorkspaceFiles.mockResolvedValue({ files: [], truncated: false, fromGit: true, total: 0 });
     await render();
     const input = container.querySelector<HTMLInputElement>(".wf-find input")!;
     await act(async () => {
