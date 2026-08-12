@@ -33,6 +33,14 @@ describe("global styles", () => {
     expect(styles).toMatch(/@media \(max-width: 640px\)[\s\S]*header \.conn\s*\{\s*display:\s*none;\s*\}/);
   });
 
+  test("desktop columns reset the mobile sheet max-height", () => {
+    // The mobile sheet rules cap #panel/#files with a 100dvh-based max-height;
+    // the desktop column overrides set height: 100% but inherit that cap, which
+    // leaves an overflow-hidden dead strip at the bottom of each column.
+    expect(styles).toMatch(/@media \(min-width: 860px\)[\s\S]*?#panel \{[^}]*max-height:\s*none/);
+    expect(styles).toMatch(/@media \(min-width: 1100px\)[\s\S]*?#files \{[^}]*max-height:\s*none/);
+  });
+
   test("button reset neutralizes native control appearance so icons center on iOS", () => {
     // iOS Safari renders native-appearance <button>s with internal content
     // insets and ignores grid/flex centering, which knocks the send arrow
