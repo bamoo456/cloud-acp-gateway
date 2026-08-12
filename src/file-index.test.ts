@@ -62,8 +62,14 @@ describe("FileIndex git corpus", () => {
     assert.ok(c.changed.has("kept.ts") && c.changed.has("new.ts"));
   });
 
-  test("noteStatus for an unknown root is a no-op, not a crash", () => {
-    new FileIndex().noteStatus("/nowhere", [{ path: "x", status: "untracked" }]);
+  test("a snapshot arriving before the first query is kept — the panel calls changes() before anyone searches", async () => {
+    const { dir } = makeRepo(["kept.ts"]);
+    const idx = new FileIndex();
+    idx.noteStatus(dir, [{ path: "new.ts", status: "untracked" }]);
+    const c = await idx.corpusGit(dir);
+    assert.equal(c.pending, false, "the pre-query snapshot must not be dropped");
+    assert.ok(c.paths.includes("new.ts"));
+    assert.ok(c.paths.includes("kept.ts"));
   });
 
   test("evicts the least-recently-used root beyond the cap", async () => {

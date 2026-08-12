@@ -78,12 +78,31 @@ export class FileIndex {
 
   clear(): void { this.gitRoots.clear(); this.walkRoots.clear(); }
 
+  // The one place a git root's state is created. Shared by corpusGit and
+  // noteStatus because the panel calls /workspace/changes BEFORE anyone types
+  // into the find box — an unknown root in noteStatus is the COMMON case, and
+  // dropping its snapshot would leave every repo's first search silently
+  // missing all untracked files until the next status run.
+  private gitRoot(root: string): GitRootState {
+    let st = this.gitRoots.get(root);
+    if (!st) {
+      st = {
+        tracked: [], trackedLimited: false, indexFile: path.join(root, ".git", "index"),
+        indexStat: null, status: null, corpus: null, building: null,
+        // Stamped at insert, not 0: evict() runs before the post-lookup touch,
+        // and a zero would make the just-inserted root the LRU minimum.
+        lastUsed: this.now(),
+      };
+      this.gitRoots.set(root, st);
+      this.evict(this.gitRoots);
+    }
+    return st;
+  }
+
   // The status half arrives from changes() — the one place that already parses
-  // `git status`. Unknown root: the panel ran status before anyone searched
-  // here, and building a corpus on spec for it would be wasted work; drop it.
+  // `git status`.
   noteStatus(root: string, entries: Array<{ path: string; status: string }>): void {
-    const st = this.gitRoots.get(root);
-    if (!st) return;
+    const st = this.gitRoot(root);
     const snap: StatusSnapshot = { untracked: [], deleted: new Set(), changed: new Set() };
     for (const e of entries) {
       snap.changed.add(e.path);
@@ -95,22 +114,11 @@ export class FileIndex {
   }
 
   async corpusGit(root: string): Promise<Corpus> {
-    let st = this.gitRoots.get(root);
-    if (!st) {
-      // Stamped as used on arrival, because eviction runs on the next line: a
-      // root carrying lastUsed 0 would be the least-recently-used entry in the
-      // map, so the cap would drop the very root this call came to build.
-      st = {
-        tracked: [], trackedLimited: false, indexFile: path.join(root, ".git", "index"),
-        indexStat: null, status: null, corpus: null, building: null, lastUsed: this.now(),
-      };
-      this.gitRoots.set(root, st);
-      this.evict(this.gitRoots);
-    }
+    const st = this.gitRoot(root);
     st.lastUsed = this.now();
     if (this.trackedStale(st)) {
       // One rebuild at a time per root: concurrent keystrokes share the flight.
-      st.building ??= this.rebuildTracked(root, st).finally(() => { st!.building = null; });
+      st.building ??= this.rebuildTracked(root, st).finally(() => { st.building = null; });
       await st.building;
     }
     if (!st.corpus) {
