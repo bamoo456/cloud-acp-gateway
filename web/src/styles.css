@@ -923,6 +923,15 @@
   .lock-input:focus { border-color: var(--accent); }
   .lock-input.error { border-color: var(--err); }
   .lockscreen .btn.primary { width: 100%; }
+  /* full-screen shell (Terminal) — its own always-dark surface regardless of
+     the active theme, since that's what every terminal emulator looks like */
+  .term-overlay { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column;
+    background: #0b0f14; }
+  .term-head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 10px 14px; padding-top: calc(10px + env(safe-area-inset-top));
+    border-bottom: 1px solid #ffffff1a; color: #eeede9; font-weight: 600; flex: none; }
+  .term-view { flex: 1; min-height: 0; padding: 4px 8px; }
+  .term-view .xterm { height: 100%; }
   /* folder picker sheet — reuses .amenu chrome */
   .amenu.fp { width: 330px; max-height: min(70vh, 560px); overflow-y: auto; }
   /* desktop: a centered modal (the trigger is the sidebar folder bar, not the menu button) */

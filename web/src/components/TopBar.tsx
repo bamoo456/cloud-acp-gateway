@@ -8,7 +8,7 @@ import { basename } from "../lib/format.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { IconClock, IconPlus, IconDots, IconFolder, IconChevronDown, IconPanel } from "../lib/icons.tsx";
 import type { AgentRef } from "../types.ts";
-export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void; onPicker: () => void; onOpenLogin?: (agent: AgentRef) => void }) {
+export function TopBar({ onPanel, onPicker, onOpenLogin, onOpenTerminal }: { onPanel: () => void; onPicker: () => void; onOpenLogin?: (agent: AgentRef) => void; onOpenTerminal?: () => void }) {
   const s = useStore();
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const connClass = s.conn === "connected" ? "conn on" : s.conn === "offline" ? "conn off" : "conn";
@@ -38,7 +38,7 @@ export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void
           toggle's own. */}
       <button className={"icon-btn files-btn" + (s.filesOpen ? " on" : "")} title="Files and changes"
         aria-pressed={s.filesOpen} onClick={s.toggleFiles}><IconPanel /></button>
-      <ActionMenu open={menu} onClose={() => setMenu(false)} />
+      <ActionMenu open={menu} onClose={() => setMenu(false)} onOpenTerminal={onOpenTerminal} />
     </header>
   );
 }

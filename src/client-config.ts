@@ -26,6 +26,9 @@ export type NativeClientConfig = {
   agents: NativeAgentConfig[];
   features: {
     nativeConsole: true;
+    // Whether the opt-in general-shell terminal (ACPG_TERMINAL) is reachable
+    // on this gateway — see terminal.ts. Off on most gateways.
+    terminal: boolean;
   };
 };
 
@@ -36,6 +39,7 @@ export function buildClientConfig(input: {
   defaultAgent: string;
   fsRoot: string;
   agents: Array<NativeAgentConfig & { cmd?: string }>;
+  terminalEnabled: boolean;
 }): NativeClientConfig {
   return {
     schemaVersion: CLIENT_CONFIG_SCHEMA_VERSION,
@@ -47,6 +51,6 @@ export function buildClientConfig(input: {
     defaultAgent: input.defaultAgent,
     fsRoot: input.fsRoot,
     agents: input.agents.map(({ cmd: _cmd, ...agent }) => agent),
-    features: { nativeConsole: true },
+    features: { nativeConsole: true, terminal: input.terminalEnabled },
   };
 }
