@@ -117,6 +117,49 @@ describe("TopBar pending permissions", () => {
     expect(newSession).not.toHaveBeenCalled();
   });
 
+  test("the clock button toggles the sidebar column on desktop", async () => {
+    // Desktop: matchMedia matches, so the store boots with sidebarOpen: true
+    // and the click goes to toggleSidebar, not the mobile sheet.
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true }));
+    const { TopBar } = await import("./TopBar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ conn: "connected" });
+    const onPanel = vi.fn();
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(TopBar, { onPanel, onPicker: vi.fn() }));
+    });
+
+    const clock = container.querySelector<HTMLButtonElement>("button.sessions-btn");
+    expect(clock?.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => { clock?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(useStore.getState().sidebarOpen).toBe(false);
+    expect(clock?.getAttribute("aria-pressed")).toBe("false");
+    expect(onPanel).not.toHaveBeenCalled();
+  });
+
+  test("the clock button opens the overlay sheet below the breakpoint", async () => {
+    // jsdom has no matchMedia → not desktop: the click must reach onPanel and
+    // leave the column state alone.
+    const { TopBar } = await import("./TopBar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ conn: "connected" });
+    const onPanel = vi.fn();
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(TopBar, { onPanel, onPicker: vi.fn() }));
+    });
+
+    const clock = container.querySelector<HTMLButtonElement>("button.sessions-btn");
+    await act(async () => { clock?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(onPanel).toHaveBeenCalledTimes(1);
+    expect(useStore.getState().sidebarOpen).toBe(false);
+  });
+
   test("folder chip shows the cwd basename and opens the picker", async () => {
     const { TopBar } = await import("./TopBar.tsx");
     const { useStore } = await import("../store/store.ts");

@@ -8,6 +8,7 @@ import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts
 import { isLockEnabled, hydrateLock } from "../lib/lock.ts";
 import { basename } from "../lib/format.ts";
 import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
+import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
 } from "./reducers.ts";
@@ -110,6 +111,11 @@ interface State {
   // it are scattered through the thread (a tool card's file path), not just the
   // header button.
   filesOpen: boolean;
+  // ---- sessions sidebar (desktop column only) ----
+  // Whether the left column is expanded at >=860px. Separate from App's mobile
+  // `panel` overlay state: collapsing/expanding the column must not re-run the
+  // sheet's open-reset (tab, filters), only hide the column.
+  sidebarOpen: boolean;
   // Which file the preview pane is showing; null means the file list.
   filePreview: FilePreviewTarget | null;
   // Files staged on the composer, waiting to be sent with the next message —
@@ -138,7 +144,9 @@ interface State {
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
   renameSession: (title: string) => void;
-  deleteSession: () => Promise<void>;
+  // No argument = the active conversation (the ActionMenu path); an id = any
+  // conversation, active or not (the sidebar's per-row delete).
+  deleteSession: (sessionId?: string) => Promise<void>;
   answerPermission: (reqId: number | string, optionId: string) => void;
   answerElicitation: (reqId: number | string, response: ElicitationResponse, summary: string) => void;
   answerInboxItem: (agentName: string, reqId: string, optionId: string) => void;
@@ -151,6 +159,7 @@ interface State {
   refreshLockSettings: () => void;
   toggleFiles: () => void;
   closeFiles: () => void;
+  toggleSidebar: () => void;
   // Opens the panel *and* the file — the one entry point for "show me this
   // file", wherever the path was clicked.
   openFilePreview: (file: { abs: string; path?: string; mode?: PreviewMode }) => void;
@@ -955,6 +964,8 @@ export const useStore = create<State>((set, get) => {
     // column there, not an overlay sheet that would cover the chat) and
     // closed on a phone-width one.
     filesOpen: isDesktopPanelWidth(),
+    // Same shape for the left column, at its own (860px) breakpoint.
+    sidebarOpen: isDesktopSidebarWidth(),
     filePreview: null,
     attachedFiles: [],
 
@@ -1059,8 +1070,8 @@ export const useStore = create<State>((set, get) => {
     // Unlike rename, this is NOT optimistic: the gateway can refuse (a running
     // turn), and removing the conversation from the UI first would leave the
     // sidebar disagreeing with a transcript that's still on disk.
-    async deleteSession() {
-      const sid = get().activeId;
+    async deleteSession(sessionId) {
+      const sid = sessionId ?? get().activeId;
       if (!sid || sid.startsWith("pending-")) return;
       const { ok, running } = await apiDelete(sid);
       if (!ok) {
@@ -1071,9 +1082,14 @@ export const useStore = create<State>((set, get) => {
       set((st) => {
         const sessions = { ...st.sessions };
         delete sessions[sid];
-        // Nothing to activate — land on the empty state rather than picking an
-        // arbitrary neighbour. historyNonce re-pulls both sidebar lists.
-        return { sessions, activeId: null, recentSessions, historyNonce: st.historyNonce + 1, tip: "" };
+        // When the deleted conversation was the open one there's nothing to
+        // activate — land on the empty state rather than picking an arbitrary
+        // neighbour. Deleting any other row leaves the open thread alone.
+        // historyNonce re-pulls both sidebar lists.
+        return {
+          sessions, activeId: st.activeId === sid ? null : st.activeId,
+          recentSessions, historyNonce: st.historyNonce + 1, tip: "",
+        };
       });
     },
     answerPermission(reqId, optionId) {
@@ -1541,6 +1557,12 @@ export const useStore = create<State>((set, get) => {
 
     closeFiles() {
       set({ filesOpen: false });
+    },
+
+    // Collapsing keeps the sidebar's own state (tab, query, filters) — it goes
+    // through this flag, never through the mobile sheet's `open` prop.
+    toggleSidebar() {
+      set((st) => ({ sidebarOpen: !st.sidebarOpen }));
     },
 
     openFilePreview(file) {

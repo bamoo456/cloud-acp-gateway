@@ -120,13 +120,17 @@ test("text size menu scales chat text and persists", async ({ page }) => {
   expect(persistedAssistantSize).toBe(largeAssistantSize);
 });
 
-test("history panel is a persistent column on desktop, a toggle overlay on mobile", async ({ page }) => {
+test("history panel is a collapsible column on desktop, a toggle overlay on mobile", async ({ page }) => {
   await page.addInitScript(SEED_SSE(1));
-  // desktop: panel is always visible, the clock toggle is hidden
+  // desktop: panel is an expanded column, the clock button collapses it
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
   await expect(page.locator("#panel")).toBeVisible();
-  await expect(page.locator("button.sessions-btn")).toBeHidden();
+  await expect(page.locator("button.sessions-btn")).toBeVisible();
+  await page.click("button.sessions-btn");
+  await expect(page.locator("#panel")).toBeHidden();
+  await page.click("button.sessions-btn");
+  await expect(page.locator("#panel")).toBeVisible();
   // mobile: panel hidden until the clock toggle is tapped
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator("#panel")).toBeHidden();

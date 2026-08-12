@@ -401,6 +401,32 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .sess-item .when { font-size: 13px; color: var(--muted); flex: 0 0 auto; }
+  /* Row wrapper: the session button and its delete control are siblings (a
+     <button> can't nest another). The trash overlays the row's right edge and
+     is revealed on hover — or on focus, so it stays keyboard-reachable
+     (opacity, not display: a display:none control can never take focus). */
+  .sess-row { position: relative; }
+  .sess-del {
+    position: absolute; top: 50%; right: 8px; transform: translateY(-50%);
+    width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
+    color: var(--muted); background: var(--surface-2);
+    opacity: 0; pointer-events: none;
+  }
+  .sess-row:hover .sess-del, .sess-row:focus-within .sess-del { opacity: 1; pointer-events: auto; }
+  .sess-row:hover .sess-del:disabled, .sess-row:focus-within .sess-del:disabled { opacity: .45; cursor: default; }
+  .sess-del svg { width: 15px; height: 15px; }
+  .sess-del:hover:not(:disabled), .sess-del:focus-visible { color: var(--err); }
+  /* The delete confirm card — .amenu's delete view, detached from the menu. */
+  .sess-confirm-scrim { position: fixed; inset: 0; z-index: 40; background: #00000055; }
+  .sess-confirm {
+    position: fixed; z-index: 50; left: 50%; top: 28%; transform: translateX(-50%);
+    width: min(340px, calc(100vw - 32px)); background: var(--surface);
+    border: 1px solid var(--border-strong); border-radius: 14px; box-shadow: var(--shadow);
+    padding: 12px 0 14px; animation: pop .12s ease-out;
+  }
+  .sess-confirm .delete-title { padding: 0 14px 2px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sess-confirm .actions { display: flex; gap: 8px; padding: 10px 14px 0; }
+  .sess-confirm .actions .btn { flex: 1; }
   /* Per-row agent mark in the unified (cross-agent) list — a touch smaller than
      the AgentPill's, vertically centered against the title row. */
   .sess-item .mark { width: 16px; height: 16px; flex: 0 0 auto; align-self: center; }
@@ -480,12 +506,27 @@
   @media (min-width: 860px) {
     #root { flex-direction: row; }
     #scrim { display: none !important; }
-    .sessions-btn { display: none; }            /* the panel is always shown, no toggle needed */
+    /* The clock button becomes the column's collapse toggle up here (below the
+       breakpoint it opens the overlay sheet instead). */
     #panel {
-      position: static; display: flex !important; flex-direction: column; flex: 0 0 auto;
-      width: 284px; max-width: 284px; height: 100%; inset: auto;
+      position: relative; display: flex; flex-direction: column; flex: 0 0 auto;
+      width: 284px; max-width: 284px; height: 100%; max-height: none; inset: auto;
       border: none; border-right: 1px solid var(--border); border-radius: 0; box-shadow: none; animation: none;
     }
+    /* Last #panel rule on purpose: beats both the base display:none and .open,
+       so a stale mobile `open` class can't resurrect a collapsed column. */
+    #panel.collapsed { display: none; }
+    /* The sidebar's drag handle, .wf-resize mirrored to the column's right edge. */
+    .sb-resize {
+      display: block; position: absolute; top: 0; bottom: 0; right: -3px; width: 7px;
+      z-index: 2; cursor: col-resize; touch-action: none;
+    }
+    .sb-resize:hover, .sb-resize:focus-visible { background: var(--accent); opacity: .5; outline: none; }
+    /* Set on <body> for the length of a drag: without it the pointer selects
+       the chat text it passes over, and the cursor reverts to a caret the
+       moment it leaves the 7px strip. Up here (not in the 1100px block) because
+       the sidebar is draggable from 860px on. */
+    body.resizing { user-select: none; cursor: col-resize; }
     /* folder browser slides out from the left as the sidebar's next layer
        (wider than the 284px column so long folder names fit), dimming the rest */
     .fb-scrim { display: block; position: fixed; inset: 0; z-index: 60; background: #00000055; backdrop-filter: blur(2px); }
@@ -948,7 +989,7 @@
   #files.open { display: flex; animation: pop .14s ease-out; }
   #files-scrim { position: fixed; inset: 0; z-index: 20; display: none; }
   #files-scrim.open { display: block; }
-  .files-btn.on { color: var(--accent); background: var(--surface-2); }
+  .files-btn.on, .sessions-btn.on { color: var(--accent); background: var(--surface-2); }
 
   .wf-head {
     flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
@@ -1128,6 +1169,7 @@
   .wf-menu-row:hover { background: var(--surface-2); }
   .wf-menu-row svg { width: 17px; height: 17px; flex: 0 0 auto; color: var(--muted); }
   .wf-menu-row.accent, .wf-menu-row.accent svg { color: var(--accent); }
+  .wf-menu-row.danger, .wf-menu-row.danger svg { color: var(--err); }
   @media (max-width: 640px) {
     .wf-menu-scrim { background: #00000070; backdrop-filter: blur(2px); }
     .wf-menu.sheet {
@@ -1286,14 +1328,16 @@
 
   /* The drag handle sits ON the panel's left border rather than beside it, so
      resizing costs no layout width. Hidden below the breakpoint, where the
-     panel is a sheet and its width is not the reader's to choose. */
+     panel is a sheet and its width is not the reader's to choose. (.sb-resize,
+     the sidebar's twin, never needs a base rule: its React component only
+     renders in column mode.) */
   .wf-resize { display: none; }
 
   @media (min-width: 1100px) {
     #files-scrim { display: none !important; }
     #files {
       position: relative; flex: 0 0 auto; width: min(440px, 34vw); max-width: 440px;
-      height: 100%; inset: auto; margin: 0;
+      height: 100%; max-height: none; inset: auto; margin: 0;
       border: none; border-left: 1px solid var(--border); border-radius: 0;
       box-shadow: none; animation: none;
     }
@@ -1302,8 +1346,6 @@
       z-index: 2; cursor: col-resize; touch-action: none;
     }
     .wf-resize:hover, .wf-resize:focus-visible { background: var(--accent); opacity: .5; outline: none; }
-    /* Set on <body> for the length of a drag: without it the pointer selects
-       the chat text it passes over, and the cursor reverts to a caret the
-       moment it leaves the 7px strip. */
-    body.resizing { user-select: none; cursor: col-resize; }
+    /* body.resizing lives in the 860px block with the sidebar handle — the
+       earliest breakpoint at which anything is draggable. */
   }
