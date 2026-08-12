@@ -329,7 +329,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   return (
     <>
       <div id="scrim" className={open ? "open" : ""} onClick={onClose} />
-      <div id="panel" className={open ? "open" : ""}>
+      <div id="panel" className={(open ? "open" : "") + (s.sidebarOpen ? "" : " collapsed")}>
         <div className="folder-bar" title={s.cwd} onClick={() => { onOpenPicker(); onClose(); }}>
           <span className="fi"><IconFolder /></span>
           <span className="meta"><span className="lbl">Folder</span><span className="name">{basename(s.cwd)}</span></span>

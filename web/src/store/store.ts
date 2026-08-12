@@ -8,6 +8,7 @@ import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts
 import { isLockEnabled, hydrateLock } from "../lib/lock.ts";
 import { basename } from "../lib/format.ts";
 import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
+import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
 } from "./reducers.ts";
@@ -110,6 +111,11 @@ interface State {
   // it are scattered through the thread (a tool card's file path), not just the
   // header button.
   filesOpen: boolean;
+  // ---- sessions sidebar (desktop column only) ----
+  // Whether the left column is expanded at >=860px. Separate from App's mobile
+  // `panel` overlay state: collapsing/expanding the column must not re-run the
+  // sheet's open-reset (tab, filters), only hide the column.
+  sidebarOpen: boolean;
   // Which file the preview pane is showing; null means the file list.
   filePreview: FilePreviewTarget | null;
   // Files staged on the composer, waiting to be sent with the next message —
@@ -151,6 +157,7 @@ interface State {
   refreshLockSettings: () => void;
   toggleFiles: () => void;
   closeFiles: () => void;
+  toggleSidebar: () => void;
   // Opens the panel *and* the file — the one entry point for "show me this
   // file", wherever the path was clicked.
   openFilePreview: (file: { abs: string; path?: string; mode?: PreviewMode }) => void;
@@ -955,6 +962,8 @@ export const useStore = create<State>((set, get) => {
     // column there, not an overlay sheet that would cover the chat) and
     // closed on a phone-width one.
     filesOpen: isDesktopPanelWidth(),
+    // Same shape for the left column, at its own (860px) breakpoint.
+    sidebarOpen: isDesktopSidebarWidth(),
     filePreview: null,
     attachedFiles: [],
 
@@ -1541,6 +1550,12 @@ export const useStore = create<State>((set, get) => {
 
     closeFiles() {
       set({ filesOpen: false });
+    },
+
+    // Collapsing keeps the sidebar's own state (tab, query, filters) — it goes
+    // through this flag, never through the mobile sheet's `open` prop.
+    toggleSidebar() {
+      set((st) => ({ sidebarOpen: !st.sidebarOpen }));
     },
 
     openFilePreview(file) {
