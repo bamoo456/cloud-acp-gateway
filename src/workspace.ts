@@ -22,6 +22,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { git, gitStdin } from "./git-exec.ts";
+import { fileIndex } from "./file-index.ts";
+import { parseFindQuery, matchPath, TopK, compareRanked, type RankedFile } from "./fuzzy.ts";
 
 // The panel lists changed files; past a few hundred it stops being a list and
 // starts being a scroll. Truncate and say so rather than shipping thousands.
@@ -114,11 +116,14 @@ export interface FoundFile {
 
 export interface FindResult {
   files: FoundFile[];
-  truncated: boolean;
+  truncated: boolean;   // more matches existed than were returned
   // True when the walk was git's own file list, which already excludes ignored
   // files. Without it the client can't explain why a visible-but-ignored file
   // in the tree isn't a search hit.
   fromGit: boolean;
+  total: number;        // every match seen, including beyond the K kept
+  pending?: boolean;    // untracked half not indexed yet (first query in a repo)
+  limited?: boolean;    // the corpus itself was capped (walk depth/size, MAX_INDEX_PATHS)
 }
 
 export type PreviewKind = "text" | "image" | "binary";
@@ -276,6 +281,9 @@ export async function changes(cwd: string): Promise<ChangesResult> {
   }
 
   const parsed = parseStatusZ(status.stdout);
+  // The full parse, before the MAX_CHANGED_FILES cut: the payload is capped for
+  // display, but the search index wants every untracked path status found.
+  fileIndex.noteStatus(root, parsed);
   const truncated = parsed.length > MAX_CHANGED_FILES;
   const files = parsed.slice(0, MAX_CHANGED_FILES).map((f): ChangedFile => ({
     path: f.path,
@@ -404,15 +412,6 @@ export async function preview(abs: string, displayPath: string): Promise<FilePre
   return { ...base, kind: "text", text: body.toString("utf8"), truncated };
 }
 
-// Directories folded away in the fallback walk, when there is no git to ask.
-// Same list the composer's "@ file" picker uses: a build output or a dependency
-// tree buries every real source file under it.
-const FIND_IGNORE_DIRS = new Set([
-  "node_modules", "dist", "build", "out", "target", "vendor", "coverage", ".git",
-]);
-// Depth bound for that same fallback. git's own listing needs no such limit.
-const FIND_MAX_DEPTH = 8;
-
 // Sort a directory the way a file tree reads: folders first, then files, each
 // case-insensitively alphabetical. Exported for its own test — this is the
 // order the panel is judged on, and it has no other observable effect.
@@ -540,77 +539,51 @@ export async function outputFolder(abs: string): Promise<OutputFolder | null> {
   return { abs, files: found.map(({ mtime: _mtime, ...f }) => f), truncated };
 }
 
-// Filenames under `abs` matching `query` as a case-insensitive substring of the
-// root-relative path.
+// Filenames under `abs` matching `query`, best MAX_FIND_RESULTS of ALL matches.
 //
-// git supplies the file list when there is a repo: one call, it already knows
-// every tracked and untracked-but-not-ignored file, and it includes dotfiles —
-// which the tree shows, so a filter that skipped them would fail to find a
-// `.env` sitting in plain sight. It also means the box never walks into
-// node_modules, for the same reason the tree dims it.
+// The corpus comes from the per-root index (see file-index.ts): git's file list
+// for a checkout — which already excludes ignored files, includes dotfiles, and
+// never walks into node_modules — or a bounded filesystem walk without one.
+// Matching and ranking are fuzzy.ts's tiers; the cap is applied after ranking,
+// so a truncated result is the best K, not the alphabetically first K.
 export async function find(cwd: string, abs: string, query: string): Promise<FindResult> {
-  const q = query.trim().toLowerCase();
-  if (!q) return { files: [], truncated: false, fromGit: false };
+  const q = parseFindQuery(query);
+  if (!q) return { files: [], truncated: false, fromGit: false, total: 0 };
 
   const root = await repoRoot(cwd);
-  const rels = root ? await gitFileList(root, abs) : null;
-  const paths = rels ?? await walkFiles(abs);
-  const hits: FoundFile[] = [];
-  for (const rel of paths) {
-    if (!rel.toLowerCase().includes(q)) continue;
-    if (hits.length >= MAX_FIND_RESULTS) return { files: rank(hits, q), truncated: true, fromGit: !!rels };
-    hits.push({ path: rel, abs: path.join(abs, rel) });
-  }
-  return { files: rank(hits, q), truncated: false, fromGit: !!rels };
-}
+  // The corpus is rooted at the repo root, but the caller searches from `abs`
+  // (a conversation can run in a subdirectory). Constrain and re-base here, in
+  // memory — the old code asked git to scope the listing instead, which is why
+  // paths were always answered relative to the search root. Keep that contract.
+  //
+  // `abs` can also sit *outside* cwd's checkout: the route takes a path, and
+  // ACPG_PREVIEW_ROOTS lets it name a folder in another project entirely. That
+  // repo's index knows nothing about those paths, so they get the walk — which
+  // is what the old code did here too, by way of ls-files refusing the path.
+  const rel = root ? toPosix(path.relative(root, abs)) : "";
+  const indexRoot = root !== null && !rel.startsWith("..") && !path.isAbsolute(rel) ? root : null;
+  const corpus = indexRoot ? await fileIndex.corpusGit(indexRoot) : await fileIndex.corpusWalk(abs);
+  const prefix = indexRoot && rel ? rel + "/" : "";
 
-// A basename hit beats a mid-path hit, then the shallower path, then
-// alphabetical — so typing "panel" finds FilePanel.tsx before a file buried in
-// a folder called panels/.
-function rank(files: FoundFile[], q: string): FoundFile[] {
-  return files.sort((a, b) => {
-    const ab = a.path.slice(a.path.lastIndexOf("/") + 1).toLowerCase().includes(q) ? 0 : 1;
-    const bb = b.path.slice(b.path.lastIndexOf("/") + 1).toLowerCase().includes(q) ? 0 : 1;
-    return ab - bb || a.path.length - b.path.length || a.path.localeCompare(b.path);
-  });
-}
-
-// Every file git would show under `abs`, as paths relative to it. Null when git
-// can't answer, which sends find() to the filesystem walk instead.
-async function gitFileList(root: string, abs: string): Promise<string[] | null> {
-  const r = await git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", abs]);
-  if (r.code !== 0) return null;
-  const out: string[] = [];
-  for (const rel of r.stdout.split("\0")) {
-    if (!rel) continue;
-    // ls-files answers in repo-relative paths even when asked about a
-    // subdirectory, so re-base onto the folder actually being searched.
-    const under = path.relative(abs, path.resolve(root, rel));
-    if (under && !under.startsWith("..") && !path.isAbsolute(under)) out.push(toPosix(under));
+  const top = new TopK<RankedFile>(MAX_FIND_RESULTS, compareRanked);
+  for (let i = 0; i < corpus.paths.length; i++) {
+    if (prefix && !corpus.paths[i].startsWith(prefix)) continue;
+    const relLower = prefix ? corpus.lower[i].slice(prefix.length) : corpus.lower[i];
+    const m = matchPath(relLower, corpus.bases[i], q);
+    if (!m) continue;
+    top.push({
+      rel: prefix ? corpus.paths[i].slice(prefix.length) : corpus.paths[i],
+      tier: m.tier, score: m.score,
+      changed: corpus.changed.has(corpus.paths[i]),
+    });
   }
-  return out;
-}
 
-// No repo, or no git: walk it ourselves. Bounded in depth, folds away the
-// build/dependency directories by name (there is no .gitignore to consult), and
-// never follows a symlinked directory — a loop there would hang the request.
-async function walkFiles(abs: string): Promise<string[]> {
-  const out: string[] = [];
-  async function walk(cur: string, rel: string, depth: number): Promise<void> {
-    if (out.length >= MAX_FIND_RESULTS * 20) return;
-    let ents: fs.Dirent[];
-    try { ents = await fs.promises.readdir(cur, { withFileTypes: true }); } catch { return; }
-    for (const e of ents) {
-      const childRel = rel ? rel + "/" + e.name : e.name;
-      if (e.isSymbolicLink()) continue;
-      if (e.isDirectory()) {
-        if (FIND_IGNORE_DIRS.has(e.name) || depth >= FIND_MAX_DEPTH) continue;
-        await walk(path.join(cur, e.name), childRel, depth + 1);
-      } else if (e.isFile()) {
-        out.push(childRel);
-      }
-    }
-  }
-  await walk(abs, "", 0);
-  return out;
+  return {
+    files: top.items().map((r) => ({ path: r.rel, abs: path.join(abs, r.rel) })),
+    truncated: top.total > MAX_FIND_RESULTS,
+    fromGit: corpus.fromGit,
+    total: top.total,
+    ...(corpus.pending ? { pending: true } : {}),
+    ...(corpus.limited ? { limited: true } : {}),
+  };
 }
