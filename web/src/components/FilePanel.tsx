@@ -2,15 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store/store.ts";
 import type { FilePreviewTarget, PreviewMode } from "../store/store.ts";
 import {
-  getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, rawFileUrl,
+  getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, getHtmlRender, rawFileUrl,
   type ChangeStatus, type ChangesResult, type FileDiffResult, type FilePreviewResult,
-  type OutputFolder,
+  type HtmlRender, type OutputFolder,
 } from "../lib/api.ts";
 import { touchedFiles } from "../lib/touchedFiles.ts";
 import { mergePanelFiles, outputFolderCandidates, type PanelFile } from "../lib/panelFiles.ts";
 import { fileKind, extensionOf } from "../lib/fileKind.ts";
 import { highlightBlock, highlightLanguageFor } from "../lib/highlight.ts";
-import { downloadFile } from "../lib/download.ts";
+import { downloadFile, downloadText } from "../lib/download.ts";
 import { FileTree } from "./FileTree.tsx";
 import { FileMenu, useRowMenu, type FileMenuTarget } from "./FileMenu.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
@@ -467,6 +467,7 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   const [mode, setMode] = useState<PreviewMode>(target.mode);
   const [diff, setDiff] = useState<FileDiffResult | null>(null);
   const [file, setFile] = useState<FilePreviewResult | null>(null);
+  const [render, setRender] = useState<HtmlRender | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // Which file we've already redirected away from the diff view for. Without
@@ -550,6 +551,20 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   const isHtml = ext === "html" || ext === "htm";
   const isMarkdown = ext === "md" || ext === "markdown" || ext === "mdx";
   const canPreview = isHtml || isMarkdown;
+
+  // An HTML preview needs the document with its assets inlined — see
+  // getHtmlRender. Its own request, alongside the plain text one above rather
+  // than instead of it: the text is what the File tab shows and what this falls
+  // back to while the render is in flight or if the gateway has no such route.
+  useEffect(() => {
+    if (mode !== "render" || !isHtml) return;
+    let alive = true;
+    setRender(null);
+    getHtmlRender(cwd, target.abs)
+      .then((r) => { if (alive) setRender(r); })
+      .catch(() => { /* the un-inlined text still renders, broken images and all */ });
+    return () => { alive = false; };
+  }, [cwd, target.abs, mode, isHtml]);
   return (
     <>
       <div className="wf-modes">
@@ -576,7 +591,8 @@ function FileView({ cwd, target, canAttach, onAttach }: {
             <IconAddToChat />{range && <span className="lines">{formatRange(range)}</span>}
           </button>
         )}
-        <DownloadButton raw={raw} name={basename(target.path)} />
+        <DownloadButton raw={raw} name={basename(target.path)}
+          selfContained={mode === "render" && isHtml && render && render.inlined > 0 ? render.html : undefined} />
       </div>
       <div className="wf-body">
         {err && <div className="wf-empty">{err}</div>}
@@ -603,9 +619,18 @@ function FileView({ cwd, target, canAttach, onAttach }: {
                   <div className="wf-note">
                     Sandboxed preview — scripts can run, but the sandbox blocks it from reaching the
                     network, reading your session, or navigating away from this panel.
-                    {file.truncated && " The file was cut short, so this preview may be incomplete."}
+                    {/* Which is also why the assets had to be inlined, so say what
+                        that did. A skipped reference is the one thing a reader
+                        would otherwise blame on the document. */}
+                    {render && render.inlined > 0 &&
+                      ` ${render.inlined} ${render.inlined === 1 ? "asset" : "assets"} inlined from the file's own folder.`}
+                    {render && render.skipped > 0 &&
+                      ` ${render.skipped} couldn't be — remote URLs, external scripts, and types or paths this preview won't inline.`}
+                    {render?.truncated && " Some were too large to inline."}
+                    {(render?.htmlTruncated || (!render && file.truncated)) &&
+                      " The file was cut short, so this preview may be incomplete."}
                   </div>
-                  <HtmlPreview html={file.text ?? ""} />
+                  <HtmlPreview html={render?.html ?? file.text ?? ""} />
                 </>
               : <div className="wf-md-preview">
                   {file.truncated && <div className="wf-note">The file was cut short, so this preview may be incomplete.</div>}
@@ -622,20 +647,31 @@ function FileView({ cwd, target, canAttach, onAttach }: {
 // console in a WKWebView that answers an attachment response by killing the
 // frame (WebKitErrorDomain 102) and showing "Can't reach gateway" — so the
 // Download button used to throw you out of the UI. See lib/download.ts.
-function DownloadButton({ raw, name }: { raw: string; name: string }) {
+// `selfContained`, when set, is the document to save INSTEAD of the bytes on
+// disk: an HTML preview whose assets have been inlined. Saving the file itself
+// there would hand over the copy whose relative image paths resolve nowhere else
+// — which is the thing someone downloading a mockup is trying to avoid.
+function DownloadButton({ raw, name, selfContained }: {
+  raw: string; name: string; selfContained?: string;
+}) {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const save = () => {
     if (busy) return;
     setBusy(true);
     setFailed(false);
-    downloadFile(raw, name)
+    Promise.resolve()
+      .then(() => (selfContained !== undefined
+        ? downloadText(selfContained, "text/html", name)
+        : downloadFile(raw, name)))
       .catch(() => setFailed(true))
       .finally(() => setBusy(false));
   };
   return (
     <button type="button" className={"icon-btn wf-dl" + (failed ? " failed" : "")} onClick={save} disabled={busy}
-      title={failed ? "Couldn't download this file — tap to retry" : "Download this file"}>
+      title={failed ? "Couldn't download this file — tap to retry"
+        : selfContained !== undefined ? "Download this page with its images included"
+        : "Download this file"}>
       {busy ? <IconSpinner /> : <IconDownload />}
     </button>
   );

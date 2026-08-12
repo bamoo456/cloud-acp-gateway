@@ -18,7 +18,8 @@ available on the same host or inside the same container as the gateway.
 - File preview side panel: the agent's plan, every file the work touched (tool
   calls merged with `git status` and with the folders it wrote into outside the
   checkout, so shell-generated files aren't invisible), what it only read,
-  per-file diffs, and image previews.
+  per-file diffs, image previews, and live HTML previews with their assets
+  inlined.
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
 - History browsing for supported agents: Claude Code, Codex, and opencode.
@@ -168,6 +169,7 @@ Opening a row shows that file:
 |---|---|
 | Diff | A file's unified diff against `HEAD`, staged and unstaged work together. A new file diffs as entirely added. |
 | File | The file itself: text, or an inline image, or a download for anything binary. |
+| Preview | Markdown rendered, or an `.html` shown live in a sandboxed frame with its own images, fonts and stylesheets inlined — see below. Download there saves that self-contained copy, not the bare file. |
 
 In the conversation, a file the agent wrote appears as a card — its type and a
 download button — instead of a line of monospace; a file it only read stays a
@@ -248,18 +250,45 @@ session to find a file again.
 turn finishes; without a git checkout the list falls back to the other two
 sources and says so.
 
-It reads through seven authenticated endpoints (`/workspace/changes`,
+It reads through eight authenticated endpoints (`/workspace/changes`,
 `/workspace/diff`, `/workspace/file`, `/workspace/raw`, `/workspace/tree`,
-`/workspace/find`, `/workspace/outputs`) — see *What the preview can reach* above
-for their boundary, which is deliberately the same one for all seven: a tree that
-listed more than the viewer can open would offer rows it then refuses. Listing
-changed files requires `git` on the gateway host; a folder that isn't a checkout
-simply shows nothing to compare.
+`/workspace/find`, `/workspace/outputs`, `/workspace/render`) — see *What the
+preview can reach* above for their boundary, which is deliberately the same one
+for all eight: a tree that listed more than the viewer can open would offer rows
+it then refuses. Listing changed files requires `git` on the gateway host; a
+folder that isn't a checkout simply shows nothing to compare.
 
 Find files asks `git` for the file list, so it never walks into `node_modules`
 and never misses a dotfile — the same rule that dims a row in the tree decides
 whether it is a search candidate. Without a checkout it falls back to a bounded
 walk that folds away the usual build and dependency directories by name.
+
+### Previewing an `.html` an agent wrote
+
+An HTML preview runs in an iframe with `allow-scripts` and, deliberately, no
+`allow-same-origin` — an opaque origin with no access to the console's cookies,
+storage or session. That is the security property, and it also means the document
+can load *nothing*, including the `png/*.png` sitting next to it on disk. A
+generated mockup would render as a page of broken images, and downloading the
+single `.html` reproduces the same thing on your laptop.
+
+So `/workspace/render` inlines them: every relative `<img src>`, `<link
+rel=stylesheet>` and CSS `url()` is resolved against the referring file's own
+folder, checked against the same boundary as every other route, and replaced with
+a `data:` URI. The sandbox is unchanged — its CSP already allows `img-src data:`,
+`font-src data:` and inline styles, which is exactly what an inlined document
+needs and nothing more. An external `<script src>` is *not* inlined (nothing
+allows `script-src data:`, so it would break silently instead of visibly), nor is
+a `srcset` (a comma-separated candidate list is not safely rewritable, and a
+*wrong* document is worse than a missing picture), nor a remote URL or a type it
+doesn't know. Every one of those is counted, and the preview says how many
+references it could not inline rather than letting the gaps read as a broken
+document.
+
+Doing this on the gateway rather than asking the agent to do it is not merely
+cheaper — an agent **cannot** do it. Base64 is text, so it goes through the
+model's own output budget: 120KB of PNG is over 100k tokens, past what any single
+tool call may write. The bytes are already on the gateway's host.
 
 ## Deployment
 

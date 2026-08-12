@@ -33,6 +33,7 @@ describe("FilePanel", () => {
   let getFilePreview: ReturnType<typeof vi.fn>;
   let getWorkspaceTree: ReturnType<typeof vi.fn>;
   let getWorkspaceOutputs: ReturnType<typeof vi.fn>;
+  let getHtmlRender: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -59,12 +60,16 @@ describe("FilePanel", () => {
     // Nothing in this conversation wrote outside the checkout, which is the
     // ordinary case: the tests that care about output folders set their own.
     getWorkspaceOutputs = vi.fn().mockResolvedValue([]);
+    getHtmlRender = vi.fn().mockResolvedValue({
+      html: "", inlined: 0, skipped: 0, truncated: false, htmlTruncated: false,
+    });
     vi.doMock("../lib/api.ts", () => ({
       getWorkspaceChanges,
       getFileDiff,
       getFilePreview,
       getWorkspaceTree,
       getWorkspaceOutputs,
+      getHtmlRender,
       findWorkspaceFiles: vi.fn().mockResolvedValue({ files: [], truncated: false, fromGit: true }),
       rawFileUrl: (cwd: string, p: string) => `/workspace/raw?cwd=${cwd}&path=${p}`,
     }));

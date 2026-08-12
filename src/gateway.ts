@@ -47,6 +47,7 @@ import {
   tree as workspaceTree, find as workspaceFind, outputFolder as workspaceOutputFolder,
   inlineImageType, repoRoot, MAX_RAW_BYTES,
 } from "./workspace.ts";
+import { renderHtmlFile } from "./htmlinline.ts";
 import { buildClientConfig } from "./client-config.ts";
 import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
@@ -4119,6 +4120,8 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   //   /workspace/file     one file's content as text / image metadata / binary
   //   /workspace/outputs  whole folders the conversation wrote into, for the
   //                       shell-written files neither git nor a tool call knows
+  //   /workspace/render   one .html with its assets inlined, so the sandboxed
+  //                       preview (and a downloaded copy) actually shows them
   //   /workspace/raw      one file's bytes (the <img> source, and downloads)
   // What each may read is allowedPreviewPath's decision: the conversation's cwd,
   // its repo, and ACPG_PREVIEW_ROOTS — or anything at all, when a deployment
@@ -4187,6 +4190,31 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         return workspaceFind(target.cwd, target.abs, q.get("q") ?? "").then((r) => {
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
+        });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // One .html file with its own assets inlined as data: URIs, for the panel's
+  // sandboxed preview and for saving a copy that still works.
+  //
+  // The sandbox is what makes this necessary: the preview iframe has an opaque
+  // origin, so the document cannot load the images sitting next to it on disk,
+  // and neither can a copy downloaded to a laptop without its folder. Inlining
+  // here rather than asking the agent to do it is not just cheaper — an agent
+  // CANNOT do it, because base64 is text and 120KB of PNG exceeds what a single
+  // tool call may write. Same access gate as every other route: an asset the
+  // viewer would refuse to open is left as a broken reference, not inlined.
+  if (consoleEnabled && pathname === "/workspace/render") {
+    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        const resolve = (ref: string, baseDir: string) =>
+          allowedPreviewPath(path.isAbsolute(ref) ? ref : path.resolve(baseDir, ref), target.cwd);
+        return renderHtmlFile(target.abs, resolve).then((r) => {
+          if (!r) { res.writeHead(404); res.end(JSON.stringify({ error: "not a readable file", code: "not-found" })); return; }
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ path: target.display, abs: target.abs, ...r }));
         });
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
