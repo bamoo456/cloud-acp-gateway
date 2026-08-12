@@ -132,6 +132,52 @@ test("renaming a conversation retitles its recency rows under every agent and cw
   db.close();
 });
 
+test("a seed title may name a conversation but never rename one", () => {
+  const db = new Db(":memory:");
+  const touch = (agentName: string, cwd: string, title: string, at: string, seed = false) =>
+    db.touchRecentSession({ agentName, cwd, sessionId: "s1", title, lastActiveAt: at }, seed);
+
+  // The regression this closes: clients touch a session's recency on every frame
+  // of a running turn, and any client whose in-memory copy carries no title has to
+  // re-derive one from the transcript's first user message. Applying that would
+  // undo a rename mid-turn — for every device at once, since this table is shared.
+  touch("claude", "/tmp/repo", "My renamed chat", "2026-07-20T01:00:00.000Z");
+  const after = touch("claude", "/tmp/repo", "fix the flaky test please", "2026-07-20T02:00:00.000Z", true);
+  assert.deepEqual(after.map((r) => r.title), ["My renamed chat"], "the recorded name survives");
+  assert.equal(after[0].lastActiveAt, "2026-07-20T02:00:00.000Z", "recency still moves");
+
+  // A first touch under a second spelling of the folder (or a second agent sharing
+  // the provider) inserts a row — it must adopt the name already on record instead
+  // of seeding a duplicate wearing the one the conversation was renamed away from.
+  const other = touch("claude-infra", "/private/tmp/repo", "fix the flaky test please", "2026-07-20T03:00:00.000Z", true);
+  assert.deepEqual(other.map((r) => r.title), ["My renamed chat", "My renamed chat"]);
+
+  // Only the overwrite is blocked: nothing on record (and the "Untitled" /
+  // empty-string placeholders don't count) still gets named by the derived title.
+  db.touchRecentSession({ agentName: "claude", cwd: "/tmp/other", sessionId: "s2", title: "Untitled", lastActiveAt: "2026-07-20T04:00:00.000Z" }, true);
+  const named = db.touchRecentSession({ agentName: "claude", cwd: "/tmp/other", sessionId: "s2", title: "and now a first message", lastActiveAt: "2026-07-20T05:00:00.000Z" }, true);
+  assert.equal(named.find((r) => r.sessionId === "s2")?.title, "and now a first message");
+
+  // Two rows can each carry a real (but different) name — two devices that seeded
+  // one before either saw the other's. The row adopted has to be the newest, which
+  // is the order the client's own cache is in; picking a different one would have
+  // the cache and this table store different names and the next /prefs load flip
+  // the display, which is the same "sometimes it's the old name" this closes.
+  db.touchRecentSession({ agentName: "codex", cwd: "/tmp/repo", sessionId: "s3", title: "seeded on the laptop", lastActiveAt: "2026-07-20T01:00:00.000Z" });
+  db.touchRecentSession({ agentName: "codex", cwd: "/tmp/elsewhere", sessionId: "s3", title: "seeded on the phone", lastActiveAt: "2026-07-20T09:00:00.000Z" });
+  const third = db.touchRecentSession({ agentName: "codex", cwd: "/tmp/third", sessionId: "s3", title: "derived just now", lastActiveAt: "2026-07-20T10:00:00.000Z" }, true);
+  assert.equal(third.find((r) => r.cwd === "/tmp/third")?.title, "seeded on the phone");
+
+  // The gateway's own prompt-side recency hint carries the running-task label (the
+  // first prompt's text), so it is a seed in the same sense and gets the same guard.
+  db.touchSessionMessage({ agentName: "codex", cwd: "/tmp/repo", sessionId: "s1", title: "fix the flaky test please", at: "2026-07-20T06:00:00.000Z" });
+  assert.deepEqual(
+    db.recentSessions().filter((r) => r.sessionId === "s1").map((r) => r.title),
+    ["My renamed chat", "My renamed chat", "My renamed chat"],
+  );
+  db.close();
+});
+
 test("recent folders upsert newest-first and cap at 20", () => {
   const db = new Db(":memory:");
   db.touchRecentFolder("/a", "2026-06-10T01:00:00.000Z");
