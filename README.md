@@ -112,6 +112,7 @@ Common optional settings:
 | `ACPG_TLS_CERT` / `ACPG_TLS_KEY` | auto | PEM cert/key paths for bring-your-own TLS. |
 | `ACPG_FS_ROOT` | user home | Directory root the web UI may browse for folders and `@` file references. |
 | `ACPG_PREVIEW_ROOTS` | _(none)_ | Extra directories the file preview panel may read, colon-separated (e.g. `/tmp`). By default it sees only the conversation's own project — see [What the preview can reach](#what-the-preview-can-reach). |
+| `ACPG_PREVIEW_FILTER_ENABLED` | `1` | Set `0` to let the preview panel read **any** file on the host, ignoring the rules above. Convenient on a machine you own; makes the gateway credential a read-any-file capability. |
 | `CODEX_HOME` | `~/.codex` | Codex login/session state. |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude login/session state and history. |
 
@@ -197,6 +198,23 @@ turning the gateway credential into a read-any-file capability:
 ```sh
 ACPG_PREVIEW_ROOTS=/tmp:/var/exports   # colon-separated, PATH-style
 ```
+
+If naming roots is bookkeeping you don't want — a single-user gateway on a
+machine you already own, where the agent writes wherever it likes — turn the
+filter off entirely:
+
+```sh
+ACPG_PREVIEW_FILTER_ENABLED=0   # default 1; `off` and `false` work too
+```
+
+Then rules 1–3 stop applying and `ACPG_PREVIEW_ROOTS` no longer matters: the
+panel reads any file the gateway process can. Say it plainly — with this set,
+whoever holds the gateway credential can read any file on that host. It is
+off-by-choice, never by default.
+
+What the toggle does **not** change: `cwd` is still checked against
+`ACPG_FS_ROOT`, because that bound is about which folders a conversation may
+claim to run in, not which files a preview may open.
 
 Everything else about the surface: Basic auth on every route, read-only (nothing
 here writes, stages, or reverts), `/workspace/raw` serving common raster image

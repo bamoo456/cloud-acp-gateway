@@ -138,7 +138,9 @@ export async function uploadFile(file: File): Promise<{ name: string; uri: strin
 // The gateway serves what is inside the conversation's project (its cwd and the
 // repo around it) plus whatever ACPG_PREVIEW_ROOTS names — see
 // allowedPreviewPath in src/gateway.ts. A path outside all of those comes back
-// as `outside-root`, which readJson turns into the prose above.
+// as `outside-root`, which readJson turns into the prose above. A deployment can
+// drop that filter entirely with ACPG_PREVIEW_FILTER_ENABLED=0, in which case
+// nothing here is refused for being outside the project.
 export type ChangeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
 export interface ChangedFile {
   path: string;   // repo-root-relative, for display
