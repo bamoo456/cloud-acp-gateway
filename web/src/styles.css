@@ -480,12 +480,16 @@
   @media (min-width: 860px) {
     #root { flex-direction: row; }
     #scrim { display: none !important; }
-    .sessions-btn { display: none; }            /* the panel is always shown, no toggle needed */
+    /* The clock button becomes the column's collapse toggle up here (below the
+       breakpoint it opens the overlay sheet instead). */
     #panel {
-      position: static; display: flex !important; flex-direction: column; flex: 0 0 auto;
+      position: static; display: flex; flex-direction: column; flex: 0 0 auto;
       width: 284px; max-width: 284px; height: 100%; max-height: none; inset: auto;
       border: none; border-right: 1px solid var(--border); border-radius: 0; box-shadow: none; animation: none;
     }
+    /* Last #panel rule on purpose: beats both the base display:none and .open,
+       so a stale mobile `open` class can't resurrect a collapsed column. */
+    #panel.collapsed { display: none; }
     /* folder browser slides out from the left as the sidebar's next layer
        (wider than the 284px column so long folder names fit), dimming the rest */
     .fb-scrim { display: block; position: fixed; inset: 0; z-index: 60; background: #00000055; backdrop-filter: blur(2px); }
@@ -948,7 +952,7 @@
   #files.open { display: flex; animation: pop .14s ease-out; }
   #files-scrim { position: fixed; inset: 0; z-index: 20; display: none; }
   #files-scrim.open { display: block; }
-  .files-btn.on { color: var(--accent); background: var(--surface-2); }
+  .files-btn.on, .sessions-btn.on { color: var(--accent); background: var(--surface-2); }
 
   .wf-head {
     flex: 0 0 auto; display: flex; align-items: center; gap: 4px;

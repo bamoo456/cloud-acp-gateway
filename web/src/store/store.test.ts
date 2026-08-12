@@ -2434,3 +2434,33 @@ describe("filesOpen default", () => {
     expect(useStore.getState().filesOpen).toBe(false);
   });
 });
+
+describe("sidebarOpen default", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "token": "test-token",
+      "defaultAgent": "claude",
+      "agents": [{ "name": "claude", "cwd": "/old" }],
+      "fsRoot": "/"
+    }</script>`;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("expanded by default on a desktop-width screen", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true }));
+    const { useStore } = await import("./store.ts");
+    expect(useStore.getState().sidebarOpen).toBe(true);
+    useStore.getState().toggleSidebar();
+    expect(useStore.getState().sidebarOpen).toBe(false);
+  });
+
+  test("collapsed by default on a phone-width screen", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    const { useStore } = await import("./store.ts");
+    expect(useStore.getState().sidebarOpen).toBe(false);
+  });
+});

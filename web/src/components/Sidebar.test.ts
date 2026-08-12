@@ -1097,4 +1097,17 @@ describe("Sidebar recent conversations", () => {
     });
     expect(container.querySelector('[data-tab="recent"]')?.getAttribute("aria-selected")).toBe("true");
   });
+
+  test("the desktop column collapses and expands via sidebarOpen", async () => {
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    // No matchMedia in jsdom → sidebarOpen initializes false, like a phone.
+    expect(container.querySelector("#panel")?.classList.contains("collapsed")).toBe(true);
+
+    await act(async () => { useStore.setState({ sidebarOpen: true }); });
+    expect(container.querySelector("#panel")?.classList.contains("collapsed")).toBe(false);
+
+    await act(async () => { useStore.getState().toggleSidebar(); });
+    expect(container.querySelector("#panel")?.classList.contains("collapsed")).toBe(true);
+  });
 });
