@@ -3,7 +3,7 @@ import { TEXT_SIZE_OPTIONS, useStore } from "../store/store.ts";
 import { resumeCommand } from "../lib/config.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { setLockPin, clearLock, MIN_PIN_LENGTH } from "../lib/lock.ts";
-import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconPencil, IconTrash, IconType, IconLock, IconX } from "../lib/icons.tsx";
+import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconPencil, IconTrash, IconType, IconLock, IconTerminal, IconX } from "../lib/icons.tsx";
 import type { ConfigOption } from "../types.ts";
 
 function configRank(option: ConfigOption): number {
@@ -24,7 +24,7 @@ function configIcon(option: ConfigOption) {
 // The conversation menu — a bottom action sheet on mobile, a dropdown on desktop
 // (CSS-driven; see .amenu in styles.css). Holds agent/session settings and
 // conversation utilities so the composer stays minimal.
-export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function ActionMenu({ open, onClose, onOpenTerminal }: { open: boolean; onClose: () => void; onOpenTerminal?: () => void }) {
   const s = useStore();
   const [view, setView] = useState<string>("main");
   const [renameText, setRenameText] = useState("");
@@ -142,6 +142,11 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
             <button className="arow" onClick={copyResume} disabled={!canResume}>
               {toolIcon("execute")}<span className="col"><span>Copy resume command</span><span className="sub">{resumeHint}</span></span>
             </button>
+            {s.cfg.terminalEnabled && (
+              <button className="arow" onClick={() => { onOpenTerminal?.(); onClose(); }}>
+                <IconTerminal /><span className="col"><span>Terminal</span><span className="sub">open a shell on the gateway host</span></span>
+              </button>
+            )}
             <button className="arow" onClick={() => { setRenameText(sess && sess.title !== "Untitled" ? sess.title : ""); setView("rename"); }} disabled={!resumableId}>
               <IconPencil />Rename
             </button>

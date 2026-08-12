@@ -320,6 +320,16 @@ export function IconCopy() {
   );
 }
 
+export function IconTerminal() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M7 9l4 3-4 3" />
+      <path d="M13 15h4" />
+    </svg>
+  );
+}
+
 export function IconLock() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">

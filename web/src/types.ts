@@ -17,6 +17,9 @@ export interface AppConfig {
   defaultAgent: string;
   agents: AgentRef[];
   fsRoot: string;
+  // Whether the gateway's opt-in general-shell terminal (ACPG_TERMINAL) is
+  // reachable — absent/false on gateways that don't have it turned on.
+  terminalEnabled?: boolean;
 }
 
 // ---- ACP wire types (only what the client interprets) ----

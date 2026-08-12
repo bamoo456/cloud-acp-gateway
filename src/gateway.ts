@@ -41,6 +41,7 @@ import { accessUrls } from "./access.ts";
 import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.ts";
 import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
+import { handleTerminal, setCwdResolver } from "./terminal.ts";
 import { handleUpload } from "./uploads.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
@@ -539,6 +540,10 @@ function resolveWithinRootBase(p: string, root: string): string | null {
 export function resolveWithinRoot(p: string): string | null {
   return resolveWithinRootBase(p, FS_ROOT);
 }
+// terminal.ts's general shell needs a cwd to spawn in but must not import the
+// FS_ROOT containment policy itself — inject it once, same as
+// registerLoginAgent injects the agent allowlist.
+setCwdResolver((raw) => resolveWithinRoot(raw) ?? FS_ROOT);
 
 // Directories the file-preview panel may read OUTSIDE the conversation's own
 // project. Colon-separated, PATH-style: ACPG_PREVIEW_ROOTS=/tmp:/var/exports
@@ -3840,6 +3845,10 @@ function renderConsole(
 }
 
 const consoleEnabled = (process.env.ACPG_CONSOLE ?? "on").toLowerCase() !== "off";
+// Opt-in, general-shell PTY terminal (like ttyd) — see terminal.ts. OFF by
+// default and only reachable when the console is: unlike the scoped /login/*
+// PTY, this hands anyone holding the gateway credential a real host shell.
+const terminalEnabled = consoleEnabled && (process.env.ACPG_TERMINAL ?? "off").toLowerCase() === "on";
 // Ephemeral token the console auto-authenticates with; rotated each start so the
 // long-lived ACPG_AUTH_TOKEN is never embedded in served HTML.
 const consoleToken = crypto.randomBytes(18).toString("base64url");
@@ -3876,6 +3885,7 @@ function loadChatHtml(): string {
     defaultAgent: cfg.defaultAgent,
     agents: agentDetailsNow(),
     fsRoot: FS_ROOT,
+    terminalEnabled,
   }).replace(/</g, "\\u003c");
   return fs.readFileSync(file, "utf8").replace("__ACPG_CFG__", () => cfgJson);
 }
@@ -4077,6 +4087,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       defaultAgent: cfg.defaultAgent,
       fsRoot: FS_ROOT,
       agents: agentDetailsNow(),
+      terminalEnabled,
     });
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(config));
@@ -4087,6 +4098,11 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // the same Basic-auth gate as the rest of the console surface.
   if (consoleEnabled && pathname.startsWith("/login/")) {
     if (handleLogin(req, res, pathname, cfg.maxPayload)) return;
+  }
+  // Opt-in general shell (ACPG_TERMINAL=on) — real host shell access, so it
+  // gets its own flag on top of the Basic-auth gate above. See terminal.ts.
+  if (terminalEnabled && pathname.startsWith("/terminal/")) {
+    if (handleTerminal(req, res, pathname, cfg.maxPayload)) return;
   }
   // Browse host directories under ACPG_FS_ROOT (for the folder picker).
   if (consoleEnabled && pathname === "/fs") {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, lazy, Suspense } from "react";
 import { useStore } from "./store/store.ts";
 import { getRunning, getInboxPending } from "./lib/api.ts";
 import { TopBar } from "./components/TopBar.tsx";
@@ -11,6 +11,12 @@ import { LockScreen } from "./components/LockScreen.tsx";
 import { LoginTerminal } from "./components/LoginTerminal.tsx";
 import type { AgentRef } from "./types.ts";
 
+// Lazy: xterm needs real DOM measurement APIs jsdom doesn't provide, so a
+// static import would drag it into every test that imports App.tsx. This also
+// keeps it out of the main bundle for the (default) common case where the
+// gateway never turns ACPG_TERMINAL on.
+const Terminal = lazy(() => import("./components/Terminal.tsx").then((m) => ({ default: m.Terminal })));
+
 export function App() {
   const bootstrap = useStore((s) => s.bootstrap);
   const ensureConnected = useStore((s) => s.ensureConnected);
@@ -18,9 +24,11 @@ export function App() {
   const agentReady = useStore((s) => s.agentReady);
   const joining = useStore((s) => s.joining);
   const locked = useStore((s) => s.locked);
+  const cwd = useStore((s) => s.cwd);
   const [panel, setPanel] = useState(false);
   const [picker, setPicker] = useState(false);
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   useEffect(() => { bootstrap(); }, [bootstrap]);
   // Poll the gateway for tasks running anywhere (any agent, any device) so the
   // TopBar can surface and jump to them. Independent of the active SSE connection.
@@ -68,7 +76,7 @@ export function App() {
     <>
       <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)} />
       <div className="content">
-        <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} onOpenLogin={(a) => setLoginAgent(a)} />
+        <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} onOpenLogin={(a) => setLoginAgent(a)} onOpenTerminal={() => setTerminalOpen(true)} />
         <main id="main"><Thread session={sess} agentReady={agentReady} loading={joining} /></main>
         <Composer />
       </div>
@@ -79,6 +87,11 @@ export function App() {
       {picker && <FolderPicker onClose={() => setPicker(false)} />}
       {loginAgent && <LoginTerminal agent={loginAgent} onClose={() => setLoginAgent(null)} />}
       {/* loginAgent carries the full AgentRef so LoginTerminal can key device-auth on kind */}
+      {terminalOpen && (
+        <Suspense fallback={null}>
+          <Terminal cwd={cwd} onClose={() => setTerminalOpen(false)} />
+        </Suspense>
+      )}
       {locked && <LockScreen />}
     </>
   );
