@@ -17,17 +17,10 @@
 // Deliberately read-only: nothing here writes, stages, or reverts. The panel is
 // a viewer, and keeping the write surface at zero means a browser session that
 // leaks can't rewrite the checkout the agent is working in.
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { git, gitStdin } from "./git-exec.ts";
 
-// One `git status` on a cold cache in a large monorepo is seconds, not
-// milliseconds, and the panel polls on demand — so cap the wait rather than
-// letting a request pile up behind a slow filesystem.
-const GIT_TIMEOUT_MS = 10_000;
-// Enough headroom for a big refactor's diff without letting a pathological one
-// (a regenerated lockfile, a vendored blob) buffer unbounded in the gateway.
-const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 // The panel lists changed files; past a few hundred it stops being a list and
 // starts being a scroll. Truncate and say so rather than shipping thousands.
 export const MAX_CHANGED_FILES = 500;
@@ -217,71 +210,6 @@ export function parseNumstatZ(out: string): Array<{ path: string; oldPath?: stri
     rows.push({ path: filePath, oldPath, additions, deletions, binary });
   }
   return rows;
-}
-
-interface GitResult { code: number; stdout: string; stderr: string; failed: boolean }
-
-// One place that shells out to git, so every invocation shares the same
-// hardening. Notably:
-//   --no-optional-locks   never take the index lock — a status read must not
-//                         race (or block) the agent's own git in the same repo
-//   -c core.fsmonitor=    a repo-local config can name a *command* for git to
-//                         run; this read is triggered by a browser, so it must
-//                         not become a way to execute whatever the checkout
-//                         says. Same reasoning for --no-ext-diff at call sites.
-//   GIT_TERMINAL_PROMPT=0 never block waiting on a credential prompt nobody
-//                         can answer from an HTTP handler
-// Non-zero exits are returned, not thrown: `git diff --no-index` uses exit 1 to
-// mean "there is a difference", which is the success case for us.
-function git(cwd: string, args: string[]): Promise<GitResult> {
-  return new Promise((resolve) => {
-    execFile(
-      "git",
-      ["--no-optional-locks", "-c", "core.fsmonitor=", ...args],
-      {
-        cwd,
-        timeout: GIT_TIMEOUT_MS,
-        maxBuffer: GIT_MAX_BUFFER,
-        encoding: "utf8",
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", LC_ALL: "C" },
-      },
-      (err, stdout, stderr) => {
-        // No git binary, timeout, or an over-maxBuffer read: `failed` tells the
-        // caller this is "couldn't run", not "git said no".
-        const code = err && typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : err ? -1 : 0;
-        resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "", failed: !!err && code === -1 });
-      },
-    );
-  });
-}
-
-// `git`, but with `input` written to the child's stdin. `check-ignore --stdin`
-// is the one caller: asking about a whole directory's entries in one process
-// beats spawning git per row, but the paths have to get in somehow, and a
-// directory of a few hundred names would blow past the argv limit.
-function gitStdin(cwd: string, args: string[], input: string): Promise<GitResult> {
-  return new Promise((resolve) => {
-    const child = execFile(
-      "git",
-      ["--no-optional-locks", "-c", "core.fsmonitor=", ...args],
-      {
-        cwd,
-        timeout: GIT_TIMEOUT_MS,
-        maxBuffer: GIT_MAX_BUFFER,
-        encoding: "utf8",
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", LC_ALL: "C" },
-      },
-      (err, stdout, stderr) => {
-        const code = err && typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : err ? -1 : 0;
-        resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "", failed: !!err && code === -1 });
-      },
-    );
-    // A git that exited before reading (no repo, bad flag) leaves a stdin nobody
-    // is draining; the EPIPE that write raises is that, not a failure worth
-    // reporting — the callback above still delivers the exit code.
-    child.stdin?.on("error", () => { /* see above */ });
-    child.stdin?.end(input);
-  });
 }
 
 // Absolute repo root for `cwd`, or null when it isn't inside a checkout (or git
