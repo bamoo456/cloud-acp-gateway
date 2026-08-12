@@ -437,9 +437,9 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       <div id="scrim" className={open ? "open" : ""} onClick={onClose} />
       <div id="panel" className={(open ? "open" : "") + (s.sidebarOpen ? "" : " collapsed")}
         style={desktop ? { width, maxWidth: width } : undefined}>
-        {desktop && <ResizeHandle className="sb-resize" label="Resize the sidebar" edge="right"
-          width={width} min={MIN_SIDEBAR_WIDTH} max={MAX_SIDEBAR_WIDTH} clamp={clampSidebarWidth}
-          onWidth={setWidth} onCommit={saveSidebarWidth} />}
+        {desktop && <ResizeHandle className="sb-resize" label="Resize the sidebar" edge="right" axis="x"
+          size={width} min={MIN_SIDEBAR_WIDTH} max={MAX_SIDEBAR_WIDTH} clamp={clampSidebarWidth}
+          onSize={setWidth} onCommit={saveSidebarWidth} />}
         <div className="folder-bar" title={s.cwd} onClick={() => { onOpenPicker(); onClose(); }}>
           <span className="fi"><IconFolder /></span>
           <span className="meta"><span className="lbl">Folder</span><span className="name">{basename(s.cwd)}</span></span>
