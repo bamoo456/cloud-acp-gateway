@@ -26,7 +26,8 @@ describe("subsequenceScore", () => {
     assert.ok(subsequenceScore("filepanel.tsx", "fipa")! > 0);
   });
   test("consecutive runs beat scattered matches", () => {
-    assert.ok(subsequenceScore("filepanel.tsx", "pane")! > subsequenceScore("filepanel.tsx", "fple")!);
+    // "fnl" is a genuine but scattered subsequence (f..n..l); "pane" is one run.
+    assert.ok(subsequenceScore("filepanel.tsx", "pane")! > subsequenceScore("filepanel.tsx", "fnl")!);
   });
   test("word-boundary starts beat mid-word hits", () => {
     // "tr" starting file-tree's second word vs buried inside "control"
