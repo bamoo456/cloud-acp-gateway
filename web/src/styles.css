@@ -797,6 +797,52 @@
 
   .err-line { color: var(--err); font-size: var(--chat-secondary-size); margin: 12px 0; }
 
+  /* ---- engine dock ----
+     Bottom-right of the message pane, outside the input box. A row of its own
+     between the thread and the composer, so it never competes with the session
+     title in the crumb and never moves as the textarea grows. Costs 28px. */
+  .dock { position: relative; flex: 0 0 auto; display: flex; align-items: center;
+    padding: 0 12px 6px; }
+  .dock .sp { flex: 1; min-width: 0; }
+  .mchip {
+    display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px;
+    border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    color: var(--muted); flex: 0 1 auto; min-width: 0; max-width: 100%;
+  }
+  .mchip:hover { border-color: var(--muted); color: var(--text); }
+  .mchip.running { border-color: var(--muted); }
+  .mchip .wm, .mchip .am { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mchip .eff, .mchip .el { color: var(--text); flex: 0 0 auto; }
+  .mchip .el { font-variant-numeric: tabular-nums; }
+  .mchip .sep { color: var(--faint); flex: 0 0 auto; }
+  .mchip .chev { display: grid; place-items: center; color: var(--faint); flex: 0 0 auto; }
+  .mchip .chev svg { width: 11px; height: 11px; }
+  /* Running: the same ink ring the mockup spins, sized to the chip. */
+  .mchip .spin { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto;
+    border: 1.5px solid var(--border-strong); border-top-color: var(--ink);
+    animation: wspin .8s linear infinite; }
+  /* The dock's menu is the action sheet's chrome, anchored to the chip rather
+     than to the window — on a phone the stylesheet turns it into a sheet, same
+     as .amenu everywhere else. */
+  .amenu.engine-menu { position: absolute; right: 12px; bottom: calc(100% + 4px); top: auto;
+    width: 260px; max-height: min(60vh, 460px); transform-origin: bottom right; }
+  /* Three short lists, not a settings screen: tighter rows than the action
+     sheet's, and no row is allowed to wrap a folder path into three lines. */
+  .engine-menu .arow { padding: 8px 12px; font-size: 13.5px; }
+  .engine-menu .arow + .arow, .engine-menu .agent-opt-row + .agent-opt-row .arow { border-top: none; }
+  .engine-menu .arow .col { flex: 1; min-width: 0; }
+  .engine-menu .arow .col > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .engine-menu .arow.on { color: var(--text); background: var(--surface-2); }
+  .engine-menu .arow .gt { color: var(--text); }
+  .engine-menu .agent-opt-row { display: flex; align-items: center; gap: 2px; padding-right: 6px; }
+  /* .amenu .arow is width:100%, which would squeeze its login sibling to zero. */
+  .engine-menu .agent-opt-row .arow { width: auto; flex: 1; min-width: 0; }
+  .engine-menu .agent-login-btn { flex: 0 0 auto; width: 28px; height: 28px; }
+  .engine-menu .agent-login-btn svg { width: 15px; height: 15px; }
+  .engine-menu .amenu-subhead { padding: 9px 12px 3px; }
+  .engine-menu .amenu-subhead:first-child { padding-top: 7px; }
+
   /* ---- composer ---- */
   footer { flex: 0 0 auto; padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
     background: linear-gradient(to top, var(--bg) 70%, transparent); }
