@@ -66,33 +66,80 @@ describe("global styles", () => {
 
   test("send button glyph contrasts with the accent in every skin", () => {
     // The send button fills with --accent and draws its glyph in --accent-text.
-    // codex-dark's accent is near-white, so the glyph must flip dark there or
-    // the arrow disappears into the circle.
+    // Both derive from ink/on-ink, which derive from text/bg — so every skin and
+    // both themes get a readable pair without an override of their own.
     const sendRule = cssRule(".send");
 
     expect(sendRule).toMatch(/background\s*:\s*var\(--accent\)/);
     expect(sendRule).toMatch(/color\s*:\s*var\(--accent-text\)/);
     expect(cssRule(".send.stop")).toMatch(/color\s*:\s*var\(--bg\)/);
-    expect(styles).toMatch(/:root\s*\{[\s\S]*--accent-text\s*:\s*#fff/);
-    expect(styles).toMatch(/data-agent-skin="codex"[\s\S]*--accent\s*:\s*#ededea[\s\S]*--accent-text\s*:\s*var\(--bg\)/);
+    expect(styles).toMatch(/:root\s*\{[\s\S]*--ink\s*:\s*var\(--text\)/);
+    expect(styles).toMatch(/:root\s*\{[\s\S]*--on-ink\s*:\s*var\(--bg\)/);
+    expect(styles).toMatch(/:root\s*\{[\s\S]*--accent-text\s*:\s*var\(--on-ink\)/);
   });
 
-  test("permission allow buttons use dedicated readable colors", () => {
+  test("the primary action is ink and never takes the agent's hue", () => {
+    // Allow / Send / Review are not agent-specific concepts, so the primary
+    // action must not change colour with the answering agent (plan §1.1).
     const allowRule = cssRule(".perm .opts button.allow");
 
     expect(allowRule).toMatch(/background\s*:\s*var\(--permission-allow-bg\)/);
     expect(allowRule).toMatch(/color\s*:\s*var\(--permission-allow-text\)/);
     expect(allowRule).toMatch(/border-color\s*:\s*var\(--permission-allow-bg\)/);
-    expect(styles).toMatch(/:root\s*\{[\s\S]*--permission-allow-bg\s*:\s*var\(--agent-color,\s*var\(--accent\)\)/);
-    expect(styles).toMatch(/:root\s*\{[\s\S]*--permission-allow-text\s*:\s*#fff/);
-    expect(styles).toMatch(/:root\[data-agent-skin="codex"\]\s*\{[\s\S]*--permission-allow-bg\s*:\s*var\(--agent-codex\)/);
+    expect(styles).toMatch(/:root\s*\{[\s\S]*--accent\s*:\s*var\(--ink\)/);
+    expect(styles).toMatch(/:root\s*\{[\s\S]*--permission-allow-bg\s*:\s*var\(--accent\)/);
+    expect(styles).toMatch(/:root\s*\{[\s\S]*--permission-allow-text\s*:\s*var\(--accent-text\)/);
+    // No skin may re-point the accent (or the Allow button) at a brand colour.
+    for (const skin of ["codex", "opencode"]) {
+      const blocks = styles.match(new RegExp(`\\[data-agent-skin="${skin}"\\]\\s*\\{[^}]*\\}`, "g")) ?? [];
+      for (const block of blocks) {
+        expect(block).not.toMatch(/--accent\s*:/);
+        expect(block).not.toMatch(/--permission-allow/);
+      }
+    }
   });
 
-  test("opencode skin uses a neutral accent, not the default orange", () => {
-    // opencode's brand is a near-black / near-white neutral; the default
-    // --accent is the claude orange, so the opencode skin must override it
-    // (otherwise every opencode session renders with the orange accent).
-    expect(styles).toMatch(/data-agent-skin="opencode"[\s\S]*--accent\s*:\s*#1f1e1d[\s\S]*--permission-allow-bg\s*:\s*var\(--agent-opencode\)/);
-    expect(styles).toMatch(/@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*data-agent-skin="opencode"[\s\S]*--accent\s*:\s*#eeede9/);
+  test('data-identity="hue" is the one way back to a per-agent accent', () => {
+    // The old behaviour is kept, but behind an explicit opt-in rather than as
+    // the default (plan §1.2).
+    const hue = cssRule(':root[data-identity="hue"]');
+
+    expect(hue).toMatch(/--accent\s*:\s*var\(--agent-color/);
+    expect(hue).toMatch(/--accent-text\s*:\s*#fff/);
+  });
+
+  test("green means diff + and nothing else", () => {
+    // --ok is the diff-added colour. Anything else wearing it (a healthy
+    // connection, a copied confirmation, an agent tick) is a second meaning for
+    // the same colour, which is what plan §1.1 removes.
+    const allowed = [
+      ".diff .add::before", ".wf-mark.wf-git.added, .wf-mark.wf-git.untracked",
+      ".wf-counts .add", ".udiff-stat .add", ".udiff-row.add .sign",
+    ];
+    const offenders = styles.split("\n")
+      .filter((line) => line.includes("var(--ok)"))
+      .filter((line) => !allowed.some((sel) => line.includes(sel)))
+      // the token's own declaration
+      .filter((line) => !/--ok\s*:/.test(line));
+
+    expect(offenders).toEqual([]);
+  });
+
+  test("a finished tool call is silent — no badge, no colour", () => {
+    expect(cssRule(".tool .tstatus.completed")).toMatch(/display\s*:\s*none/);
+    // Amber is "needs you"; a running tool is ink.
+    expect(cssRule(".tool .tstatus.in_progress, .tool .tstatus.pending")).toMatch(/color\s*:\s*var\(--text\)/);
+    expect(cssRule(".tool .tstatus")).not.toMatch(/background\s*:/);
+  });
+
+  test("nothing outside the identity dot is tinted by --agent-color", () => {
+    // The chat column's 3px rail and the composer's ring both used to carry it.
+    // Only the .idot and the explicit "hue" opt-in may read the agent's colour.
+    const outsideHue = styles.replace(/:root\[data-identity="hue"\]\s*\{[^}]*\}/g, "");
+    const tinted = outsideHue.split("\n").filter((line) => line.includes("var(--agent-color"));
+
+    for (const line of tinted) {
+      expect(line).toMatch(/\.idot/);
+    }
   });
 });
