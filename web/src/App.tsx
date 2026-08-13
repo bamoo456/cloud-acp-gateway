@@ -41,6 +41,21 @@ export function App() {
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
   useEffect(() => { bootstrap(); }, [bootstrap]);
+  // Ctrl-` toggles the terminal, the shortcut the strip advertises. Capture
+  // phase and stopPropagation because xterm listens on its own textarea: once
+  // the panel has focus, a bubbling handler would reach us only after the
+  // shell had already been sent the keystroke.
+  useEffect(() => {
+    if (!terminalEnabled) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.key !== "`") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setTerminalOpen((v) => !v);
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [terminalEnabled]);
   // Poll the gateway for tasks running anywhere (any agent, any device) so the
   // TopBar can surface and jump to them. Independent of the active SSE connection.
   // Skip the request while the tab is hidden — a backgrounded tab has nothing to
@@ -112,6 +127,7 @@ export function App() {
             onClick={() => setTerminalOpen((v) => !v)}>
             <IconTerminal />Terminal
           </button>
+          <span className="sb-hint">or <kbd>⌃`</kbd></span>
         </div>
       )}
       {terminalEnabled && terminalOpen && <Terminal cwd={cwd} onEmpty={() => setTerminalOpen(false)} />}
