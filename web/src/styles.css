@@ -976,7 +976,11 @@
     font-size: 12px; font-weight: 650; }
   .term-tab:hover { background: #ffffff10; color: #eeede9; }
   .term-tab.on { background: #ffffff1a; color: #eeede9; }
-  .term-tab > button:first-child { padding: 3px 4px 3px 9px; color: inherit; font: inherit; }
+  .term-tab > button:first-child { padding: 3px 4px 3px 9px; color: inherit; font: inherit;
+    max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .term-tab-edit { width: 110px; margin: 1px 3px; padding: 2px 6px; border-radius: 5px;
+    border: 1px solid var(--accent); background: #0b0f14; color: #eeede9;
+    font: inherit; font-size: 12px; outline: none; }
   .term-tab-x { display: grid; place-items: center; padding: 3px 7px 3px 3px; opacity: .5; }
   .term-tab-x:hover { opacity: 1; }
   .term-tab-x svg { width: 12px; height: 12px; }

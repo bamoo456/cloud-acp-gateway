@@ -50,6 +50,15 @@ test("handleTerminal rejects a missing or malformed id with 400", () => {
   }
 });
 
+test("handleTerminal treats /terminal/rename as one of the id-scoped routes", () => {
+  // Renaming a tab that doesn't exist is a 404 like every other id route, not a
+  // silent no-op that leaves the client thinking the name stuck.
+  const { res, status } = fakeRes();
+  const handled = handleTerminal(fakeReq("/terminal/rename?id=never-started", "POST"), res, "/terminal/rename", 1024);
+  assert.equal(handled, true);
+  assert.equal(status(), 404);
+});
+
 test("handleTerminal 404s an id with no live shell behind it", () => {
   const { res, status, body } = fakeRes();
   const handled = handleTerminal(fakeReq("/terminal/stop?id=never-started", "POST"), res, "/terminal/stop", 1024);

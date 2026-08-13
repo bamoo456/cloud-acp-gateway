@@ -24,6 +24,13 @@ const DEFAULT_ROWS = 30;
 // A ceiling on concurrent shells, so a buggy or hostile client can't spawn
 // host processes without bound by inventing ids.
 const MAX_SESSIONS = 12;
+// A tab's label. Lives with the session, not on the device that typed it: the
+// console is driven from a phone and a desktop against the same gateway, and a
+// name that only one of them can see is worse than no name.
+const MAX_NAME = 40;
+function cleanName(raw: unknown): string {
+  return String(raw ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, MAX_NAME);
+}
 // Ids come from the client (one per tab). Constrain the shape: they end up in
 // log lines and Map keys, and nothing needs more than an opaque token.
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -56,11 +63,20 @@ class TerminalSession {
   private cols = DEFAULT_COLS;
   private rows = DEFAULT_ROWS;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private name = "";
 
   constructor(private id: string, private onGone: (id: string) => void) {}
 
   running(): boolean {
     return this.proc !== null;
+  }
+
+  label(): string {
+    return this.name;
+  }
+
+  rename(name: string): void {
+    this.name = name;
   }
 
   start(cwd: string): void {
@@ -192,12 +208,12 @@ export function handleTerminal(
   if (pathname === "/terminal/status") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
-      sessions: [...sessions.entries()].map(([id, s]) => ({ id, running: s.running() })),
+      sessions: [...sessions.entries()].map(([id, s]) => ({ id, running: s.running(), name: s.label() })),
     }));
     return true;
   }
 
-  const known = ["/terminal/start", "/terminal/stream", "/terminal/input", "/terminal/resize", "/terminal/stop"];
+  const known = ["/terminal/start", "/terminal/stream", "/terminal/input", "/terminal/resize", "/terminal/stop", "/terminal/rename"];
   if (!known.includes(pathname)) return false;
 
   const q = new URL(req.url ?? "/", "http://x").searchParams;
@@ -238,6 +254,18 @@ export function handleTerminal(
     session.stop();
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ id, running: false }));
+    return true;
+  }
+
+  if (pathname === "/terminal/rename") {
+    if (req.method !== "POST") { res.writeHead(405); res.end(); return true; }
+    readJson(req, maxPayload).then((body) => {
+      if (!body) { res.writeHead(400); res.end(); return; }
+      // An empty name is how you clear one — the tab falls back to its number.
+      session.rename(cleanName(body.name));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id, name: session.label() }));
+    });
     return true;
   }
 
