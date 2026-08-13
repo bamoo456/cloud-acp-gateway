@@ -43,6 +43,7 @@ import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleTerminal, setCwdResolver } from "./terminal.ts";
 import { handleUpload } from "./uploads.ts";
+import { usageLimits } from "./usage-limits.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
   tree as workspaceTree, find as workspaceFind, outputFolder as workspaceOutputFolder,
@@ -4617,6 +4618,23 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         res.end(JSON.stringify(r));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // This account's Claude quota windows. Independent of any session — the ACP
+  // rate-limit path only reports after a turn, and usually without a percentage.
+  // Only the normalized windows go out; the OAuth token stays in the gateway.
+  if (consoleEnabled && pathname === "/usage/limits") {
+    usageLimits({ claudeDir: CLAUDE_DIR })
+      .then((limits) => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(limits));
+      })
+      // A quota lookup failing must never surface as a 500 the poller retries
+      // hard; it is the same "we don't know" the credential paths report.
+      .catch(() => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ status: "unavailable", reason: "network" }));
+      });
     return;
   }
   // Sessions whose prompt is currently running, across all agents. Polled by the

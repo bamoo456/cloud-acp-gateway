@@ -51,6 +51,21 @@ describe("UsageStrip", () => {
     expect(seg.querySelector("i")!.getAttribute("style")).toContain("width: 24%");
   });
 
+  test("a context window reported over full reads 100%, not 101%", async () => {
+    // Seen on the wire: used=202610 against size=200000 for a frame or two while
+    // the session moved onto the 1M window.
+    await render({ ...withContext(202_610, 200_000), rateLimits: {} });
+    const seg = container.querySelector(".u-seg")!;
+    expect(seg.textContent).toBe("100%context");
+    expect(seg.querySelector("i")!.getAttribute("style")).toContain("width: 100%");
+  });
+
+  test("a window that grows mid-session is measured against the new size", async () => {
+    // The same tokens against the 1M window are 20%, not 100%.
+    await render({ ...withContext(202_610, 1_000_000), rateLimits: {} });
+    expect(container.querySelector(".u-seg")!.textContent).toBe("20%context");
+  });
+
   test("windows read left to right: context, session, week, then per-model", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_700_000_000_000);

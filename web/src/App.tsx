@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "./store/store.ts";
-import { getRunning, getInboxPending } from "./lib/api.ts";
+import { getRunning, getInboxPending, getUsageLimits } from "./lib/api.ts";
 import { TopBar } from "./components/TopBar.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { FilePanel } from "./components/FilePanel.tsx";
@@ -87,6 +87,33 @@ export function App() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { alive = false; clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
+  // Poll this account's Claude quota. Separate from the /running poll and much
+  // slower: the gateway caches for 5 minutes, so a tighter loop would only ask
+  // the same cached answer more often. Keyed on agentName because the route is
+  // Claude-specific — switching agents clears the windows, and coming back to a
+  // Claude agent refetches immediately rather than waiting out the interval.
+  // The kind test is the same one discoverable() uses (Sidebar.tsx:53): `kind`
+  // is absent on agents configured before it existed.
+  const claudeActive = useStore((s) => {
+    const a = s.cfg.agents.find((x) => x.name === s.agentName);
+    return a?.kind === "claude" || (!a?.kind && a?.name === "claude");
+  });
+  useEffect(() => {
+    if (!claudeActive) return;
+    let alive = true;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (useStore.getState().locked) return;
+      void getUsageLimits().then((windows) => {
+        if (alive && windows) useStore.getState().ingestUsageLimits(windows);
+      });
+    };
+    tick();
+    const id = setInterval(tick, 60_000);
+    const onVisible = () => { if (document.visibilityState === "visible") tick(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { alive = false; clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
+  }, [claudeActive]);
   // Reconnect the SSE stream when the tab returns to the foreground (or a bfcache
   // restore). A backgrounded mobile tab can have its stream dropped with the
   // onclose-driven reconnect frozen; ensureConnected() reopens a dead socket — and,
