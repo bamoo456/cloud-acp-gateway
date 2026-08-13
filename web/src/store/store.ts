@@ -125,6 +125,10 @@ interface State {
   // it are scattered through the thread (a tool card's file path), not just the
   // header button.
   filesOpen: boolean;
+  // The folder's diffstat, as the file panel last read it. Lives here because
+  // the status bar reports it too (§1.4) and that row exists whether or not the
+  // panel is open. Null until the first `git status` lands.
+  changeStat: { files: number; additions: number; deletions: number } | null;
   // ---- sessions sidebar (desktop column only) ----
   // Whether the left column is expanded at >=860px. Separate from App's mobile
   // `panel` overlay state: collapsing/expanding the column must not re-run the
@@ -180,6 +184,7 @@ interface State {
   lock: () => void;
   unlock: () => void;
   refreshLockSettings: () => void;
+  setChangeStat: (stat: State["changeStat"]) => void;
   toggleFiles: () => void;
   closeFiles: () => void;
   toggleSidebar: () => void;
@@ -1004,6 +1009,7 @@ export const useStore = create<State>((set, get) => {
     // column there, not an overlay sheet that would cover the chat) and
     // closed on a phone-width one.
     filesOpen: isDesktopPanelWidth(),
+    changeStat: null,
     // Same shape for the left column, at its own (860px) breakpoint.
     sidebarOpen: isDesktopSidebarWidth(),
     filePreview: null,
@@ -1633,6 +1639,10 @@ export const useStore = create<State>((set, get) => {
     // Closing the panel deliberately keeps `filePreview`: reopening it should
     // land back on the file you were reading, not throw you to the top of the
     // list. Only the panel's own back button clears it.
+    setChangeStat(stat) {
+      set({ changeStat: stat });
+    },
+
     toggleFiles() {
       set((st) => ({ filesOpen: !st.filesOpen }));
     },

@@ -164,6 +164,7 @@ export function FilePanel() {
   const clearFilePreview = useStore((s) => s.clearFilePreview);
   const openFilePreview = useStore((s) => s.openFilePreview);
   const attachFiles = useStore((s) => s.attachFiles);
+  const setChangeStat = useStore((s) => s.setChangeStat);
   // The same capability the composer's "@" button is gated on: file references
   // ride on embeddedContext, and an agent without it drops them on send.
   const canAttach = useStore((s) => !!s.promptCapabilities.embeddedContext);
@@ -209,8 +210,20 @@ export function FilePanel() {
     const mine = ++gen.current;
     setLoading(true);
     getWorkspaceChanges(cwd)
-      .then((r) => { if (mine === gen.current) { setChanges(r); setErr(null); } })
-      .catch((e: Error) => { if (mine === gen.current) { setChanges(null); setErr(e.message || "Couldn't read this folder's changes."); } })
+      .then((r) => {
+        if (mine !== gen.current) return;
+        setChanges(r); setErr(null);
+        // The status bar reports the same diffstat (§1.4) and has no reader of
+        // its own, so publish the total here rather than fetching it twice.
+        setChangeStat(r.files.length
+          ? {
+            files: r.files.length,
+            additions: r.files.reduce((n, f) => n + (f.additions ?? 0), 0),
+            deletions: r.files.reduce((n, f) => n + (f.deletions ?? 0), 0),
+          }
+          : null);
+      })
+      .catch((e: Error) => { if (mine === gen.current) { setChanges(null); setChangeStat(null); setErr(e.message || "Couldn't read this folder's changes."); } })
       .finally(() => { if (mine === gen.current) setLoading(false); });
     // A separate request with a separate failure: a gateway too old to know the
     // route, or a folder that has since been deleted, must leave the git half of
@@ -231,7 +244,9 @@ export function FilePanel() {
   // Fetched whenever the panel is open, because Outputs now depends on it: git
   // is what supplies a row's status letter and line counts, and what surfaces
   // the files an agent wrote through a shell (which name no path in any tool
-  // call). Still gated on `open` — with the panel shut, nobody is looking.
+  // call). Still gated on `open` — with the panel shut, nobody is looking, and
+  // the status bar's diffstat is a summary of what this read anyway, not a
+  // second reason to run `git status` on a folder nobody has asked about.
   useEffect(() => {
     if (!open) return;
     loadChanges();
@@ -313,6 +328,16 @@ export function FilePanel() {
   // The agent's current plan, if it has published one. The last plan update wins
   // — ACP re-sends the whole list every time an entry changes.
   const plan = [...(session?.items ?? [])].reverse().find((it) => it.kind === "plan");
+  // Read off `changes` rather than the store field: the store carries whichever
+  // folder the panel last read, and in Review mode this panel is looking at a
+  // revision the status bar knows nothing about.
+  const stat = changes?.files.length
+    ? {
+      files: changes.files.length,
+      additions: changes.files.reduce((n, f) => n + (f.additions ?? 0), 0),
+      deletions: changes.files.reduce((n, f) => n + (f.deletions ?? 0), 0),
+    }
+    : null;
 
   return (
     <>
@@ -333,8 +358,19 @@ export function FilePanel() {
           {/* Naming the folder is half of what the Project mode is for, and it
               is the only thing here that says WHICH checkout the lists describe
               when a session's cwd differs from the picker's. */}
+          {/* The summary folds into the header rather than taking a row of its
+              own (§1.3): "Files repo · 7 files +128 −35". */}
           <span className="wf-title" title={target ? target.abs : cwd}>
-            {target ? target.path : <>Files <span className="wf-cwd">{basename(cwd)}</span></>}
+            {target ? target.path : (
+              <>
+                Files <span className="wf-cwd">{basename(cwd)}</span>
+                {stat && <span className="wf-stat">
+                  {stat.files} file{stat.files === 1 ? "" : "s"}
+                  {stat.additions > 0 && <b className="add">+{stat.additions}</b>}
+                  {stat.deletions > 0 && <b className="del">−{stat.deletions}</b>}
+                </span>}
+              </>
+            )}
           </span>
           {!target && (
             <button className="icon-btn" title="Refresh" disabled={loading}

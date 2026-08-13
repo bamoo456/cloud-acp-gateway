@@ -72,7 +72,9 @@ describe("global styles", () => {
 
     expect(sendRule).toMatch(/background\s*:\s*var\(--accent\)/);
     expect(sendRule).toMatch(/color\s*:\s*var\(--accent-text\)/);
-    expect(cssRule(".send.stop")).toMatch(/color\s*:\s*var\(--bg\)/);
+    // Stop is the same control outlined, not a fifth colour meaning.
+    expect(cssRule(".send.stop")).toMatch(/background\s*:\s*transparent/);
+    expect(cssRule(".send.stop")).toMatch(/color\s*:\s*var\(--text\)/);
     expect(styles).toMatch(/:root\s*\{[\s\S]*--ink\s*:\s*var\(--text\)/);
     expect(styles).toMatch(/:root\s*\{[\s\S]*--on-ink\s*:\s*var\(--bg\)/);
     expect(styles).toMatch(/:root\s*\{[\s\S]*--accent-text\s*:\s*var\(--on-ink\)/);
@@ -115,6 +117,7 @@ describe("global styles", () => {
     const allowed = [
       ".diff .add::before", ".wf-mark.wf-git.added, .wf-mark.wf-git.untracked",
       ".wf-counts .add", ".udiff-stat .add", ".udiff-row.add .sign",
+      ".statusbar .sb-seg b.add", ".wf-stat b.add",
     ];
     const offenders = styles.split("\n")
       .filter((line) => line.includes("var(--ok)"))

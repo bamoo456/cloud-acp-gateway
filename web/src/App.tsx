@@ -37,10 +37,11 @@ export function App() {
   const locked = useStore((s) => s.locked);
   const cwd = useStore((s) => s.cwd);
   const terminalEnabled = useStore((s) => s.cfg.terminalEnabled);
-  // The strip is shared: it docks the terminal toggle and the usage gauge, and
-  // either one alone is reason enough to show it.
-  const hasUsage = useStore((s) =>
-    !!(s.activeId && s.sessions[s.activeId]?.contextSize) || Object.keys(s.rateLimits).length > 0);
+  const conn = useStore((s) => s.conn);
+  // Machine-layer facts, in one row along the bottom edge (§1.4): the
+  // transport, the folder's diffstat, the context window, the account's quota
+  // and the terminal. Not the agent — the crumb and the dock already name it.
+  const changeStat = useStore((s) => s.changeStat);
   const [panel, setPanel] = useState(false);
   const [picker, setPicker] = useState(false);
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
@@ -150,24 +151,31 @@ export function App() {
       {/* Status strip + terminal are siblings of .app-row, not inside it — they
           dock full-width below the sidebar/chat/files row (like DevTools), so
           they have to be direct #root flex children to stack under that row
-          instead of becoming a 4th column inside it. The strip is always
-          present when the gateway offers a terminal: it is the only affordance
-          that opens the panel, and it doubles as the panel's title bar. It also
-          appears on a terminal-less gateway once there is usage to report. */}
-      {(terminalEnabled || hasUsage) && (
-        <div className="statusbar">
-          {terminalEnabled && (
-            <>
-              <button className={"sb-chip" + (terminalOpen ? " on" : "")} aria-pressed={terminalOpen}
-                onClick={() => setTerminalOpen((v) => !v)}>
-                <IconTerminal />Terminal
-              </button>
-              <span className="sb-hint">or <kbd>⌃`</kbd></span>
-            </>
-          )}
-          <UsageStrip />
-        </div>
-      )}
+          instead of becoming a 4th column inside it. Unlike before, the strip
+          is always present: it is the app's bottom edge and it owns the
+          home-indicator inset, and the connection is a fact it always has. */}
+      <div className="statusbar">
+        {/* Silent when healthy (§1.1): muted text, no green dot; only a broken
+            connection speaks up. */}
+        <span className={"sb-seg conn" + (conn === "offline" ? " off" : "")}>
+          {conn === "connected" ? "connected" : conn === "offline" ? "offline" : "connecting"}
+        </span>
+        {changeStat && changeStat.files > 0 && (
+          <span className="sb-seg" title={`${changeStat.files} changed file${changeStat.files === 1 ? "" : "s"} in this folder`}>
+            {changeStat.files} file{changeStat.files === 1 ? "" : "s"}
+            {changeStat.additions > 0 && <b className="add">+{changeStat.additions}</b>}
+            {changeStat.deletions > 0 && <b className="del">−{changeStat.deletions}</b>}
+          </span>
+        )}
+        <span className="sb-sp" />
+        <UsageStrip />
+        {terminalEnabled && (
+          <button className={"sb-seg sb-term" + (terminalOpen ? " on" : "")} aria-pressed={terminalOpen}
+            title="Toggle the terminal" onClick={() => setTerminalOpen((v) => !v)}>
+            <IconTerminal />term <kbd>⌃`</kbd>
+          </button>
+        )}
+      </div>
       {terminalEnabled && terminalOpen && <Terminal cwd={cwd} onEmpty={() => setTerminalOpen(false)} />}
       {locked && <LockScreen />}
     </>
