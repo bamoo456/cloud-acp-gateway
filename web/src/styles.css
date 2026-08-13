@@ -946,20 +946,27 @@
   /* The strip that opens the terminal, and names it while it is open — always
      present, so the panel needs no title bar of its own. Sits between the app
      row and the panel, and is the last thing above the composer when closed. */
-  .statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; height: 30px;
-    padding: 0 10px; padding-bottom: env(safe-area-inset-bottom);
+  /* Height comes from the chip plus padding (28 + 5 + 5 = 38) rather than a
+     fixed value, so the home-indicator inset can be added below it instead of
+     eating into it — box-sizing is border-box everywhere here. */
+  .statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 5px 10px; padding-bottom: calc(5px + env(safe-area-inset-bottom));
     background: var(--surface-2); border-top: 1px solid var(--border); }
-  .statusbar .sb-chip { display: inline-flex; align-items: center; gap: 6px; height: 22px;
-    padding: 0 9px; border-radius: 999px; font-size: 12.5px; font-weight: 650; color: var(--muted); }
-  .statusbar .sb-chip svg { width: 14px; height: 14px; }
-  .statusbar .sb-chip:hover { background: var(--bg); color: var(--text); }
-  .statusbar .sb-chip.on { color: var(--accent); background: var(--bg);
-    box-shadow: inset 0 0 0 1px var(--border-strong); }
+  .statusbar .sb-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px;
+    padding: 0 12px; border-radius: 8px; font-size: 13px; font-weight: 650;
+    background: var(--accent); color: var(--accent-text); transition: background .12s; }
+  .statusbar .sb-chip:hover, .statusbar .sb-chip.on { background: var(--accent-press); }
+  .statusbar .sb-chip svg { width: 15px; height: 15px; }
+  .statusbar .sb-hint { color: var(--muted); font-size: 12px; }
+  .statusbar kbd { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 3px 5px;
+    border-radius: 4px; background: var(--bg); border: 1px solid var(--border-strong); color: var(--muted); }
+  /* No physical Ctrl key to press — the button is the whole story on a phone. */
+  @media (max-width: 640px) { .statusbar .sb-hint { display: none; } }
   /* The strip — or the panel, when that is open — is now the bottom edge of the
      app, so it owns the home-indicator gap and the composer above it must stop
      reserving one of its own. */
   #root:has(.statusbar) footer { padding-bottom: 10px; }
-  .statusbar:has(+ .term-panel) { padding-bottom: 0; }
+  .statusbar:has(+ .term-panel) { padding-bottom: 5px; }
   .term-panel { padding-bottom: env(safe-area-inset-bottom); }
   /* one chip per shell, numbered; the whole row is flush against the panel's
      top edge, under the drag handle */
