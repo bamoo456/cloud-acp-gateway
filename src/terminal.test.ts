@@ -26,28 +26,36 @@ test("handleTerminal serves /terminal/status without starting a shell", () => {
   const handled = handleTerminal(fakeReq("/terminal/status"), res, "/terminal/status", 1024);
   assert.equal(handled, true);
   assert.equal(status(), 200);
-  assert.deepEqual(JSON.parse(body()), { running: false, lastExit: null });
+  // No tab has been opened in this process, so there is nothing to report.
+  assert.deepEqual(JSON.parse(body()), { sessions: [] });
 });
 
 test("handleTerminal rejects non-POST on /terminal/start", () => {
   const { res, status } = fakeRes();
-  const handled = handleTerminal(fakeReq("/terminal/start"), res, "/terminal/start", 1024);
+  const handled = handleTerminal(fakeReq("/terminal/start?id=t1"), res, "/terminal/start", 1024);
   assert.equal(handled, true);
   assert.equal(status(), 405);
 });
 
-test("handleTerminal rejects non-POST on /terminal/stop", () => {
-  const { res, status } = fakeRes();
-  const handled = handleTerminal(fakeReq("/terminal/stop"), res, "/terminal/stop", 1024);
-  assert.equal(handled, true);
-  assert.equal(status(), 405);
+// Everything but /terminal/status addresses one tab, so a request that names no
+// tab — or names one that was never started — must not fall through to some
+// other session. Neither spawns a shell.
+test("handleTerminal rejects a missing or malformed id with 400", () => {
+  for (const url of ["/terminal/stop", "/terminal/stop?id=", "/terminal/stop?id=has spaces", "/terminal/stop?id=" + "x".repeat(65)]) {
+    const { res, status, body } = fakeRes();
+    const handled = handleTerminal(fakeReq(url, "POST"), res, "/terminal/stop", 1024);
+    assert.equal(handled, true, url);
+    assert.equal(status(), 400, url);
+    assert.match(body(), /bad or missing id/);
+  }
 });
 
-test("handleTerminal rejects non-POST on /terminal/resize", () => {
-  const { res, status } = fakeRes();
-  const handled = handleTerminal(fakeReq("/terminal/resize"), res, "/terminal/resize", 1024);
+test("handleTerminal 404s an id with no live shell behind it", () => {
+  const { res, status, body } = fakeRes();
+  const handled = handleTerminal(fakeReq("/terminal/stop?id=never-started", "POST"), res, "/terminal/stop", 1024);
   assert.equal(handled, true);
-  assert.equal(status(), 405);
+  assert.equal(status(), 404);
+  assert.match(body(), /unknown terminal/);
 });
 
 test("handleTerminal ignores an unknown /terminal/* path", () => {

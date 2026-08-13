@@ -1,28 +1,48 @@
-// Client for the gateway's opt-in general-shell PTY terminal (/terminal/*).
+// Client for the gateway's general-shell PTY terminals (/terminal/*).
 // Mirrors lib/login.ts: these calls ride the browser's already-cached Basic
 // auth on same-origin requests, so no token needs to travel in the query.
+//
+// `id` is one terminal tab. The client picks it; the gateway keys a shell by
+// it and hands the live list back from listTerminals(), so a reloaded page
+// re-attaches to its shells instead of orphaning them.
 const base = () => location.protocol + "//" + location.host;
+const qs = (id: string) => `?id=${encodeURIComponent(id)}`;
 
-export async function startTerminal(cwd?: string): Promise<void> {
-  const qs = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-  await fetch(base() + "/terminal/start" + qs, { method: "POST", credentials: "same-origin" });
+export function newTerminalId(): string {
+  return crypto.randomUUID();
 }
 
-export function terminalStreamUrl(): string {
-  return base() + "/terminal/stream";
-}
-
-export async function sendTerminalInput(data: string): Promise<void> {
+export async function listTerminals(): Promise<string[]> {
   try {
-    await fetch(base() + "/terminal/input", { method: "POST", body: data, credentials: "same-origin" });
+    const r = await fetch(base() + "/terminal/status", { credentials: "same-origin" });
+    if (!r.ok) return [];
+    const body = (await r.json()) as { sessions?: Array<{ id?: string }> };
+    return (body.sessions ?? []).map((s) => s.id).filter((id): id is string => !!id);
+  } catch {
+    return []; // offline or an older gateway — start fresh rather than fail to open
+  }
+}
+
+export async function startTerminal(id: string, cwd?: string): Promise<void> {
+  const url = base() + "/terminal/start" + qs(id) + (cwd ? `&cwd=${encodeURIComponent(cwd)}` : "");
+  await fetch(url, { method: "POST", credentials: "same-origin" });
+}
+
+export function terminalStreamUrl(id: string): string {
+  return base() + "/terminal/stream" + qs(id);
+}
+
+export async function sendTerminalInput(id: string, data: string): Promise<void> {
+  try {
+    await fetch(base() + "/terminal/input" + qs(id), { method: "POST", body: data, credentials: "same-origin" });
   } catch (e) {
     console.error("sendTerminalInput failed", e);
   }
 }
 
-export async function resizeTerminal(cols: number, rows: number): Promise<void> {
+export async function resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
   try {
-    await fetch(base() + "/terminal/resize", {
+    await fetch(base() + "/terminal/resize" + qs(id), {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
@@ -33,6 +53,10 @@ export async function resizeTerminal(cols: number, rows: number): Promise<void> 
   }
 }
 
-export async function stopTerminal(): Promise<void> {
-  await fetch(base() + "/terminal/stop", { method: "POST", credentials: "same-origin" });
+export async function stopTerminal(id: string): Promise<void> {
+  try {
+    await fetch(base() + "/terminal/stop" + qs(id), { method: "POST", credentials: "same-origin" });
+  } catch (e) {
+    console.error("stopTerminal failed", e);
+  }
 }
