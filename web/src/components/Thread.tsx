@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { Session, MessageImage, MessageFile } from "../types.ts";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { Session, MessageImage, MessageFile, ThreadItem } from "../types.ts";
 import { useStore } from "../store/store.ts";
 import { imageSrc } from "../lib/images.ts";
 import { IconFile } from "../lib/icons.tsx";
@@ -10,7 +10,7 @@ import { PermissionPrompt } from "./PermissionPrompt.tsx";
 import { ElicitationPrompt } from "./ElicitationPrompt.tsx";
 import { Working } from "./Working.tsx";
 import { CopyButton } from "./CopyButton.tsx";
-import { CodexMark, IconChevronDown, IconThinking, OpencodeMark, Robot } from "../lib/icons.tsx";
+import { CodexMark, IconChevronDown, OpencodeMark, Robot } from "../lib/icons.tsx";
 
 // Mount only the most recent slice of a conversation. Every rendered message adds
 // DOM nodes (a code block becomes hundreds), and the browser's per-keystroke layout
@@ -50,6 +50,69 @@ function MessageFiles({ files }: { files: MessageFile[] }) {
   );
 }
 
+// A turn is a run of consecutive thought/assistant items sharing one label line.
+// The fold happens HERE, at render time, over `shown` — never in the store.
+// Merging them into `items` would change items.length and the structuralSig the
+// forceRepaint effect is keyed on, and that key is the fix for the iOS/PWA
+// blank-thread bug (issue #98). See docs/ui-refactor-plan.md §2.1.
+type Thought = Extract<ThreadItem, { kind: "thought" }>;
+type Reply = Extract<ThreadItem, { kind: "assistant" }>;
+type Row =
+  | { row: "turn"; id: string; thoughts: Thought[]; replies: Reply[] }
+  | { row: "item"; id: string; item: ThreadItem };
+
+function groupTurns(items: ThreadItem[]): Row[] {
+  const rows: Row[] = [];
+  for (const it of items) {
+    if (it.kind !== "thought" && it.kind !== "assistant") {
+      rows.push({ row: "item", id: it.id, item: it });
+      continue;
+    }
+    // The window slides (`shown` is a slice), so a run can legitimately start
+    // with either half: a thought whose reply hasn't streamed in yet, or a reply
+    // whose thought fell off the top of the window.
+    const open = rows[rows.length - 1];
+    const turn = open?.row === "turn" ? open : null;
+    if (!turn) {
+      rows.push(it.kind === "thought"
+        ? { row: "turn", id: it.id, thoughts: [it], replies: [] }
+        : { row: "turn", id: it.id, thoughts: [], replies: [it] });
+      continue;
+    }
+    if (it.kind === "thought") turn.thoughts.push(it);
+    else turn.replies.push(it);
+  }
+  return rows;
+}
+
+// One agent turn: a mono label line, then the reply as plain text on the page.
+// No frame — a message is not a machine artefact (§1.3). Thinking folds into the
+// label rather than standing as its own strip.
+function AgentTurn({ agentName, thoughts, replies }: { agentName: string; thoughts: Thought[]; replies: Reply[] }) {
+  const copyable = replies.map((r) => r.text).filter(Boolean).join("\n\n");
+  return (
+    <div className="turn agent">
+      <div className="lbl">
+        <span className="who"><span className="idot" /><span className="wm">{agentName}</span></span>
+        {thoughts.length > 0 && (
+          <details className="think">
+            <summary>· thought<IconChevronDown /></summary>
+            <div className="in">{thoughts.map((t) => <Markdown key={t.id} text={t.text} />)}</div>
+          </details>
+        )}
+        <span className="sp" />
+      </div>
+      {replies.map((r) => (
+        <div className="body" key={r.id}>
+          {r.images && r.images.length > 0 && <MessageImages images={r.images} />}
+          {r.text && <Markdown text={r.text} />}
+        </div>
+      ))}
+      {copyable && <CopyButton text={copyable} label="Copy reply" />}
+    </div>
+  );
+}
+
 // Pin the scroll container to the bottom *instantly* — bypassing the container's
 // CSS `scroll-behavior: smooth`, whose animation chases a moving target while
 // markdown/tool cards are still laying out and otherwise settles part-way up.
@@ -80,6 +143,9 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
   const hiddenRef = useRef(0);      // latest hidden count, read inside the (once-bound) scroll handler
   const anchorHeight = useRef(0);   // scrollHeight captured before a reveal, to compensate the prepend
   const agent = useStore((s) => s.cfg.agents.find((a) => a.name === s.agentName));
+  // Identity is a mono wordmark, not a hue (§1.2) — the agent's own name, as
+  // configured, is the label every turn wears.
+  const agentLabel = useStore((s) => s.agentName);
   const [visible, setVisible] = useState(INITIAL_VISIBLE);
   // Show a "jump to latest" button whenever the user has scrolled up off the bottom,
   // so they can return to the live tail in one tap instead of a long manual scroll.
@@ -167,6 +233,10 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
   const hidden = Math.max(0, items.length - visible);
   hiddenRef.current = hidden;
   const shown = hidden > 0 ? items.slice(-visible) : items;
+  // Pure, and bound to the two things the slice is derived from — the store
+  // arrays are replaced (not mutated) on every update, so identity is enough.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const rows = useMemo(() => groupTurns(shown), [items, visible]);
 
   // Opening (or loading) a conversation should land on the latest message. The
   // follow-effect above can fall short here: the first jump fires while markdown,
@@ -262,35 +332,26 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
           {session?.loadingOlder ? "Loading earlier messages…" : "↑ Scroll up to load earlier messages"}
         </div>
       )}
-      {shown.map((it) => {
+      {rows.map((row) => {
+        if (row.row === "turn") return <AgentTurn key={row.id} agentName={agentLabel} thoughts={row.thoughts} replies={row.replies} />;
+        const it = row.item;
         switch (it.kind) {
           case "user": return (
-            <div className="msg user" key={it.id}>
-              <div className="bubble rich">
-                {it.images && it.images.length > 0 && <MessageImages images={it.images} />}
-                {it.files && it.files.length > 0 && <MessageFiles files={it.files} />}
-                {it.text && <Markdown text={it.text} />}
-              </div>
+            <div className="turn user" key={it.id}>
+              <div className="lbl"><span className="you">you</span><span className="sp" /></div>
+              {it.images && it.images.length > 0 && <MessageImages images={it.images} />}
+              {it.files && it.files.length > 0 && <MessageFiles files={it.files} />}
+              {it.text && <div className="body"><Markdown text={it.text} /></div>}
               {it.text && <CopyButton text={it.text} label="Copy message" />}
             </div>
-          );
-          case "assistant": return (
-            <div className="msg assistant" key={it.id}>
-              {it.images && it.images.length > 0 && <MessageImages images={it.images} />}
-              {it.text && <Markdown text={it.text} />}
-              {it.text && <CopyButton text={it.text} label="Copy reply" />}
-            </div>
-          );
-          case "thought": return (
-            <details className="thinking" key={it.id}>
-              <summary><IconThinking />Thinking</summary><Markdown text={it.text} />
-            </details>
           );
           case "tool": return <ToolCall item={it} key={it.id} />;
           case "plan": return <Plan entries={it.entries} key={it.id} />;
           case "permission": return <PermissionPrompt item={it} key={it.id} />;
           case "elicitation": return <ElicitationPrompt item={it} key={it.id} />;
           case "note": return <div className={it.variant === "error" ? "err-line" : "loc"} key={it.id}>{it.text}</div>;
+          // thought / assistant never reach here — groupTurns folds them into a turn.
+          default: return null;
         }
       })}
       {session?.working && <Working />}

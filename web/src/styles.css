@@ -614,31 +614,66 @@
   .notice .nbody { padding: 0 14px 14px; color: var(--text); font-size: 14.5px;
     border-top: 1px solid var(--border); padding-top: 12px; }
 
-  /* messages */
-  .msg { margin: 14px 0; min-width: 0; max-width: 100%; }
-  .msg.user { display: flex; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
-  .msg.user .bubble {
-    background: var(--user-bubble); padding: 11px 16px; border-radius: 20px 20px 6px 20px;
-    min-width: 0; max-width: 84%; white-space: pre-wrap; word-wrap: break-word;
-    overflow-wrap: anywhere; font-size: var(--chat-user-size);
+  /* ---- turns ----
+     A message is text on the page, not a machine artefact, so it gets no
+     bubble, no panel and no title bar (§1.3). What names it is one mono label
+     line: "YOU" on one side, the agent's wordmark on the other. */
+  .turn { margin: 0 0 22px; min-width: 0; max-width: 100%; }
+  .lbl {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    color: var(--faint);
   }
-  .msg.assistant { min-width: 0; max-width: 100%; }
-  .msg.user .bubble.rich { white-space: normal; } /* .md handles layout when markdown-rendered */
-  .msg.user .bubble .md > :last-child { margin-bottom: 0; }
-  .msg.user .bubble .md { font-size: var(--chat-user-size); }
+  .lbl .sp { flex: 1; }
+  /* Only "you" is shouted, so the engine record beside the agent's name (model,
+     thinking level — P3) stays quiet next to it. */
+  .lbl .you { letter-spacing: .09em; text-transform: uppercase; }
+  .lbl .who { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+  .lbl .wm { color: var(--muted); }
+  /* The one place the agent's brand colour is allowed to appear, and it is off
+     unless the reader asks for it (§1.2). */
+  .idot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto;
+    background: var(--agent-color, var(--ink)); display: none; }
+  :root[data-identity="dot"] .idot, :root[data-identity="hue"] .idot { display: block; }
+  .turn.user .body { font-size: var(--chat-user-size); min-width: 0; overflow-wrap: anywhere; }
+  .turn.user .body .md { font-size: var(--chat-user-size); }
+  .turn .body > :last-child { margin-bottom: 0; }
   /* assistant replies render as editorial serif (Claude-iOS feel); code stays
      mono (via .md code) and tables stay sans for density */
-  .msg.assistant .md { font-family: var(--serif); font-size: var(--chat-assistant-size); line-height: 1.62; letter-spacing: .1px; }
-  .msg.assistant .md table { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", sans-serif; }
+  .turn.agent .md { font-family: var(--serif); font-size: var(--chat-assistant-size); line-height: 1.62; letter-spacing: .1px; }
+  .turn.agent .md table { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", sans-serif; }
+  /* Thinking folds into the label line — it is not its own box. */
+  details.think { min-width: 0; }
+  details.think > summary {
+    list-style: none; display: inline-flex; align-items: center; gap: 3px;
+    cursor: pointer; color: var(--faint); user-select: none;
+  }
+  details.think > summary::-webkit-details-marker { display: none; }
+  details.think > summary:hover { color: var(--text); }
+  details.think > summary svg { width: 11px; height: 11px; }
+  details.think[open] > summary svg { transform: rotate(180deg); }
+  details.think .in {
+    margin: 8px 0 2px; padding-left: 11px; border-left: 1px solid var(--border-strong);
+    text-transform: none; letter-spacing: 0; color: var(--muted);
+  }
+  /* Reasoning is a note to itself, not the reply — sans and quiet, so it never
+     competes with the editorial serif of the answer above it. */
+  details.think .in .md {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", sans-serif;
+    font-size: var(--chat-secondary-size); line-height: 1.6; letter-spacing: 0;
+  }
+  details.think .in .md + .md { margin-top: .6em; }
+  /* An open thought is a block inside the label row, so the row must stop
+     centring its items against it. */
+  .lbl:has(details.think[open]) { align-items: flex-start; }
   /* per-message "copy" button under the text. Subtle by default, brightens on
-     hover/focus; on the user side it sits below the bubble, right-aligned. */
+     hover/focus. */
   .msg-copy {
     display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
     padding: 3px 8px; border: 0; border-radius: 8px; background: transparent;
     color: var(--muted); font-size: 12px; cursor: pointer; opacity: .6;
     transition: opacity .12s, background .12s, color .12s; -webkit-tap-highlight-color: transparent;
   }
-  .msg.user .msg-copy { flex: 0 0 100%; justify-content: flex-end; }
   .msg-copy:hover, .msg-copy:focus-visible { opacity: 1; background: var(--surface-2); color: var(--text); }
   .msg-copy.copied { opacity: 1; color: var(--text); }
   .msg-copy > svg { width: 14px; height: 14px; flex: 0 0 auto; }
@@ -679,31 +714,27 @@
   @keyframes wbl { 0%, 60%, 100% { opacity: .2; } 30% { opacity: 1; } }
   .working .wsec { opacity: .7; font-variant-numeric: tabular-nums; }
 
-  .thinking { margin: 12px 0; }
-  .thinking summary { color: var(--muted); font-size: 14px; cursor: pointer; list-style: none;
-    display: inline-flex; align-items: center; gap: 7px; user-select: none; }
-  .thinking summary::-webkit-details-marker { display: none; }
-  .thinking summary svg { width: 16px; height: 16px; }
-  .thinking .md { color: var(--muted); font-size: var(--chat-secondary-size); margin-top: 8px;
-    border-left: 2px solid var(--border-strong); padding-left: 12px; }
-
-  /* tool call card */
-  .tool { border: 1px solid var(--border); background: var(--surface); border-radius: 13px;
+  /* tool call card — the frame means "the agent did this" (§1.3). Header is the
+     tool's kind, the path it touched, and whatever is left to say on the right. */
+  .tool { border: 1px solid var(--border); background: var(--surface); border-radius: 10px;
     min-width: 0; max-width: 100%; margin: 12px 0; overflow: hidden; }
-  .tool > summary { display: flex; align-items: center; gap: 10px; padding: 11px 13px;
-    cursor: pointer; list-style: none; user-select: none; }
+  .tool > summary { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 11px;
+    cursor: pointer; list-style: none; user-select: none; background: var(--surface-2);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .tool[open] > summary { border-bottom: 1px solid var(--border); }
   .tool > summary::-webkit-details-marker { display: none; }
-  .tool .ticon { width: 22px; height: 22px; flex: 0 0 auto; color: var(--muted); display: grid; place-items: center; }
-  .tool .ticon svg { width: 18px; height: 18px; }
-  .tool .ttitle { flex: 1; min-width: 0; font-weight: 600; font-size: 15px; white-space: nowrap;
+  .tool .ticon { width: 16px; height: 16px; flex: 0 0 auto; color: var(--text); display: grid; place-items: center; }
+  .tool .ticon svg { width: 14px; height: 14px; }
+  .tool .tkind { flex: 0 0 auto; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; font-size: 10.5px; }
+  .tool .ttitle { flex: 1; min-width: 0; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
   /* A finished tool call is silent (§1.1): no badge, no colour. Amber is
      reserved for "needs you", so a running tool is ink, not amber. */
-  .tool .tstatus { font-size: 12px; font-weight: 600; color: var(--faint); flex: 0 0 auto; }
+  .tool .tstatus { font-size: 10.5px; color: var(--faint); flex: 0 0 auto; }
   .tool .tstatus.in_progress, .tool .tstatus.pending { color: var(--text); }
   .tool .tstatus.completed { display: none; }
   .tool .tstatus.failed { color: var(--err); }
-  .tool .tbody { min-width: 0; max-width: 100%; padding: 0 13px 13px; border-top: 1px solid var(--border); padding-top: 11px; }
+  .tool .tbody { min-width: 0; max-width: 100%; padding: 11px 13px 13px; }
   .tool .loc { font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
   .tool .tc-item { min-width: 0; max-width: 100%; overflow: hidden; }
   .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
@@ -733,12 +764,13 @@
   .plan li.completed .txt { text-decoration: line-through; }
   .plan li.in_progress .txt { font-weight: 600; }
 
-  /* permission card */
-  .perm { border: 1px solid var(--border-strong); background: var(--surface); border-radius: 14px;
-    margin: 14px 0; padding: 14px; box-shadow: var(--shadow); }
-  .perm .ph { display: flex; align-items: center; gap: 9px; font-weight: 600; margin-bottom: 4px; }
-  .perm .ph svg { width: 20px; height: 20px; color: var(--permission-allow-bg); }
-  .perm .sub { color: var(--muted); font-size: 14px; margin-bottom: 12px; overflow-wrap: anywhere; }
+  /* permission card — amber is reserved for "needs you", so a 2px amber edge
+     carries the whole signal and the header strip is gone (§1.1, §1.3). */
+  .perm { border: 1px solid var(--border); border-left: 2px solid var(--warn); background: var(--surface);
+    border-radius: 10px; margin: 14px 0; padding: 12px 13px; }
+  .perm .q { font-size: var(--chat-secondary-size); margin-bottom: 3px; overflow-wrap: anywhere; }
+  .perm .sub { color: var(--warn); font-size: 11.5px; margin-bottom: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .perm .opts { display: flex; flex-wrap: wrap; gap: 8px; }
   .perm .opts button { padding: 9px 14px; border-radius: 10px; font-weight: 600; font-size: 14px;
     border: 1px solid var(--border-strong); background: var(--surface-2); }

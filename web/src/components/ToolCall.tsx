@@ -5,14 +5,16 @@ import { toLocalPath, isWritingKind } from "../lib/touchedFiles.ts";
 import { Markdown } from "./Markdown.tsx";
 import { Diff } from "./Diff.tsx";
 import { FileCard } from "./FileCard.tsx";
-import { toolIcon, IconCheck, IconX, IconSpinner } from "../lib/icons.tsx";
+import { IconX, IconSpinner } from "../lib/icons.tsx";
 
 type Tool = Extract<ThreadItem, { kind: "tool" }>;
-function statusIcon(status: string, kind: string) {
-  if (status === "completed") return <IconCheck />;
+// A completed call is silent (§1.1): no tick, no badge, no colour — the card
+// itself is the record that the agent did this. Only "still running" and
+// "failed" have anything left to say.
+function statusIcon(status: string) {
   if (status === "failed") return <IconX />;
   if (status === "in_progress" || status === "pending") return <IconSpinner />;
-  return toolIcon(kind);
+  return null;
 }
 export function ToolCall({ item }: { item: Tool }) {
   const [open, setOpen] = useState(item.content.length > 0);
@@ -49,10 +51,12 @@ export function ToolCall({ item }: { item: Tool }) {
     const local = produced ? toLocalPath(raw) : null;
     return local ? <FileCard path={local} /> : fileLink(raw, "loc", raw);
   };
+  const icon = statusIcon(item.status);
   return (
     <details className="tool" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
       <summary>
-        <span className="ticon">{statusIcon(item.status, item.toolKind)}</span>
+        {icon && <span className="ticon">{icon}</span>}
+        <span className="tkind">{item.toolKind || "tool"}</span>
         <span className="ttitle">{item.title}</span>
         <span className={"tstatus " + item.status}>{item.status.replace(/_/g, " ")}</span>
       </summary>
