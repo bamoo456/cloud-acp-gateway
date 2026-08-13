@@ -46,8 +46,12 @@ import { handleUpload } from "./uploads.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
   tree as workspaceTree, find as workspaceFind, outputFolder as workspaceOutputFolder,
-  inlineImageType, repoRoot, MAX_RAW_BYTES,
+  revChanges as workspaceRevChanges, commits as workspaceCommits,
+  inlineImageType, repoRoot, validRev, MAX_RAW_BYTES, MAX_COMMITS, type RevSpec,
 } from "./workspace.ts";
+import {
+  readDraft, readDrafts, writeDraft, parseComments, reviewScopeKey, MAX_DRAFTS_BYTES,
+} from "./review.ts";
 import { renderHtmlFile } from "./htmlinline.ts";
 import { buildClientConfig } from "./client-config.ts";
 import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
@@ -708,6 +712,24 @@ async function allowedOutputFolder(dir: string, cwd: string): Promise<string | n
   return boundaries.some((b) => abs.startsWith(b + path.sep)) ? abs : null;
 }
 
+// Which revision a /workspace request is about: null for the working tree (the
+// panel's original and commonest case), a RevSpec for one commit or one branch.
+//
+// `false` is the third answer and is deliberately not folded into null: a
+// request that named a revision we won't accept must be refused, not quietly
+// answered with the working tree's diff. That is the difference between "no
+// revision asked for" and "the revision asked for is not one we will run".
+function revSpecFrom(q: URLSearchParams): RevSpec | null | false {
+  const commit = q.get("rev") ?? "";
+  const base = q.get("base") ?? "";
+  // One diff has one revision. Both set is a client bug, and picking either
+  // would show a diff nobody asked for.
+  if (commit && base) return false;
+  if (commit) return validRev(commit) ? { commit } : false;
+  if (base) return validRev(base) ? { base } : false;
+  return null;
+}
+
 // Resolve a /workspace/* request's target file. `cwd` supplies the git and
 // relative-path context and must itself sit inside FS_ROOT; `path` is either
 // absolute (how /workspace/changes addresses every file it lists) or
@@ -730,6 +752,30 @@ async function resolveWorkspaceTarget(q: URLSearchParams, rootIsCwd = false): Pr
   // being shown as a "../../" chain nobody can parse at a glance.
   const display = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : abs;
   return { cwd, abs, display };
+}
+
+// One JSON request body, capped. Over the cap rejects with "too-large" rather
+// than "bad-json" so the caller can answer 413: a client that sent too much can
+// act on that, and cannot act on "malformed".
+function readJsonBody(req: http.IncomingMessage, max: number): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let tooBig = false;
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      // Stop buffering but keep draining: destroying the request mid-upload
+      // costs the client its connection and the error response with it.
+      if (size > max) tooBig = true;
+      else chunks.push(c);
+    });
+    req.on("end", () => {
+      if (tooBig) { reject(new Error("too-large")); return; }
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+      catch { reject(new Error("bad-json")); }
+    });
+    req.on("error", () => reject(new Error("bad-json")));
+  });
 }
 
 // Raw bytes for one file: the <img> source behind an image preview, and the
@@ -4141,15 +4187,23 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   //   /workspace/render   one .html with its assets inlined, so the sandboxed
   //                       preview (and a downloaded copy) actually shows them
   //   /workspace/raw      one file's bytes (the <img> source, and downloads)
+  //   /workspace/commits  the checkout's recent history, to review what landed
+  //   /workspace/review   the review draft for one diff — the one route here
+  //                       that writes, and only ever into .acp-review/
+  // changes and diff take an optional ?rev= (one commit) or ?base= (a branch
+  // against where it diverged), which is what makes reviewing history the same
+  // screen as reviewing the working tree.
   // What each may read is allowedPreviewPath's decision: the conversation's cwd,
   // its repo, and ACPG_PREVIEW_ROOTS — or anything at all, when a deployment
-  // sets ACPG_PREVIEW_FILTER_ENABLED=0. They stay read-only regardless — nothing
-  // here writes, stages or reverts.
+  // sets ACPG_PREVIEW_FILTER_ENABLED=0. They stay read-only apart from the
+  // review draft: nothing here stages, reverts, or touches a checkout's files.
   if (consoleEnabled && pathname === "/workspace/changes") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
     const cwd = resolveWithinRoot(q.get("cwd") ?? "");
     if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
-    workspaceChanges(cwd)
+    const spec = revSpecFrom(q);
+    if (spec === false) { res.writeHead(400); res.end(JSON.stringify({ error: "bad revision", code: "bad-revision" })); return; }
+    (spec ? workspaceRevChanges(cwd, spec) : workspaceChanges(cwd))
       .then((r) => {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify(r));
@@ -4158,13 +4212,33 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     return;
   }
   if (consoleEnabled && pathname === "/workspace/diff") {
-    resolveWorkspaceTarget(new URL(req.url ?? "/", "http://x").searchParams)
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const spec = revSpecFrom(q);
+    if (spec === false) { res.writeHead(400); res.end(JSON.stringify({ error: "bad revision", code: "bad-revision" })); return; }
+    resolveWorkspaceTarget(q)
       .then((target) => {
         if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
-        return workspaceFileDiff(target.cwd, target.abs).then((r) => {
+        return workspaceFileDiff(target.cwd, target.abs, spec).then((r) => {
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
         });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // The checkout's recent history, so a review can be of what was landed rather
+  // than only of what is still uncommitted. Picking an entry here re-asks
+  // /workspace/changes and /workspace/diff with ?rev=, which is why there is no
+  // separate "commit detail" route.
+  if (consoleEnabled && pathname === "/workspace/commits") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
+    const limit = Number(q.get("limit")) || MAX_COMMITS;
+    workspaceCommits(cwd, limit)
+      .then((r) => {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify(r));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
@@ -4268,6 +4342,70 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         serveWorkspaceRaw(res, target.abs);
       })
       .catch(() => { res.writeHead(500); res.end(); });
+    return;
+  }
+  // The review draft for one diff. GET returns that scope's comments plus the
+  // per-scope counts (what puts a badge on the Review tab before anything is
+  // opened); POST replaces that scope's comments wholesale.
+  //
+  // The ONE write in the whole /workspace surface, so what it may touch is
+  // narrowed on every axis available:
+  //   - the same cwd → FS_ROOT check every read here makes, first
+  //   - the path is derived entirely server-side from `repoRoot(cwd)`; the
+  //     client names a folder and a revision, never a file
+  //   - review.ts refuses a `.acp-review` that is a symlink, so a hostile
+  //     checkout cannot redirect the write out of the repo
+  //   - a folder that is not a checkout gets no persistence rather than a
+  //     hidden directory planted in it
+  // POST rather than PUT to match the rest of this server, which has no PUT.
+  if (consoleEnabled && pathname === "/workspace/review") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
+    const spec = revSpecFrom(q);
+    if (spec === false) { res.writeHead(400); res.end(JSON.stringify({ error: "bad revision", code: "bad-revision" })); return; }
+    const scope = reviewScopeKey(spec);
+    repoRoot(cwd)
+      .then((root) => {
+        // No checkout, no drafts. Review mode has nothing to show in a folder
+        // git knows nothing about, so there is nothing to persist — and the
+        // gateway does not plant a hidden directory in an arbitrary folder.
+        if (!root) {
+          if (req.method === "POST") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ saved: false, reason: "not-a-repo" })); return; }
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({ scope, comments: [], counts: {}, persisted: false }));
+          return;
+        }
+        if (req.method !== "POST") {
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify({
+            scope,
+            comments: readDraft(root, scope),
+            counts: Object.fromEntries(
+              Object.entries(readDrafts(root)).map(([k, d]) => [k, d.comments.length]),
+            ),
+            persisted: true,
+          }));
+          return;
+        }
+        readJsonBody(req, MAX_DRAFTS_BYTES)
+          .then((parsed) => {
+            const comments = parseComments((parsed as { comments?: unknown } | null)?.comments);
+            if (!comments) { res.writeHead(400); res.end(JSON.stringify({ error: "bad comments", code: "bad-comments" })); return; }
+            // A failed write is reported, not thrown: the comments are in the
+            // client's hands either way, and a read-only checkout should cost
+            // the persistence rather than the review.
+            const saved = writeDraft(root, scope, comments);
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ saved, ...(saved ? {} : { reason: "write-failed" }) }));
+          })
+          .catch((e: Error) => {
+            const tooBig = e.message === "too-large";
+            res.writeHead(tooBig ? 413 : 400);
+            res.end(JSON.stringify({ error: tooBig ? "draft too large" : "bad request" }));
+          });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
   }
   // Pinned ("favorite") folders, persisted server-side so they survive a client
