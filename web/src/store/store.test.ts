@@ -2267,6 +2267,39 @@ describe("store notification routing", () => {
     expect(st.historyNonce).toBe(nonceBefore + 1);
   });
 
+  // The sidebar renames rows it never opened. Unlike delete, the rename sidecar
+  // is per-cwd, so the row's own agent and folder have to reach the gateway —
+  // the active ones would write the title where nothing reads it.
+  test("renaming a non-active conversation posts the target's own agent and folder", async () => {
+    setPrefs({ recentSessions: [
+      { agentName: "claude", cwd: "/old", sessionId: "home-session", title: "Open thread", lastActiveAt: "2026-07-20T02:00:00.000Z" },
+      { agentName: "codex", cwd: "/other-repo", sessionId: "x1", title: "Cross folder work", lastActiveAt: "2026-07-20T01:00:00.000Z" },
+    ] });
+    const { useStore } = await bootstrapClaude();
+    let seen = "";
+    setHistoryFetch(async (url, init) => {
+      seen = `${init?.method} ${url}`;
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    });
+
+    useStore.getState().renameSession("Renamed elsewhere", {
+      sessionId: "x1", agentName: "codex", cwd: "/other-repo",
+    });
+    await flushHistory();
+
+    expect(seen).toContain("POST ");
+    expect(seen).toContain("/history/rename?agent=codex");
+    expect(seen).toContain("cwd=%2Fother-repo");
+    expect(seen).toContain("session=x1");
+    expect(seen).toContain("title=Renamed%20elsewhere");
+    const st = useStore.getState();
+    // The cached row carries the new name…
+    expect(st.recentSessions.find((r) => r.sessionId === "x1")?.title).toBe("Renamed elsewhere");
+    // …but nothing ran, so Recent must not reorder around it.
+    expect(st.recentSessions.map((r) => r.sessionId)).toEqual(["home-session", "x1"]);
+    expect(st.activeId).toBe("home-session");
+  });
+
   test("deleting a non-active conversation by id leaves the open thread alone", async () => {
     setPrefs({ recentSessions: [
       { agentName: "claude", cwd: "/old", sessionId: "home-session", title: "Keeper", lastActiveAt: "2026-07-20T02:00:00.000Z" },
