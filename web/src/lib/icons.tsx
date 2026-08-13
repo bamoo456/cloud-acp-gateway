@@ -320,12 +320,13 @@ export function IconCopy() {
   );
 }
 
+// A bare shell prompt. No surrounding box on purpose: the files-panel toggle is
+// a box, and this sits near it — the glyphs have to read as different things.
 export function IconTerminal() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M7 9l4 3-4 3" />
-      <path d="M13 15h4" />
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7l5 5-5 5" />
+      <path d="M12 17h8" />
     </svg>
   );
 }

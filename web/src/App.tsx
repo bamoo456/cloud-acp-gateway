@@ -24,6 +24,7 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 // "HTMLCanvasElement.getContext not implemented" warning (xterm degrades
 // gracefully; no test fails).
 import { Terminal } from "./components/Terminal.tsx";
+import { IconTerminal } from "./lib/icons.tsx";
 import type { AgentRef } from "./types.ts";
 
 export function App() {
@@ -34,6 +35,7 @@ export function App() {
   const joining = useStore((s) => s.joining);
   const locked = useStore((s) => s.locked);
   const cwd = useStore((s) => s.cwd);
+  const terminalEnabled = useStore((s) => s.cfg.terminalEnabled);
   const [panel, setPanel] = useState(false);
   const [picker, setPicker] = useState(false);
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
@@ -86,7 +88,7 @@ export function App() {
       <div className="app-row">
         <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)} />
         <div className="content">
-          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} onOpenLogin={(a) => setLoginAgent(a)} onOpenTerminal={() => setTerminalOpen(true)} />
+          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} onOpenLogin={(a) => setLoginAgent(a)} />
           <main id="main"><Thread session={sess} agentReady={agentReady} loading={joining} /></main>
           <Composer />
         </div>
@@ -98,11 +100,21 @@ export function App() {
       {picker && <FolderPicker onClose={() => setPicker(false)} />}
       {loginAgent && <LoginTerminal agent={loginAgent} onClose={() => setLoginAgent(null)} />}
       {/* loginAgent carries the full AgentRef so LoginTerminal can key device-auth on kind */}
-      {/* A sibling of .app-row, not inside it — docks full-width below the
-          sidebar/chat/files row (like DevTools), so it needs to be a direct
-          #root flex child to stack under that row instead of becoming a 4th
-          column inside it. */}
-      {terminalOpen && <Terminal cwd={cwd} onClose={() => setTerminalOpen(false)} />}
+      {/* Status strip + terminal are siblings of .app-row, not inside it — they
+          dock full-width below the sidebar/chat/files row (like DevTools), so
+          they have to be direct #root flex children to stack under that row
+          instead of becoming a 4th column inside it. The strip is always
+          present when the gateway offers a terminal: it is the only affordance
+          that opens the panel, and it doubles as the panel's title bar. */}
+      {terminalEnabled && (
+        <div className="statusbar">
+          <button className={"sb-chip" + (terminalOpen ? " on" : "")} aria-pressed={terminalOpen}
+            onClick={() => setTerminalOpen((v) => !v)}>
+            <IconTerminal />Terminal
+          </button>
+        </div>
+      )}
+      {terminalEnabled && terminalOpen && <Terminal cwd={cwd} />}
       {locked && <LockScreen />}
     </>
   );
