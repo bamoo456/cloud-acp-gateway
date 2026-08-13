@@ -124,6 +124,10 @@ export interface RateLimit {
   rateLimitType?: string;
   utilization?: number;
   resetsAt?: number;
+  // Only on a model-scoped weekly window from the gateway's /usage/limits route,
+  // which is the one source that names the model (e.g. "Fable"). The fixed
+  // windows are labelled by the component.
+  label?: string;
 }
 
 export interface SessionUpdate {

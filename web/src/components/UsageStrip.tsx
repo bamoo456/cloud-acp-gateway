@@ -52,8 +52,12 @@ export function UsageStrip() {
   const segments = [];
   if (sess?.contextSize) {
     const used = sess.contextUsed ?? 0;
+    // Clamped: the adapter really does report `used` past `size` for a frame or
+    // two while a session moves onto a bigger window (observed 202610/200000,
+    // then the same tokens against 1000000), and a gauge reading 101% looks
+    // broken rather than full.
     segments.push(
-      <Segment key="context" pct={Math.round((used / sess.contextSize) * 100)} label="context"
+      <Segment key="context" pct={Math.min(100, Math.round((used / sess.contextSize) * 100))} label="context"
         title={`${used.toLocaleString()} / ${sess.contextSize.toLocaleString()} tokens in context`} />,
     );
   }
@@ -66,6 +70,18 @@ export function UsageStrip() {
     segments.push(
       <Segment key={type} label={label} note={until} pct={percent(rl.utilization)}
         title={until ? `${title} · resets in ${until}` : title} />,
+    );
+  }
+  // Model-scoped weekly caps, which arrive named rather than under a known key
+  // (the endpoint moved them out of the flat seven_day_* fields). Sorted so the
+  // order doesn't shuffle between polls.
+  for (const [key, rl] of Object.entries(rateLimits).sort(([a], [b]) => a.localeCompare(b))) {
+    if (!rl.label || WINDOWS.some((w) => w.type === key)) continue;
+    if (typeof rl.utilization !== "number") continue;
+    const until = rl.resetsAt ? formatUntil(rl.resetsAt) : "";
+    segments.push(
+      <Segment key={key} label={rl.label} note={until} pct={percent(rl.utilization)}
+        title={until ? `${rl.label} weekly limit · resets in ${until}` : `${rl.label} weekly limit`} />,
     );
   }
   if (!segments.length) return null;
