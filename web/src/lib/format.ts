@@ -51,6 +51,19 @@ export function timeAgo(iso: string): string {
   return Math.round(h / 24) + "d";
 }
 
+// Time left until an instant given in Unix *seconds* (what the Claude adapter
+// puts in a rate limit's `resetsAt`), in the two coarsest units that fit:
+// "1d 9h", "1h 32m", "12m". Empty once it has passed or is under a minute —
+// a window about to reset has nothing useful to count down to.
+export function formatUntil(epochSeconds: number, now = Date.now()): string {
+  const total = Math.floor((epochSeconds * 1000 - now) / 60000);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  const d = Math.floor(total / 1440), h = Math.floor((total % 1440) / 60), m = total % 60;
+  if (d) return h ? `${d}d ${h}h` : `${d}d`;
+  if (h) return m ? `${h}h ${m}m` : `${h}h`;
+  return `${m}m`;
+}
+
 // git's own status letters and their prose, shared by every list that shows
 // them — the files panel's changed rows and the review panel's. Here rather than
 // in either component because importing one panel from the other would make the

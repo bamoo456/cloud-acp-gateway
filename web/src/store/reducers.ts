@@ -209,6 +209,12 @@ export function applyUpdate(s: Session, up: SessionUpdate): Session {
     case "tool_call_update": return upsertTool(s, up, true);
     case "plan": return upsertPlan(s, up.entries);
     case "current_mode_update": return { ...s, mode: up.currentModeId ?? s.mode };
+    // Only the context-window half lands on the session; the rate-limit _meta
+    // riding the same update is account-wide and is picked off in the store.
+    case "usage_update":
+      return typeof up.used === "number" && typeof up.size === "number" && up.size > 0
+        ? { ...s, contextUsed: up.used, contextSize: up.size }
+        : s;
     default: return s;
   }
 }

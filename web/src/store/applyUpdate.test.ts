@@ -151,6 +151,25 @@ describe("applyUpdate", () => {
     expect(s.mode).toBe("plan");
   });
 
+  test("usage_update records the context window, latest wins", () => {
+    let s = makeSession("S");
+    s = run(s,
+      up({ sessionUpdate: "usage_update", used: 12_000, size: 200_000 }),
+      up({ sessionUpdate: "usage_update", used: 31_500, size: 200_000 }),
+    );
+    expect(s).toMatchObject({ contextUsed: 31_500, contextSize: 200_000 });
+  });
+
+  test("usage_update without a window is ignored rather than rendered as 0%", () => {
+    // A rate-limit-only update (the adapter's rate_limit_event path can send one
+    // with no size) must not blank out the gauge the last real update filled.
+    let s = makeSession("S");
+    s = run(s, up({ sessionUpdate: "usage_update", used: 12_000, size: 200_000 }));
+    const before = s;
+    s = run(s, up({ sessionUpdate: "usage_update", used: 12_000, size: 0 }));
+    expect(s).toBe(before);
+  });
+
   test("user_message_chunk renders a user bubble (history replay)", () => {
     let s = makeSession("S");
     s = run(s, up({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "hi" } }));
