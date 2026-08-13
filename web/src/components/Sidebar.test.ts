@@ -415,6 +415,49 @@ describe("Sidebar recent conversations", () => {
     expect(openHistorySession).not.toHaveBeenCalled();
   });
 
+  // Several conversations are open in memory at once; only the one the main view
+  // is showing may wear the marker. Marking every open session (what the row
+  // renderers used to do) is indistinguishable from marking none.
+  test("marks only the conversation the main view is showing, not every open session", async () => {
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "s-recent", title: "Recent conversation sidebar", lastActiveAt: "2026-06-10T03:58:00.000Z" },
+      { agentName: "claude", cwd: "/repo", sessionId: "s-busy", title: "Fix session scoped busy state", lastActiveAt: "2026-06-10T03:00:00.000Z" },
+    ]);
+    const { Sidebar } = await import("./Sidebar.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    useStore.setState({
+      agentName: "claude",
+      cwd: "/repo",
+      agentReady: true,
+      // Both open and neither view-only — s-busy is a background session.
+      sessions: {
+        "s-recent": { ...makeSession("s-recent"), title: "Recent conversation sidebar" },
+        "s-busy": { ...makeSession("s-busy"), title: "Fix session scoped busy state" },
+      },
+      activeId: "s-recent",
+      openHistorySession,
+      newSession: vi.fn(),
+      historyNonce: 0,
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(Sidebar, { open: true, onClose: vi.fn(), onOpenPicker: vi.fn() }));
+      await flush();
+    });
+
+    const marked = container.querySelectorAll(".sess-item.active");
+    expect(marked).toHaveLength(1);
+    expect(marked[0].textContent).toContain("Recent conversation sidebar");
+    expect(marked[0].getAttribute("aria-current")).toBe("true");
+
+    // Same in the Conversations tab, which renders the same sessions from history.
+    await clickConversationsTab();
+    const markedAll = container.querySelectorAll(".sess-item.active");
+    expect(markedAll).toHaveLength(1);
+    expect(markedAll[0].textContent).toContain("Recent conversation sidebar");
+  });
+
   test("marks a running conversation with a pulsing dot", async () => {
     const { Sidebar } = await import("./Sidebar.tsx");
     const { useStore } = await import("../store/store.ts");

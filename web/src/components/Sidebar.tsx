@@ -67,9 +67,9 @@ const rowLabel = (t: RowTarget) => t.name || t.sessionId.slice(0, 8);
 // <button> cannot legally nest another. A component rather than a render
 // helper because useRowMenu is a hook. Rows with no `target` (Running, Current)
 // render without the affordance or the menu gestures.
-function SessionRow({ className, onOpen, target, running, onAskDelete, onMenu, children }: {
+function SessionRow({ className, onOpen, target, running, active, onAskDelete, onMenu, children }: {
   className: string; onOpen: () => void;
-  target?: RowTarget; running?: boolean;
+  target?: RowTarget; running?: boolean; active?: boolean;
   onAskDelete: (t: RowTarget) => void;
   onMenu: (t: RowTarget, x: number, y: number) => void;
   children: React.ReactNode;
@@ -77,7 +77,7 @@ function SessionRow({ className, onOpen, target, running, onAskDelete, onMenu, c
   const menu = useRowMenu((x, y) => { if (target && !running) onMenu(target, x, y); });
   return (
     <div className="sess-row">
-      <button className={className} onClick={onOpen} {...(target ? menu : {})}>{children}</button>
+      <button className={className} onClick={onOpen} aria-current={active ? "true" : undefined} {...(target ? menu : {})}>{children}</button>
       {target && (
         <button className="sess-del" title="Delete conversation" aria-label="Delete conversation"
           disabled={running} onClick={() => onAskDelete(target)}><IconTrash /></button>
@@ -293,6 +293,14 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const { active: activeTasks, cooling: coolingTasks } = runningView(s.runningTasks, s.runningSeen, Date.now());
   const runningKeys = new Set([...activeTasks, ...coolingTasks.map((c) => c.task)].map((t) => t.agentName + "\n" + t.sessionId));
   const isRunning = (agentName: string, sessionId: string) => runningKeys.has(agentName + "\n" + sessionId);
+  // The one conversation the main view is showing — the marker every row type
+  // uses, so exactly one row can wear it. Merely being open in memory is not it:
+  // several sessions are, and lighting them all up is what made the current one
+  // impossible to pick out. Agent-scoped because a bare id can collide across
+  // agents; NOT cwd-scoped, since a recents row can spell the same folder
+  // differently than the gateway does.
+  const isCurrent = (agentName: string, sessionId: string) =>
+    s.agentName === agentName && s.activeId === sessionId;
   // Local Recent entries need session/load to be reopenable, so list only recents
   // whose owning agent still reports it — across ALL agents, not just the active one.
   // Default to the first RECENT_LIMIT; "See more" reveals the rest of the cache.
@@ -353,13 +361,13 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     onMenu: (t: RowTarget, x: number, y: number) => setRowMenu({ ...t, x, y }),
   };
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
-    const active = !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
+    const active = isCurrent(it.agentName, it.sessionId);
     return (
       <SessionRow key={variant + ":" + it.agentName + ":" + it.sessionId}
         className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "")}
         onOpen={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: s.cwd, name: it.title || "" }}
-        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
+        running={isRunning(it.agentName, it.sessionId)} active={active} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="name">{it.title || it.sessionId.slice(0, 8)}</span>
@@ -374,9 +382,10 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     // fallback) — the same one jumpToTask uses, so the label can't drift from where
     // the click lands. jumpToTask resolves the agent/folder and opens it.
     const { title, cwd } = resolveRunningTask(t, s);
-    const active = s.agentName === t.agentName && s.activeId === t.sessionId;
+    const active = isCurrent(t.agentName, t.sessionId);
     return (
       <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"running:" + t.agentName + ":" + t.sessionId}
+        aria-current={active ? "true" : undefined}
         onClick={() => { s.jumpToTask(t); onClose(); }}>
         {coolingAt === undefined
           ? runDot(t.agentName, t.sessionId)
@@ -395,7 +404,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     );
   };
   const renderRecentItem = (it: RecentSession) => {
-    const active = s.cwd === it.cwd && s.agentName === it.agentName && !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
+    const active = isCurrent(it.agentName, it.sessionId);
     // Present in a freshly-fetched list → defer to the gateway title (matching
     // renderItem's fallback exactly, including null); otherwise the cached snapshot.
     const histKey = it.agentName + "\n" + it.sessionId;
@@ -413,7 +422,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
         // short-id display fallback is not a name, and a rename box must not be
         // prefilled with one.
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: named }}
-        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
+        running={isRunning(it.agentName, it.sessionId)} active={active} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -425,13 +434,13 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     );
   };
   const renderDiscoveredItem = (it: TaggedDiscoveredHistory) => {
-    const active = s.cwd === it.cwd && s.agentName === it.agentName && !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
+    const active = isCurrent(it.agentName, it.sessionId);
     return (
       <SessionRow key={"discovered:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
         className={"sess-item recent with-folder" + (active ? " active" : "")}
         onOpen={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: it.title || "" }}
-        running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
+        running={isRunning(it.agentName, it.sessionId)} active={active} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -443,9 +452,10 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     );
   };
   const renderCurrentItem = (it: typeof currentItems[number]) => {
-    const active = s.activeId === it.id;
+    const active = isCurrent(s.agentName, it.id);
     return (
       <button className={"sess-item recent" + (active ? " active" : "")} key={"current:" + it.id}
+        aria-current={active ? "true" : undefined}
         onClick={() => { s.selectSession(it.id); onClose(); }}>
         {runDot(s.agentName, it.id)}
         {mark(s.agentName)}
