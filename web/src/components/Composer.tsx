@@ -342,8 +342,9 @@ export function Composer() {
           <input ref={fileRef} type="file" multiple hidden
             onChange={(e) => { void addAttachments(e.target.files); e.target.value = ""; }} />
           <span className="spacer" />
-          <button className={"send" + (activeBusy ? " stop" : "")} title="Send" disabled={!canSend} onClick={submit}>
-            {activeBusy ? <IconStop /> : <IconSend />}
+          <button className={"send" + (activeBusy ? " stop" : "")} title={activeBusy ? "Stop" : "Send"}
+            disabled={!canSend} onClick={submit}>
+            {activeBusy ? <><IconStop />stop</> : <>send<IconSend /></>}
           </button>
         </div>
       </div>

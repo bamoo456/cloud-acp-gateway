@@ -79,7 +79,10 @@ describe("App usage strip", () => {
 
   test("a live usage_update makes the strip appear on a terminal-less gateway", async () => {
     const ws = await mountAndConnect();
-    expect(container.querySelector(".statusbar")).toBeNull(); // nothing to report yet
+    // The status bar is the app's bottom edge now, so it is always mounted —
+    // but the usage segments still wait for an agent to report something.
+    expect(container.querySelector(".statusbar")).not.toBeNull();
+    expect(container.querySelector(".usage-strip")).toBeNull(); // nothing to report yet
 
     await act(async () => {
       ws.recv(LIVE_FRAME);

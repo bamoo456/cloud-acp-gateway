@@ -36,6 +36,8 @@
     --err: #cf5b4e;
     --shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.06);
     --radius: 16px;
+    /* The crumb's height, read back by every sheet that hangs below it. */
+    --crumb-h: 38px;
     /* The fenced code block in the composer is *inverted* from the page so it
        stands out in both themes (dark on light, light on dark — the Claude
        composer look). It reuses --text/--bg so it follows every theme/skin
@@ -143,34 +145,28 @@
 
   /* ---- top bar ---- */
   header {
-    flex: 0 0 auto; height: 52px; display: flex; align-items: center; gap: 10px;
-    padding: 0 12px; padding-top: env(safe-area-inset-top);
-    background: var(--bg); border-bottom: 1px solid var(--border); position: relative; z-index: 30;
+    flex: 0 0 auto; height: calc(var(--crumb-h) + env(safe-area-inset-top)); display: flex; align-items: center; gap: 1px;
+    padding: 0 6px; padding-top: env(safe-area-inset-top);
+    background: var(--surface-2); border-bottom: 1px solid var(--border); position: relative; z-index: 30;
   }
-  header .title { font-size: 17px; font-weight: 600; flex: 1; min-width: 0;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  header .folder-chip {
-    display: none; flex: 1; min-width: 0; height: 40px; border-radius: 10px;
-    align-items: center; justify-content: center; gap: 7px; padding: 0 10px;
-    font-size: 16px; font-weight: 700;
+  header .sp { flex: 1; min-width: 0; }
+  /* The crumb answers one question — where are you (§1.4). The connection, the
+     diffstat and the quota moved to the status bar; the agent moves to the
+     engine dock. What is left is path › session title. */
+  .crumb-path {
+    flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline;
+    padding: 4px 6px; border-radius: 6px; text-align: left;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+    color: var(--muted); white-space: nowrap; overflow: hidden;
   }
-  header .folder-chip:hover, header .folder-chip:active { background: var(--surface-2); }
-  header .folder-chip > svg { width: 17px; height: 17px; color: var(--muted); flex: 0 0 auto; }
-  header .folder-chip .nm { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  header .folder-chip .chev { display: grid; place-items: center; color: var(--muted); }
-  header .folder-chip .chev svg { width: 14px; height: 14px; }
-  /* below the desktop-sidebar breakpoint the folder switcher replaces the title */
-  @media (max-width: 859px) {
-    header .title { display: none; }
-    header .folder-chip { display: flex; }
-  }
-  header .conn { font-size: 12px; font-weight: 500; color: var(--muted);
-    display: inline-flex; align-items: center; gap: 5px; margin-right: 4px; }
-  /* Health is silent (§1.1): a healthy connection is muted plain text, the same
-     discipline a completed tool call gets. Only a broken one speaks up. */
-  header .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  header .conn.off { color: var(--err); }
-  header .conn.off .dot { background: var(--err); }
+  .crumb-path:hover { background: var(--surface); color: var(--text); }
+  /* The parents are context, the folder itself is the answer — so only the
+     folder gets ink, and the parents are the first thing cut when it is tight. */
+  .crumb-path .up { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .crumb-path b { flex: 0 0 auto; color: var(--text); font-weight: 600; }
+  .crumb-path .sep { flex: 0 0 auto; color: var(--faint); white-space: pre; }
+  .crumb-path .ttl { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 640px) { .crumb-path .up { display: none; } }
   /* ---- active-agent pill (identity + running cue + switcher) ---- */
   .agent-pill-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
   .agent-pill {
@@ -238,6 +234,11 @@
   }
   .icon-btn:hover { background: var(--surface-2); }
   .icon-btn svg { width: 22px; height: 22px; }
+  /* In the crumb the controls are chrome, not content — one size down, and the
+     hover wash is the panel colour so it reads against the crumb's own fill. */
+  header .icon-btn { width: 30px; height: 30px; border-radius: 7px; color: var(--muted); }
+  header .icon-btn:hover { background: var(--surface); color: var(--text); }
+  header .icon-btn svg { width: 17px; height: 17px; }
   /* A prompt waiting on an answer is "needs you", which is amber — not red;
      red is failure (§1.1). */
   .pending-btn { position: relative; color: var(--warn); }
@@ -248,7 +249,7 @@
   }
   .pending-scrim { position: fixed; inset: 0; z-index: 40; }
   .pending-menu {
-    position: fixed; z-index: 50; top: calc(52px + env(safe-area-inset-top) + 6px); right: 58px;
+    position: fixed; z-index: 50; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); right: 58px;
     width: min(360px, calc(100vw - 20px)); background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; transform-origin: top right; animation: pop .14s ease-out;
   }
@@ -305,14 +306,14 @@
 
   /* ---- sessions panel ---- */
   #panel {
-    position: absolute; top: calc(52px + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
+    position: absolute; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
     max-width: 460px; background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--radius); box-shadow: var(--shadow); z-index: 25; overflow: hidden;
     transform-origin: top center; display: none; flex-direction: column;
-    max-height: calc(100vh - 52px - env(safe-area-inset-top) - 14px);
+    max-height: calc(100vh - var(--crumb-h) - env(safe-area-inset-top) - 14px);
   }
   @supports (height: 100dvh) {
-    #panel { max-height: calc(100dvh - 52px - env(safe-area-inset-top) - 14px); }
+    #panel { max-height: calc(100dvh - var(--crumb-h) - env(safe-area-inset-top) - 14px); }
   }
   #panel.open { display: flex; animation: pop .14s ease-out; }
   @keyframes pop { from { opacity: 0; transform: translateY(-6px) scale(.99); } }
@@ -808,8 +809,8 @@
   /* The composer is one of the few things that keeps a frame (§1.3), but the
      frame is a hairline, not an identity-coloured ring — it brightens on focus
      instead of announcing which agent is answering. */
-  .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface);
-    border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 8px 8px 8px 12px; }
+  .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface-2);
+    border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 6px 6px 10px; }
   .composer:focus-within { border-color: var(--muted); }
   /* CodeMirror-backed composer input: the document is plain markdown, rendered
      inline as you type. Override CodeMirror's monospace defaults so prose uses
@@ -852,15 +853,20 @@
   .mode:hover { background: var(--surface-2); }
   .mode svg { width: 16px; height: 16px; }
   .mode.on { color: var(--accent); }
-  .send { position: relative; width: 38px; height: 38px; border-radius: 50%; background: var(--accent); color: var(--accent-text);
-    display: grid; place-items: center; transition: background .12s, transform .06s; }
+  /* A mono label, not a circle: send is a primary action and primary actions are
+     ink (§1.1) — the same button Allow is, in the same colour. */
+  .send { position: relative; min-width: 30px; height: 28px; padding: 0 10px; border-radius: 6px;
+    background: var(--accent); color: var(--accent-text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 5px; transition: background .12s, transform .06s; }
   .send:hover { background: var(--accent-press); }
-  .send:active { transform: scale(.94); }
-  .send:disabled { background: transparent; color: var(--muted); cursor: default; }
-  /* Absolute-centre the glyph: iOS Safari ignores grid/flex on <button>. */
-  .send svg { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 20px; height: 20px; }
-  .send.stop { background: var(--text); color: var(--bg); }
+  .send:active { transform: scale(.96); }
+  .send:disabled { background: transparent; color: var(--faint); cursor: default; }
+  .send svg { width: 14px; height: 14px; }
+  /* Stop is not a failure and not a fifth colour — it is the same control
+     wearing an outline instead of a fill, so it can't be mistaken for send. */
+  .send.stop { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
+  .send.stop:hover { background: var(--surface); }
   /* composer image attachments: thumbnail strip above the textarea, drop hint */
   .composer.dragover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 2px 8px; }
@@ -923,7 +929,7 @@
 
   /* conversation action menu — dropdown on desktop, bottom sheet on mobile */
   .amenu-scrim { position: fixed; inset: 0; z-index: 40; }
-  .amenu { position: fixed; z-index: 50; top: calc(52px + env(safe-area-inset-top) + 6px); right: 10px; width: 290px;
+  .amenu { position: fixed; z-index: 50; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); right: 10px; width: 290px;
     background: var(--surface); border: 1px solid var(--border-strong); border-radius: 16px; box-shadow: var(--shadow);
     max-height: calc(100dvh - 72px - env(safe-area-inset-top)); overflow-x: hidden; overflow-y: auto;
     overscroll-behavior: contain; transform-origin: top right; animation: pop .14s ease-out; }
@@ -1017,31 +1023,40 @@
   /* Height comes from the chip plus padding (28 + 5 + 5 = 38) rather than a
      fixed value, so the home-indicator inset can be added below it instead of
      eating into it — box-sizing is border-box everywhere here. */
-  .statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
-    padding: 5px 10px; padding-bottom: calc(5px + env(safe-area-inset-bottom));
-    background: var(--surface-2); border-top: 1px solid var(--border); }
-  .statusbar .sb-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px;
-    padding: 0 12px; border-radius: 8px; font-size: 13px; font-weight: 650;
-    background: var(--accent); color: var(--accent-text); transition: background .12s; }
-  .statusbar .sb-chip:hover, .statusbar .sb-chip.on { background: var(--accent-press); }
-  .statusbar .sb-chip svg { width: 15px; height: 15px; }
-  .statusbar .sb-hint { color: var(--muted); font-size: 12px; }
-  .statusbar kbd { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 3px 5px;
-    border-radius: 4px; background: var(--bg); border: 1px solid var(--border-strong); color: var(--muted); }
-  /* No physical Ctrl key to press — the button is the whole story on a phone. */
-  @media (max-width: 640px) { .statusbar .sb-hint { display: none; } }
+  /* Machine-layer facts, one row (§1.4): transport, diffstat, context, quota,
+     terminal. Segments are divided by hairlines rather than by gaps, so the row
+     reads as one instrument panel instead of a scatter of chips. */
+  .statusbar { flex: 0 0 auto; display: flex; align-items: center; min-height: 26px;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--surface-2); border-top: 1px solid var(--border);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); }
+  .statusbar .sb-seg { display: inline-flex; align-items: center; gap: 6px; align-self: stretch;
+    padding: 0 10px; border-right: 1px solid var(--border); white-space: nowrap; color: inherit; }
+  .statusbar .sb-seg:first-child { border-left: 1px solid var(--border); }
+  .statusbar .sb-sp { flex: 1; min-width: 0; }
+  .statusbar .sb-seg b { font-weight: 500; font-variant-numeric: tabular-nums; }
+  .statusbar .sb-seg b.add { color: var(--ok); }
+  .statusbar .sb-seg b.del { color: var(--err); }
+  .statusbar .conn.off { color: var(--err); }
+  .statusbar .sb-term { color: var(--muted); }
+  .statusbar .sb-term:hover, .statusbar .sb-term.on { background: var(--surface); color: var(--text); }
+  .statusbar .sb-term svg { width: 13px; height: 13px; }
+  .statusbar kbd { font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 2px 3px;
+    border-radius: 3px; border: 1px solid var(--border-strong); color: var(--faint); }
+  /* No physical Ctrl key to press — the glyph is the whole story on a phone. */
+  @media (max-width: 640px) { .statusbar kbd { display: none; } }
   /* ---- usage gauge (right end of the status strip) ---- */
   /* margin-left:auto rather than a spacer element, so the gauge still sits
      against the right edge on a gateway with no terminal chip to its left. */
   /* Scrolls rather than clips: a clipped strip drops its rightmost windows
      silently, which reads as "that quota doesn't exist" instead of "swipe". */
-  .usage-strip { display: flex; align-items: center; gap: 9px; margin-left: auto;
-    min-width: 0; overflow-x: auto; scrollbar-width: none; font-size: 12.5px; color: var(--muted); }
+  .usage-strip { display: flex; align-items: center; align-self: stretch;
+    min-width: 0; overflow-x: auto; scrollbar-width: none; color: var(--muted); }
   .usage-strip::-webkit-scrollbar { display: none; }
-  .u-seg { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-  .u-seg:not(:first-child)::before { content: "·"; color: var(--border-strong); margin-right: 3px; }
-  .u-seg b { font-weight: 650; color: var(--text); font-variant-numeric: tabular-nums; }
-  .u-bar { width: 42px; height: 6px; border-radius: 3px; background: var(--border-strong);
+  .u-seg { display: inline-flex; align-items: center; gap: 6px; align-self: stretch;
+    padding: 0 10px; border-left: 1px solid var(--border); white-space: nowrap; }
+  .u-seg b { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+  .u-bar { width: 38px; height: 4px; border-radius: 2px; background: var(--border-strong);
     overflow: hidden; flex: 0 0 auto; }
   .u-bar i { display: block; height: 100%; border-radius: 3px; background: var(--muted); }
   .u-bar i.warn { background: var(--warn); }
@@ -1051,13 +1066,13 @@
      act on, and they stay. */
   @media (max-width: 640px) {
     .usage-strip .u-bar, .usage-strip .note { display: none; }
-    .usage-strip { gap: 7px; }
+    .u-seg { padding: 0 7px; }
   }
-  /* The strip — or the panel, when that is open — is now the bottom edge of the
+  /* The strip — or the panel, when that is open — is the bottom edge of the
      app, so it owns the home-indicator gap and the composer above it must stop
      reserving one of its own. */
-  #root:has(.statusbar) footer { padding-bottom: 10px; }
-  .statusbar:has(+ .term-panel) { padding-bottom: 5px; }
+  #root:has(.statusbar) footer { padding-bottom: 8px; }
+  .statusbar:has(+ .term-panel) { padding-bottom: 0; }
   .term-panel { padding-bottom: env(safe-area-inset-bottom); }
   /* one chip per shell, numbered; the whole row is flush against the panel's
      top edge, under the drag handle */
@@ -1134,15 +1149,15 @@
      sessions panel on the left; at 1100px+ (where a 284px sidebar, a readable
      chat column and this can coexist) it becomes a real column instead. */
   #files {
-    position: absolute; top: calc(52px + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
+    position: absolute; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
     max-width: 560px; margin-left: auto;
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     box-shadow: var(--shadow); z-index: 25; overflow: hidden;
     transform-origin: top center; display: none; flex-direction: column;
-    max-height: calc(100vh - 52px - env(safe-area-inset-top) - 14px);
+    max-height: calc(100vh - var(--crumb-h) - env(safe-area-inset-top) - 14px);
   }
   @supports (height: 100dvh) {
-    #files { max-height: calc(100dvh - 52px - env(safe-area-inset-top) - 14px); }
+    #files { max-height: calc(100dvh - var(--crumb-h) - env(safe-area-inset-top) - 14px); }
   }
   #files.open { display: flex; animation: pop .14s ease-out; }
   /* Expanded: the whole window, at both breakpoints. width/height must be reset
@@ -1269,6 +1284,15 @@
   }
   /* the folder the lists describe, next to the panel's own name */
   .wf-cwd { font-weight: 400; color: var(--muted); }
+  /* The changes summary, folded into the panel header instead of taking a row
+     of its own (§1.3). */
+  .wf-stat {
+    margin-left: 8px; font-weight: 400; color: var(--faint);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  }
+  .wf-stat b { margin-left: 5px; font-weight: 500; }
+  .wf-stat b.add { color: var(--ok); }
+  .wf-stat b.del { color: var(--err); }
 
   /* ---- review mode ---- */
   /* Working / Commits / Branch. Chips rather than a second segmented control:

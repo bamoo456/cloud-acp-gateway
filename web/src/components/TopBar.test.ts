@@ -160,10 +160,14 @@ describe("TopBar pending permissions", () => {
     expect(useStore.getState().sidebarOpen).toBe(false);
   });
 
-  test("folder chip shows the cwd basename and opens the picker", async () => {
+  test("the crumb names the folder and the session, and opens the picker", async () => {
     const { TopBar } = await import("./TopBar.tsx");
     const { useStore } = await import("../store/store.ts");
-    useStore.setState({ conn: "connected", cwd: "/repo" });
+    const s0 = useStore.getState();
+    useStore.setState({
+      conn: "connected", cwd: "/home/dev/work/repo", activeId: "S",
+      sessions: { S: { ...s0.sessions.S, id: "S", title: "Usage gauge caching" } as never },
+    });
     const onPicker = vi.fn();
 
     await act(async () => {
@@ -171,9 +175,13 @@ describe("TopBar pending permissions", () => {
       root.render(React.createElement(TopBar, { onPanel: vi.fn(), onPicker }));
     });
 
-    const chip = container.querySelector<HTMLButtonElement>("button.folder-chip");
-    expect(chip?.textContent).toContain("repo");
-    await act(async () => { chip?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const crumb = container.querySelector<HTMLButtonElement>("button.crumb-path");
+    expect(crumb?.textContent).toContain("repo");
+    expect(crumb?.textContent).toContain("Usage gauge caching");
+    // The parents are context, so they are there but muted, not the answer.
+    expect(crumb?.querySelector(".up")?.textContent).toBe("/home/dev/work/");
+    expect(crumb?.querySelector("b")?.textContent).toBe("repo");
+    await act(async () => { crumb?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     expect(onPicker).toHaveBeenCalled();
   });
 });
