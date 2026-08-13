@@ -163,8 +163,31 @@ export interface FilePreviewResult {
   mimeType?: string; text?: string; truncated?: boolean;
 }
 
-export async function getWorkspaceChanges(cwd: string): Promise<ChangesResult> {
-  const url = base() + "/workspace/changes?cwd=" + encodeURIComponent(cwd);
+// Which revision a workspace read is about. Null — the ordinary case — is the
+// working tree, which is what the panel showed before Review mode existed.
+//
+//   { commit } — one commit's own change
+//   { base }   — everything on HEAD since it diverged from `base`, i.e. what a
+//                pull request is
+// One of the two is set, never both and never neither — revSpecFrom in
+// src/gateway.ts is the only thing that builds one from a request, and it
+// refuses both cases. Two optional fields rather than a union of two shapes
+// because a union of non-literal properties gives TypeScript nothing to
+// discriminate on, so every read of it would need a cast to say what the
+// runtime already guarantees.
+export interface RevSpec { commit?: string; base?: string }
+
+// The query fragment selecting `spec`, empty for the working tree. Every
+// workspace read takes the same pair, so a Review-mode file list, its diffs and
+// its draft all describe the same revision without any of them re-deriving it.
+export function revParam(spec?: RevSpec | null): string {
+  if (spec?.commit) return "&rev=" + encodeURIComponent(spec.commit);
+  if (spec?.base) return "&base=" + encodeURIComponent(spec.base);
+  return "";
+}
+
+export async function getWorkspaceChanges(cwd: string, spec?: RevSpec | null): Promise<ChangesResult> {
+  const url = base() + "/workspace/changes?cwd=" + encodeURIComponent(cwd) + revParam(spec);
   const r = await readJson(await fetch(url), "File changes aren't available on this gateway.");
   return {
     repo: typeof r?.repo === "string" ? r.repo : null,
@@ -174,8 +197,9 @@ export async function getWorkspaceChanges(cwd: string): Promise<ChangesResult> {
   };
 }
 
-export async function getFileDiff(cwd: string, filePath: string): Promise<FileDiffResult> {
-  const url = base() + "/workspace/diff?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+export async function getFileDiff(cwd: string, filePath: string, spec?: RevSpec | null): Promise<FileDiffResult> {
+  const url = base() + "/workspace/diff?cwd=" + encodeURIComponent(cwd) +
+    "&path=" + encodeURIComponent(filePath) + revParam(spec);
   const r = await readJson(await fetch(url), "Couldn't read this file's diff.");
   return {
     path: String(r?.path ?? filePath),
@@ -289,6 +313,82 @@ export async function getWorkspaceOutputs(cwd: string, dirs: string[]): Promise<
     files: Array.isArray(f?.files) ? f.files : [],
     truncated: !!f?.truncated,
   }));
+}
+
+// ---- review ----
+// The checkout's history, and the comments someone has written against a diff
+// but not yet sent. The draft lives on the gateway host, in the repo being
+// reviewed (see src/review.ts): a phone discards a backgrounded tab without
+// warning, and a review started on a laptop should still be there on the phone.
+export interface CommitEntry {
+  sha: string; shortSha: string; author: string; date: string; subject: string;
+  files?: number; additions?: number; deletions?: number;  // absent for a merge
+}
+export interface ReviewComment {
+  path: string;            // repo-root-relative, as the changed-file list names it
+  side: "new" | "old";
+  line: number;
+  endLine?: number;
+  code: string;            // the diff line(s) as they read when the comment was written
+  body: string;
+  id?: string;
+}
+
+// `branch` and `defaultBase` ride along because Review mode fetches this once on
+// open and needs both to offer "this branch against its base" without a second
+// round trip. Either can be absent: a detached HEAD has no branch, and a
+// checkout with no remote and no main/master has nothing to default to.
+export async function getCommits(cwd: string): Promise<{
+  repo: string | null; commits: CommitEntry[]; branch?: string; defaultBase?: string; reason?: string;
+}> {
+  const url = base() + "/workspace/commits?cwd=" + encodeURIComponent(cwd);
+  const r = await readJson(await fetch(url), "This gateway can't list commits.");
+  return {
+    repo: typeof r?.repo === "string" ? r.repo : null,
+    commits: Array.isArray(r?.commits) ? r.commits : [],
+    branch: typeof r?.branch === "string" ? r.branch : undefined,
+    defaultBase: typeof r?.defaultBase === "string" ? r.defaultBase : undefined,
+    reason: typeof r?.reason === "string" ? r.reason : undefined,
+  };
+}
+
+// `counts` covers every scope with a draft, not just the one asked for — that is
+// what badges the Review tab before anything has been opened. `persisted` is
+// false in a folder that isn't a checkout: comments still work, they just won't
+// survive a reload, and the panel says so rather than silently losing them.
+export async function getReviewDraft(cwd: string, spec?: RevSpec | null): Promise<{
+  scope: string; comments: ReviewComment[]; counts: Record<string, number>; persisted: boolean;
+}> {
+  const url = base() + "/workspace/review?cwd=" + encodeURIComponent(cwd) + revParam(spec);
+  const r = await readJson(await fetch(url), "Couldn't read this review's draft.");
+  return {
+    scope: String(r?.scope ?? "working"),
+    comments: Array.isArray(r?.comments) ? r.comments : [],
+    counts: r?.counts && typeof r.counts === "object" ? r.counts : {},
+    persisted: !!r?.persisted,
+  };
+}
+
+// Replaces the scope's comments wholesale — the list is small and last write
+// wins, so there is no add/edit/delete protocol to keep in step with the UI.
+// Never throws: a draft that can't be stored (read-only checkout, no repo) is
+// reported so the panel can say so once, and is not a reason to lose a comment
+// the person is still writing.
+export async function saveReviewDraft(
+  cwd: string, spec: RevSpec | null, comments: ReviewComment[],
+): Promise<boolean> {
+  const url = base() + "/workspace/review?cwd=" + encodeURIComponent(cwd) + revParam(spec);
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ comments }),
+    });
+    if (!r.ok) return false;
+    return !!(await r.json())?.saved;
+  } catch {
+    return false;
+  }
 }
 
 export async function findWorkspaceFiles(cwd: string, query: string): Promise<FindResult> {

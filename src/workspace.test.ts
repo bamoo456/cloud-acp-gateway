@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   changes, fileDiff, find, preview, repoRoot, outputFolder,
+  revChanges, commits, validRev, parseCommitLog, parseNameStatusZ,
   parseStatusZ, parseNumstatZ, looksBinary, inlineImageType, sortTreeEntries,
   MAX_TEXT_BYTES, MAX_OUTPUT_FILES, type TreeEntry,
 } from "./workspace.ts";
@@ -194,6 +195,168 @@ describe("fileDiff", () => {
     const d = await fileDiff(dir, path.join(dir, "a.txt"));
     assert.equal(d.status, "added");
     assert.match(d.diff, /^\+hello$/m);
+  });
+});
+
+describe("validRev", () => {
+  test("accepts the revisions someone actually reviews", () => {
+    for (const rev of ["HEAD", "HEAD~3", "abc1234", "origin/main", "v1.8.0^{commit}", "feat/web-terminal"]) {
+      assert.equal(validRev(rev), true, rev);
+    }
+  });
+
+  test("refuses a revision that would reach git as a flag", () => {
+    // The whole point of the check: these are revision-shaped strings that git
+    // reads as options, and it has no way to be told we meant them as data.
+    for (const rev of ["--upload-pack=touch /tmp/pwned", "-n", "--output=/tmp/x", ""]) {
+      assert.equal(validRev(rev), false, JSON.stringify(rev));
+    }
+  });
+
+  test("refuses control characters and absurd lengths", () => {
+    assert.equal(validRev("HEAD\nrm -rf /"), false);
+    assert.equal(validRev("HEAD\0"), false);
+    assert.equal(validRev("a".repeat(256)), false);
+  });
+});
+
+describe("parseNameStatusZ", () => {
+  test("reads one status letter per path", () => {
+    assert.deepEqual(parseNameStatusZ("M\0src/a.ts\0A\0src/new.ts\0D\0old.ts\0"), [
+      { path: "src/a.ts", status: "modified" },
+      { path: "src/new.ts", status: "added" },
+      { path: "old.ts", status: "deleted" },
+    ]);
+  });
+
+  test("a rename carries its origin and consumes both path records", () => {
+    // Without consuming both, "src/old.ts" would come back as a bogus entry
+    // whose status was read out of the middle of a filename.
+    assert.deepEqual(parseNameStatusZ("R100\0src/old.ts\0src/new.ts\0M\0other.ts\0"), [
+      { path: "src/new.ts", oldPath: "src/old.ts", status: "renamed" },
+      { path: "other.ts", status: "modified" },
+    ]);
+  });
+});
+
+describe("parseCommitLog", () => {
+  test("reads git's fields and the shortstat that follows them", () => {
+    const out =
+      "\x1eabc123\x1fAda\x1f2026-08-13T10:44:32+08:00\x1ffeat: a thing\n\n 5 files changed, 75 insertions(+), 4 deletions(-)\n" +
+      "\x1edef456\x1fGrace\x1f2026-08-12T09:00:00+08:00\x1ffix: another\n\n 1 file changed, 2 deletions(-)\n";
+    assert.deepEqual(parseCommitLog(out), [
+      { sha: "abc123", shortSha: "abc123", author: "Ada", date: "2026-08-13T10:44:32+08:00", subject: "feat: a thing", files: 5, additions: 75, deletions: 4 },
+      { sha: "def456", shortSha: "def456", author: "Grace", date: "2026-08-12T09:00:00+08:00", subject: "fix: another", files: 1, additions: 0, deletions: 2 },
+    ]);
+  });
+
+  test("a merge has no shortstat, and reports no counts rather than zeroes", () => {
+    // Zeroes would read as "this merge changed nothing", which is the opposite
+    // of what a merge commit usually did.
+    const [entry] = parseCommitLog("\x1eabc\x1fAda\x1f2026-08-13T00:00:00Z\x1fMerge pull request #97\n");
+    assert.equal(entry.files, undefined);
+    assert.equal(entry.additions, undefined);
+  });
+
+  test("a subject containing the field separator can't eat the record", () => {
+    // \x1f is why the separator was chosen: a subject can hold anything else,
+    // newlines included, and the parser must not mistake part of one for a field.
+    const [entry] = parseCommitLog("\x1eabc\x1fAda\x1f2026-08-13T00:00:00Z\x1ffix: a\x1fb\n");
+    assert.equal(entry.subject, "fix: a\x1fb");
+  });
+});
+
+describe("revChanges / commits", () => {
+  // A second commit on top of makeRepo()'s, plus a branch, so there is history
+  // to review rather than only a dirty worktree.
+  function makeHistory(): { dir: string; second: string } {
+    const dir = makeRepo();
+    const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+    fs.writeFileSync(path.join(dir, "kept.txt"), "one\nTWO\nthree\n");
+    fs.writeFileSync(path.join(dir, "added.md"), "# added in the second commit\n");
+    fs.rmSync(path.join(dir, "gone.txt"));
+    run("add", "-A");
+    run("commit", "-q", "-m", "second: edit, add and delete");
+    const second = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
+    return { dir, second };
+  }
+
+  test("one commit's own change, with statuses and line counts", async () => {
+    const { dir, second } = makeHistory();
+    const r = await revChanges(dir, { commit: second });
+    assert.equal(r.repo, dir);
+    const byPath = new Map(r.files.map((f) => [f.path, f] as const));
+    assert.equal(byPath.get("kept.txt")?.status, "modified");
+    assert.equal(byPath.get("kept.txt")?.additions, 1);
+    assert.equal(byPath.get("kept.txt")?.deletions, 1);
+    assert.equal(byPath.get("added.md")?.status, "added");
+    assert.equal(byPath.get("gone.txt")?.status, "deleted");
+    // Nothing in history is staged — that word describes an index.
+    assert.equal(byPath.get("added.md")?.staged, false);
+  });
+
+  test("a branch against its base lists only what the branch did", async () => {
+    const { dir } = makeHistory();
+    const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+    run("checkout", "-q", "-b", "feature");
+    fs.writeFileSync(path.join(dir, "feature.ts"), "export const x = 1;\n");
+    run("add", "-A");
+    run("commit", "-q", "-m", "feat: only on the branch");
+
+    const r = await revChanges(dir, { base: "main" });
+    assert.deepEqual(r.files.map((f) => f.path), ["feature.ts"]);
+    assert.equal(r.files[0].status, "added");
+  });
+
+  test("a revision that doesn't resolve says so instead of showing nothing", async () => {
+    // The everyday failure: a base ref that was never fetched. Rendering it as
+    // "this branch changed nothing" would be a lie the reader can't detect.
+    const { dir } = makeHistory();
+    const r = await revChanges(dir, { base: "origin/never-fetched" });
+    assert.equal(r.reason, "bad-revision");
+    assert.deepEqual(r.files, []);
+  });
+
+  test("fileDiff against a commit describes what the commit did, not the worktree", async () => {
+    const { dir, second } = makeHistory();
+    // Dirty the file afterwards: the committed diff must be unaffected by it.
+    fs.writeFileSync(path.join(dir, "kept.txt"), "totally different\n");
+    const d = await fileDiff(dir, path.join(dir, "kept.txt"), { commit: second });
+    assert.equal(d.status, "modified");
+    assert.match(d.diff, /^\+TWO$/m);
+    assert.doesNotMatch(d.diff, /totally different/);
+  });
+
+  test("fileDiff against a commit reads added and deleted off git's own header", async () => {
+    const { dir, second } = makeHistory();
+    assert.equal((await fileDiff(dir, path.join(dir, "added.md"), { commit: second })).status, "added");
+    assert.equal((await fileDiff(dir, path.join(dir, "gone.txt"), { commit: second })).status, "deleted");
+  });
+
+  test("a file the commit didn't touch comes back empty, not as the worktree's diff", async () => {
+    const { dir } = makeHistory();
+    const first = execFileSync("git", ["rev-parse", "HEAD~1"], { cwd: dir, encoding: "utf8" }).trim();
+    fs.writeFileSync(path.join(dir, "kept.txt"), "dirty now\n");
+    const d = await fileDiff(dir, path.join(dir, "added.md"), { commit: first });
+    assert.equal(d.diff, "");
+  });
+
+  test("commits lists the history newest first", async () => {
+    const { dir, second } = makeHistory();
+    const r = await commits(dir);
+    assert.equal(r.repo, dir);
+    assert.equal(r.commits[0].sha, second);
+    assert.equal(r.commits[0].subject, "second: edit, add and delete");
+    assert.equal(r.commits[0].shortSha, second.slice(0, 7));
+    assert.equal(r.commits[1].subject, "initial");
+  });
+
+  test("commits in a folder that isn't a checkout reports no repo rather than failing", async () => {
+    const plain = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-plain-log-")));
+    const r = await commits(plain);
+    assert.equal(r.repo, null);
+    assert.deepEqual(r.commits, []);
+    assert.equal(r.reason, "not-a-repo");
   });
 });
 

@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "../store/store.ts";
 import type { FilePreviewTarget, PreviewMode } from "../store/store.ts";
 import {
-  getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, getHtmlRender, rawFileUrl,
-  type ChangeStatus, type ChangesResult, type FileDiffResult, type FilePreviewResult,
+  getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, getHtmlRender,
+  getReviewDraft, rawFileUrl,
+  type ChangesResult, type FileDiffResult, type FilePreviewResult,
   type HtmlRender, type OutputFolder,
 } from "../lib/api.ts";
 import { touchedFiles } from "../lib/touchedFiles.ts";
@@ -22,7 +23,8 @@ import { UnifiedDiff } from "./UnifiedDiff.tsx";
 import { HtmlPreview } from "./HtmlPreview.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { Plan } from "./Plan.tsx";
-import { basename, dirname, formatBytes, relativeTo, timeAgo } from "../lib/format.ts";
+import { basename, dirname, formatBytes, relativeTo, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
+import { ReviewPanel } from "./ReviewPanel.tsx";
 import {
   clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH,
   DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
@@ -65,14 +67,7 @@ import { IconBack, IconX, IconRefresh, IconExpand, IconDownload, IconSpinner, Ic
 // panel, and Back returns to the mode you opened the file from.
 
 type Section = "Progress" | "Outputs" | "Context";
-type Mode = "session" | "project";
-
-const STATUS_MARK: Record<ChangeStatus, string> = {
-  added: "A", modified: "M", deleted: "D", renamed: "R", untracked: "U",
-};
-const STATUS_LABEL: Record<ChangeStatus, string> = {
-  added: "Added", modified: "Modified", deleted: "Deleted", renamed: "Renamed", untracked: "New file",
-};
+type Mode = "session" | "project" | "review";
 
 function FileRow({ lead, leadClass, leadTitle, name, dir, right, onClick, onMenu }: {
   lead: React.ReactNode; leadClass: string; leadTitle: string;
@@ -188,6 +183,10 @@ export function FilePanel() {
   const toggle = (name: Section) => setFolded((f) => ({ ...f, [name]: !f[name] }));
   const [changes, setChanges] = useState<ChangesResult | null>(null);
   const [folders, setFolders] = useState<OutputFolder[]>([]);
+  // Unsent review comments across every revision of this checkout. Loaded with
+  // the change list, so the badge on the Review tab is right before that mode
+  // has ever been opened — which is the only moment it is useful.
+  const [reviewCount, setReviewCount] = useState(0);
   // The panel is closed and reopened rather than unmounted, so the mode
   // survives — someone browsing a folder and glancing away should come back to
   // where they were. A new folder is a different project, so that resets.
@@ -219,6 +218,14 @@ export function FilePanel() {
     getWorkspaceOutputs(cwd, outputFolderCandidates(touched.filter((f) => f.role === "output")))
       .then((r) => { if (mine === gen.current) setFolders(r); })
       .catch(() => { if (mine === gen.current) setFolders([]); });
+    // Its own request and its own failure, for the same reason: a gateway too
+    // old to know the route must leave the rest of the panel alone, and no badge
+    // is the right answer there.
+    getReviewDraft(cwd)
+      .then((d) => {
+        if (mine === gen.current) setReviewCount(Object.values(d.counts).reduce((n, c) => n + c, 0));
+      })
+      .catch(() => { if (mine === gen.current) setReviewCount(0); });
   }
 
   // Fetched whenever the panel is open, because Outputs now depends on it: git
@@ -346,6 +353,14 @@ export function FilePanel() {
               onClick={() => setMode("session")}>Session</button>
             <button role="tab" aria-selected={mode === "project"} className={mode === "project" ? "active" : ""}
               onClick={() => setMode("project")}>Project</button>
+            {/* The badge is the only thing that says an unsent review exists
+                while you are looking at something else. It counts every scope's
+                draft, not the open one's: "you have comments waiting" is the
+                claim, and which revision they are on is the mode's own business. */}
+            <button role="tab" aria-selected={mode === "review"} className={mode === "review" ? "active" : ""}
+              onClick={() => setMode("review")}>
+              Review{reviewCount > 0 && <span className="wf-badge">{reviewCount}</span>}
+            </button>
           </div>
         )}
 
@@ -360,6 +375,12 @@ export function FilePanel() {
           <FileTree cwd={cwd} reloadKey={treeKey}
             onOpenFile={(f) => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })}
             onMenu={(f, x, y) => openMenu(f.abs, !!f.isDir, x, y)} />
+        )}
+
+        {/* Keyed on cwd so a folder change restarts the review rather than
+            leaving a draft for one checkout on screen over another's diff. */}
+        {!target && mode === "review" && (
+          <ReviewPanel key={cwd} cwd={cwd} onCount={setReviewCount} />
         )}
 
         {!target && mode === "session" && (

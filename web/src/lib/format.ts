@@ -1,3 +1,5 @@
+import type { ChangeStatus } from "./api.ts";
+
 export function basename(p: string): string {
   return (p || "").replace(/\/+$/, "").split("/").pop() || p || "/";
 }
@@ -48,3 +50,14 @@ export function timeAgo(iso: string): string {
   if (h < 24) return h + "h";
   return Math.round(h / 24) + "d";
 }
+
+// git's own status letters and their prose, shared by every list that shows
+// them — the files panel's changed rows and the review panel's. Here rather than
+// in either component because importing one panel from the other would make the
+// two of them a cycle.
+export const STATUS_MARK: Record<ChangeStatus, string> = {
+  added: "A", modified: "M", deleted: "D", renamed: "R", untracked: "U",
+};
+export const STATUS_LABEL: Record<ChangeStatus, string> = {
+  added: "Added", modified: "Modified", deleted: "Deleted", renamed: "Renamed", untracked: "New file",
+};
