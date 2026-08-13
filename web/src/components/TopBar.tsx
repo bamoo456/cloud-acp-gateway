@@ -1,13 +1,11 @@
 import { useState } from "react";
 import { useStore } from "../store/store.ts";
 import { ActionMenu } from "./ActionMenu.tsx";
-import { AgentPill } from "./AgentPill.tsx";
 import { PendingPermissions } from "./PendingPermissions.tsx";
 import { RunningTasks } from "./RunningTasks.tsx";
 import { basename, dirname } from "../lib/format.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { IconClock, IconPlus, IconDots, IconPanel } from "../lib/icons.tsx";
-import type { AgentRef } from "../types.ts";
 
 // The crumb answers one question — where are you — and nothing else (§1.4).
 // The folder's parents are muted, its own name is ink, the session title trails
@@ -25,7 +23,9 @@ function Crumb({ cwd, title, onPicker }: { cwd: string; title: string; onPicker:
   );
 }
 
-export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void; onPicker: () => void; onOpenLogin?: (agent: AgentRef) => void }) {
+// Identity and the engine settings live in the dock above the composer now, so
+// the crumb carries neither the agent pill nor its re-login button (§1.4).
+export function TopBar({ onPanel, onPicker }: { onPanel: () => void; onPicker: () => void }) {
   const s = useStore();
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const [menu, setMenu] = useState(false);
@@ -39,7 +39,6 @@ export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void
         onClick={() => { if (isDesktopSidebarWidth()) s.toggleSidebar(); else onPanel(); }}><IconClock /></button>
       <Crumb cwd={s.cwd} title={sess ? sess.title : "Untitled"} onPicker={onPicker} />
       <span className="sp" />
-      <AgentPill onOpenLogin={onOpenLogin} />
       <RunningTasks />
       <PendingPermissions />
       <button className="icon-btn" title="Conversation menu" onClick={() => setMenu((v) => !v)}><IconDots /></button>

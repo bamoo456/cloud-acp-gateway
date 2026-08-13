@@ -6,6 +6,7 @@ import { Sidebar } from "./components/Sidebar.tsx";
 import { FilePanel } from "./components/FilePanel.tsx";
 import { Thread } from "./components/Thread.tsx";
 import { Composer } from "./components/Composer.tsx";
+import { EngineDock } from "./components/EngineDock.tsx";
 import { FolderPicker } from "./components/FolderPicker.tsx";
 import { LockScreen } from "./components/LockScreen.tsx";
 import { LoginTerminal } from "./components/LoginTerminal.tsx";
@@ -136,8 +137,11 @@ export function App() {
       <div className="app-row">
         <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)} />
         <div className="content">
-          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} onOpenLogin={(a) => setLoginAgent(a)} />
+          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} />
           <main id="main"><Thread session={sess} agentReady={agentReady} loading={joining} /></main>
+          {/* Between the thread and the input, right-aligned: what is answering
+              and on what, plus the control that changes it (§3 P3). */}
+          <EngineDock onOpenLogin={(a) => setLoginAgent(a)} />
           <Composer />
         </div>
         {/* Right of the chat column on desktop, an overlay on mobile. Always
