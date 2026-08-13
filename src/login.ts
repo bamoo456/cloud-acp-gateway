@@ -12,6 +12,8 @@
 // deliberately does NOT expose a general shell. Output streams over SSE;
 // input comes back over POST, so it reuses the gateway's existing
 // SSE+POST + Basic-auth surface and adds no new transport or auth.
+// (A separate, opt-in general terminal — an actual shell, gated behind
+// ACPG_TERMINAL — lives in terminal.ts. This module stays scoped to login.)
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -65,8 +67,9 @@ export function getSession(agentName: string): LoginSession {
 
 // SSE carries arbitrary terminal bytes (CR/LF, escape sequences) that would
 // break the line-oriented `data:` framing, so each chunk is base64-encoded and
-// the browser decodes it before writing to xterm.
-function sseChunk(res: ServerResponse, data: string): void {
+// the browser decodes it before writing to xterm. Exported: terminal.ts's
+// general-shell PTY stream frames its output the same way.
+export function sseChunk(res: ServerResponse, data: string): void {
   res.write(`data:${Buffer.from(data, "utf8").toString("base64")}\n\n`);
 }
 
@@ -180,8 +183,9 @@ class LoginSession {
   }
 }
 
-// Reads a request body, capped, as a UTF-8 string.
-function readBody(req: IncomingMessage, maxPayload: number): Promise<string | null> {
+// Reads a request body, capped, as a UTF-8 string. Exported: terminal.ts's
+// /terminal/input route reads the same way.
+export function readBody(req: IncomingMessage, maxPayload: number): Promise<string | null> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let size = 0;
