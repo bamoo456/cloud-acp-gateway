@@ -29,6 +29,7 @@ describe("App running-task polling", () => {
     vi.doMock("./lib/api.ts", () => ({
       getRunning,
       getInboxPending,
+      getUsageLimits: vi.fn().mockResolvedValue(null),
       answerInbox: vi.fn().mockResolvedValue(true),
       getHistory: vi.fn().mockResolvedValue([]),
       getDiscoveredHistory: vi.fn().mockResolvedValue([]),

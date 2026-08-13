@@ -173,6 +173,7 @@ interface State {
   // a listing covers one folder (or one provider's discoverable store), so absence
   // from it means "not asked about", never "no longer named".
   mergeHistoryTitles: (rows: Array<{ agentName: string; sessionId: string; title: string | null }>) => void;
+  ingestUsageLimits: (windows: Record<string, RateLimit>) => void;
   ingestRunningTasks: (tasks: RunningTask[]) => void;
   ingestInboxItems: (items: InboxItem[], expectedRevision: number) => void;
   ensureConnected: () => void;
@@ -1345,6 +1346,19 @@ export const useStore = create<State>((set, get) => {
         // a fresh map each time would re-render every subscriber for no reason.
         return changed ? { historyTitles } : st;
       });
+    },
+
+    // Called by the /usage/limits poll. Replaces rather than merges: the route
+    // reports every window the account has, so folding it into whatever the ACP
+    // path happened to leave behind could only keep a staler copy of the same
+    // window alive. Same object back when nothing moved, since this runs on a
+    // timer and the strip subscribes to the map.
+    ingestUsageLimits(windows) {
+      const prev = get().rateLimits;
+      const same = Object.keys(windows).length === Object.keys(prev).length
+        && Object.entries(windows).every(([k, w]) =>
+          prev[k]?.utilization === w.utilization && prev[k]?.resetsAt === w.resetsAt);
+      if (!same) set({ rateLimits: windows });
     },
 
     // Called by the /running poll: store the live snapshot and fold it into the
