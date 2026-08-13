@@ -7,7 +7,7 @@
 // change the agent summarised in one line. The agent runs on this host, so the
 // files are right there; this module is the read-only window onto them.
 //
-// Six reads, all bounded and all scoped to ACPG_FS_ROOT by the caller:
+// Seven reads, all bounded and all scoped to ACPG_FS_ROOT by the caller:
 //   - changes(): git's view of what is dirty in the project (status + numstat)
 //   - fileDiff(): one file's unified diff, including untracked files
 //   - preview():  one file's bytes as text, image metadata, or "binary"
@@ -15,10 +15,18 @@
 //   - find():     filenames matching a query, anywhere under the project
 //   - outputFolder(): everything in one folder the conversation wrote into, for
 //                 the files git cannot see at all
+//   - commits():  the checkout's recent history, for reviewing what was landed
+//                 rather than only what is still uncommitted
+//
+// changes() and fileDiff() both take an optional RevSpec: absent, they describe
+// the working tree (what the panel has always shown); given one, they describe a
+// single commit or a branch against its base. It is the same screen either way —
+// only the revision git is asked about differs.
 //
 // Deliberately read-only: nothing here writes, stages, or reverts. The panel is
 // a viewer, and keeping the write surface at zero means a browser session that
-// leaks can't rewrite the checkout the agent is working in.
+// leaks can't rewrite the checkout the agent is working in. (Review drafts do
+// get written, but never into the checkout's own files — see review.ts.)
 import fs from "node:fs";
 import path from "node:path";
 import { git, gitStdin } from "./git-exec.ts";
@@ -49,8 +57,69 @@ export const MAX_OUTPUT_FILES = 200;
 // ordinary shape and listing only the top level would show the page without the
 // pictures. Deeper than that is a project, and Project mode browses those.
 export const OUTPUT_FOLDER_MAX_DEPTH = 2;
+// One screen of history. The list is "pick the commit you want to read", not a
+// log viewer, and --shortstat below costs one tree diff per entry.
+export const MAX_COMMITS = 50;
+// A ref name is a path under .git plus a bit; anything near this length is not a
+// revision anybody typed.
+const MAX_REV_LENGTH = 255;
 
 export type ChangeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
+
+// Which revision the panel is looking at. Null — the ordinary case — is the
+// working tree, exactly as it was before this existed.
+//
+//   { commit } — that commit's own change, i.e. against its first parent
+//   { base }   — everything on HEAD since it diverged from `base`, which is what
+//                a pull request is: `git diff base...HEAD`
+// One of the two is set, never both and never neither — revSpecFrom in
+// src/gateway.ts is the only thing that builds one from a request, and it
+// refuses both cases. Two optional fields rather than a union of two shapes
+// because a union of non-literal properties gives TypeScript nothing to
+// discriminate on, so every read of it would need a cast to say what the
+// runtime already guarantees.
+export interface RevSpec { commit?: string; base?: string }
+
+// A revision arrives from the browser and is handed to git as an argv element,
+// so it is checked before it gets there. The leading "-" is the whole point:
+// `--upload-pack=…` is a revision-shaped string that isn't one, and git cannot
+// tell after the fact that we meant it as data.
+//
+// Everything else valid is deliberately allowed through — `origin/main`,
+// `HEAD~3`, `v1.8.0^{commit}` — because git is the authority on what resolves,
+// and a rejected-but-valid revision is a bug the user cannot work around. One
+// git doesn't recognise exits non-zero, which every caller here already handles.
+export function validRev(rev: string): boolean {
+  return !!rev && rev.length <= MAX_REV_LENGTH && !rev.startsWith("-") && !/[\0\n]/.test(rev);
+}
+
+// The git subcommand + revision selecting `spec`'s change. Callers append the
+// output flags, then `--` and any pathspec.
+//
+// --first-parent so a merge has a diff at all: `git show` renders a merge as a
+// combined diff, and "what did merging this branch bring in" is the question
+// somebody clicking a merge commit is asking. Harmless elsewhere — a
+// single-parent commit has only a first parent.
+function revArgs(spec: RevSpec): string[] {
+  if (spec.commit) return ["show", "--format=", "--first-parent", spec.commit];
+  // `HEAD...HEAD` for the spec revSpecFrom never builds — an empty diff, which
+  // is the honest answer to "compare against nothing" and needs no branch of
+  // error handling in three callers to say so.
+  return ["diff", (spec.base || "HEAD") + "...HEAD"];
+}
+
+export interface CommitEntry {
+  sha: string;
+  shortSha: string;
+  author: string;
+  date: string;        // ISO 8601, as git emits it
+  subject: string;
+  // Absent for a merge: `git log --shortstat` reports none for one, and
+  // inventing a zero would read as "this merge changed nothing".
+  files?: number;
+  additions?: number;
+  deletions?: number;
+}
 
 export interface ChangedFile {
   path: string;      // repo-root-relative POSIX path, for display
@@ -243,6 +312,39 @@ export function parseNumstatZ(out: string): Array<{ path: string; oldPath?: stri
   return rows;
 }
 
+// `git diff --name-status -z`: a status record then its path, except a
+// rename/copy ("R100") which is followed by the old path and then the new one.
+//
+// Distinct from parseStatusZ, which reads `git status` porcelain — that has two
+// columns (index and worktree) because it describes a dirty tree, and this has
+// one because a commit has no unstaged half.
+export function parseNameStatusZ(out: string): Array<{ path: string; oldPath?: string; status: ChangeStatus }> {
+  const records = out.split("\0");
+  const files: Array<{ path: string; oldPath?: string; status: ChangeStatus }> = [];
+  for (let i = 0; i < records.length; i++) {
+    const code = records[i];
+    if (!code) continue;
+    const letter = code[0];
+    if (letter === "R" || letter === "C") {
+      const oldPath = records[++i];
+      const newPath = records[++i];
+      if (!newPath) continue;
+      files.push({ path: newPath, oldPath, status: "renamed" });
+      continue;
+    }
+    const filePath = records[++i];
+    if (!filePath) continue;
+    files.push({ path: filePath, status: statusFromDiffLetter(letter) });
+  }
+  return files;
+}
+
+function statusFromDiffLetter(letter: string): ChangeStatus {
+  if (letter === "A") return "added";
+  if (letter === "D") return "deleted";
+  return "modified"; // M, T (typechange), U (unmerged) — all "it differs"
+}
+
 // Absolute repo root for `cwd`, or null when it isn't inside a checkout (or git
 // isn't installed). Everything else in this module funnels through it, so a
 // non-repo folder degrades to an empty panel instead of an error.
@@ -306,12 +408,161 @@ function statMtime(abs: string): number {
   try { return fs.statSync(abs).mtimeMs; } catch { return 0; }
 }
 
+// The files one commit changed, or the files a branch changed since it diverged
+// from `base`. Same shape as changes() so the panel renders one list either way.
+//
+// Two git calls for the same reason changes() makes two: --name-status carries
+// the status letter and no line counts, --numstat the reverse. Rows keep git's
+// own order here rather than being sorted by mtime — a commit's file list has a
+// meaning of its own, and half its files may not be on disk at all.
+export async function revChanges(cwd: string, spec: RevSpec): Promise<ChangesResult> {
+  const root = await repoRoot(cwd);
+  if (!root) {
+    const probe = await git(cwd, ["--version"]);
+    return { repo: null, files: [], truncated: false, reason: probe.failed ? "git-missing" : "not-a-repo" };
+  }
+  const base = [...revArgs(spec), "--no-color", "--no-ext-diff", "-M", "-z"];
+  const names = await git(root, [...base, "--name-status"]);
+  // A revision that doesn't resolve is the everyday failure here: a base ref
+  // that isn't fetched, a commit from a branch since deleted. Say which, rather
+  // than rendering it as "this commit changed nothing".
+  if (names.code !== 0) {
+    return { repo: root, files: [], truncated: false, reason: names.failed ? "git-missing" : "bad-revision" };
+  }
+  const stats = new Map<string, { additions: number; deletions: number; binary: boolean }>();
+  const numstat = await git(root, [...base, "--numstat"]);
+  if (numstat.code === 0) {
+    for (const row of parseNumstatZ(numstat.stdout)) {
+      stats.set(row.path, { additions: row.additions, deletions: row.deletions, binary: row.binary });
+    }
+  }
+  const parsed = parseNameStatusZ(names.stdout);
+  const truncated = parsed.length > MAX_CHANGED_FILES;
+  const files = parsed.slice(0, MAX_CHANGED_FILES).map((f): ChangedFile => ({
+    path: f.path,
+    abs: path.resolve(root, f.path),
+    status: f.status,
+    // Nothing in a committed diff is "staged" — that word describes an index,
+    // and this is history. False rather than absent so the field means the same
+    // thing in both lists.
+    staged: false,
+    oldPath: f.oldPath,
+    ...stats.get(f.path),
+  }));
+  return { repo: root, files, truncated };
+}
+
+// The checkout's recent history: enough to pick a commit to read, not a log
+// viewer. First parents only would hide the work in a merged branch, so this is
+// the full log — a merge and the commits it brought in are both listed, and
+// opening either shows a diff (see revArgs).
+export async function commits(cwd: string, limit = MAX_COMMITS): Promise<{
+  repo: string | null; commits: CommitEntry[]; branch?: string; defaultBase?: string; reason?: string;
+}> {
+  const root = await repoRoot(cwd);
+  if (!root) {
+    const probe = await git(cwd, ["--version"]);
+    return { repo: null, commits: [], reason: probe.failed ? "git-missing" : "not-a-repo" };
+  }
+  // Where a branch review compares against, and what to call the branch it is
+  // reviewing. Both ride along with the commit list because Review mode fetches
+  // it once on open and would otherwise need a route of its own to ask.
+  const [branch, base] = await Promise.all([currentBranch(root), defaultBase(root)]);
+  const n = Math.max(1, Math.min(limit, MAX_COMMITS));
+  // The record separator leads each entry rather than terminating it, so that
+  // splitting on it puts a commit's fields and its --shortstat line in the same
+  // chunk. Terminating would attach each stat block to the *next* commit.
+  // \x1e/\x1f because a subject can contain anything else, newlines included.
+  const log = await git(root, [
+    "log", "-n", String(n), "--format=%x1e%H%x1f%an%x1f%aI%x1f%s", "--shortstat",
+  ]);
+  // No commits yet is not an error to report: an empty list says it already.
+  if (log.code !== 0) return { repo: root, commits: [], branch, defaultBase: base, reason: "no-history" };
+  return { repo: root, commits: parseCommitLog(log.stdout), branch, defaultBase: base };
+}
+
+// The checked-out branch, or undefined on a detached HEAD — where "this branch
+// against its base" is not a question with an answer.
+async function currentBranch(root: string): Promise<string | undefined> {
+  const r = await git(root, ["symbolic-ref", "--short", "--quiet", "HEAD"]);
+  return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : undefined;
+}
+
+// What a branch review compares against by default. The remote's own default
+// branch is the right answer when there is one — it is what a pull request would
+// be opened against — and the local main/master is the fallback for a checkout
+// with no remote (or one that has never fetched origin/HEAD).
+//
+// Undefined when none of them resolve, which the panel turns into "type a base"
+// rather than into a diff against something it guessed.
+async function defaultBase(root: string): Promise<string | undefined> {
+  const remote = await git(root, ["rev-parse", "--abbrev-ref", "--verify", "--quiet", "origin/HEAD"]);
+  const named = remote.stdout.trim();
+  if (remote.code === 0 && named && named !== "origin/HEAD") return named;
+  for (const candidate of ["main", "master"]) {
+    const r = await git(root, ["rev-parse", "--verify", "--quiet", candidate]);
+    if (r.code === 0) return candidate;
+  }
+  return undefined;
+}
+
+// Exported for its own test: the format above is chosen for parseability, so the
+// parser is the only thing proving the choice worked.
+export function parseCommitLog(out: string): CommitEntry[] {
+  const entries: CommitEntry[] = [];
+  for (const chunk of out.split("\x1e")) {
+    if (!chunk.trim()) continue;
+    const [head, ...rest] = chunk.split("\n");
+    const [sha, author, date, ...subject] = head.split("\x1f");
+    // A subject cannot contain \x1f, so a short split is a malformed record
+    // rather than a subject that ate a field.
+    if (!sha || subject.length === 0) continue;
+    const stat = parseShortstat(rest.join("\n"));
+    entries.push({
+      sha,
+      shortSha: sha.slice(0, 7),
+      author: author ?? "",
+      date: date ?? "",
+      subject: subject.join("\x1f"),
+      ...stat,
+    });
+  }
+  return entries;
+}
+
+// " 5 files changed, 75 insertions(+), 4 deletions(-)" — any of the three
+// clauses can be absent (a commit that only added lines has no deletions
+// clause), and a merge has no line at all.
+function parseShortstat(text: string): { files?: number; additions?: number; deletions?: number } {
+  const files = /(\d+) files? changed/.exec(text);
+  if (!files) return {};
+  const add = /(\d+) insertions?\(\+\)/.exec(text);
+  const del = /(\d+) deletions?\(-\)/.exec(text);
+  return {
+    files: Number(files[1]),
+    additions: add ? Number(add[1]) : 0,
+    deletions: del ? Number(del[1]) : 0,
+  };
+}
+
 // One file's unified diff. `abs` must already be resolved within FS_ROOT by the
-// caller; `cwd` only supplies the repo context.
-export async function fileDiff(cwd: string, abs: string): Promise<FileDiff> {
+// caller; `cwd` only supplies the repo context. With a `spec`, the diff is that
+// commit's (or that branch's) change to the file rather than the working tree's.
+export async function fileDiff(cwd: string, abs: string, spec?: RevSpec | null): Promise<FileDiff> {
   const root = await repoRoot(cwd);
   const rel = root ? toPosix(path.relative(root, abs)) : path.basename(abs);
   const exists = fs.existsSync(abs);
+
+  // A committed diff answers about history, so none of the working-tree
+  // reasoning below applies: whether the file is tracked *now*, or exists on
+  // disk at all, says nothing about what the commit did to it. git's own diff
+  // header carries the status, and a path git has nothing to say about comes
+  // back empty — which is the truth for a file that commit didn't touch.
+  if (spec && root) {
+    const r = await git(root, [...revArgs(spec), "--no-color", "--no-ext-diff", "-M", "--", rel]);
+    if (r.code !== 0) return { path: rel, status: "modified", diff: "", binary: false, truncated: false };
+    return finishDiff(rel, statusFromDiffHeader(r.stdout), r.stdout);
+  }
 
   // No repo at all: there is nothing to diff against, so the honest answer is
   // "the whole file is new" — which is what --no-index against /dev/null says,
@@ -346,6 +597,16 @@ export async function fileDiff(cwd: string, abs: string): Promise<FileDiff> {
   // commit", and whether the agent happened to `git add` is not part of that.
   const r = await git(root, ["diff", "--no-color", "--no-ext-diff", "-M", "HEAD", "--", rel]);
   return finishDiff(rel, exists ? "modified" : "deleted", r.stdout);
+}
+
+// What a committed diff did to the file, read off git's own extended header
+// rather than from a second call. "modified" is the fallback because it is what
+// a header carrying none of these markers means.
+function statusFromDiffHeader(raw: string): ChangeStatus {
+  if (/^new file mode /m.test(raw)) return "added";
+  if (/^deleted file mode /m.test(raw)) return "deleted";
+  if (/^rename from /m.test(raw)) return "renamed";
+  return "modified";
 }
 
 function finishDiff(rel: string, status: ChangeStatus, raw: string): FileDiff {

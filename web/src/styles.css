@@ -1155,9 +1155,9 @@
   .wf-counts .del { color: var(--err); }
   .wf-counts .bin { color: var(--muted); font-weight: 600; }
 
-  /* Session ⇄ Project. A segmented control rather than the pill row the viewer
-     uses for Diff/File/Preview: this one splits the whole panel, so it reads as
-     one control with two halves instead of a toolbar of options. */
+  /* Session ⇄ Project ⇄ Review. A segmented control rather than the pill row the
+     viewer uses for Diff/File/Preview: this one splits the whole panel, so it
+     reads as one control with three parts instead of a toolbar of options. */
   .wf-switch {
     flex: 0 0 auto; display: flex; gap: 2px; margin: 8px; padding: 3px;
     background: var(--surface-2); border-radius: 9px;
@@ -1170,8 +1170,133 @@
     background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgb(0 0 0 / .10);
   }
   .wf-switch button:hover:not(.active) { color: var(--text); }
+  /* unsent review comments, on the tab that can send them */
+  .wf-badge {
+    display: inline-block; margin-left: 5px; min-width: 16px; padding: 0 4px;
+    border-radius: 999px; background: var(--accent); color: var(--accent-text);
+    font-size: 10.5px; font-weight: 800; line-height: 16px;
+  }
   /* the folder the lists describe, next to the panel's own name */
   .wf-cwd { font-weight: 400; color: var(--muted); }
+
+  /* ---- review mode ---- */
+  /* Working / Commits / Branch. Chips rather than a second segmented control:
+     the switch above splits the panel, and two identical controls stacked would
+     read as one four-part thing. */
+  .rv-scope {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+    padding: 0 10px 8px; border-bottom: 1px solid var(--border);
+  }
+  .rv-chip {
+    padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--muted); font-size: 12.5px; font-weight: 600;
+  }
+  .rv-chip.on {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .rv-scope .sp { flex: 1; }
+  /* the base a branch is compared against, and the commit a review is of —
+     both are "what you are looking at", so both sit in the same slot */
+  .rv-ref {
+    display: inline-flex; align-items: center; gap: 3px; max-width: 45%;
+    padding: 4px 8px; border: 1px dashed var(--border-strong); border-radius: 7px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .rv-ref:hover { color: var(--text); border-color: var(--accent); }
+  .rv-ref svg { width: 12px; height: 12px; flex: 0 0 auto; }
+  .rv-base { display: flex; align-items: center; gap: 6px; padding: 0 10px 8px; }
+  .rv-base input {
+    flex: 1; min-width: 0; padding: 6px 9px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--surface-2); color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+  }
+  .rv-base-hint {
+    flex: 0 0 auto; color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  }
+  /* back + what you are looking at, for the two screens that take over the mode */
+  .rv-bar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+    padding: 2px 8px 8px; border-bottom: 1px solid var(--border);
+  }
+  .rv-bar .icon-btn svg { width: 18px; height: 18px; }
+  .rv-title {
+    flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .rv-title .dim { font-weight: 400; color: var(--muted); }
+  .rv-sha {
+    flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; color: var(--muted);
+  }
+  /* comments on a file, on its row in the list */
+  .rv-badge {
+    flex: 0 0 auto; min-width: 18px; padding: 0 5px; border-radius: 999px; text-align: center;
+    background: var(--accent); color: var(--accent-text); font-size: 10.5px; font-weight: 800; line-height: 17px;
+  }
+
+  /* In Review mode every diff row is a comment target. A whole row rather than
+     GitHub's hover-"+": there is no hover on a phone, and a button inside the
+     38px gutter is under the touch target the rest of the panel keeps to. */
+  .udiff.pickable .udiff-row { width: 100%; text-align: left; cursor: pointer; }
+  .udiff.pickable .udiff-row:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .udiff-row.picked {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+
+  /* one comment — being written, or written and kept */
+  .rv-cmt {
+    margin: 6px 10px 10px 46px; border: 1px solid var(--border-strong);
+    border-radius: 10px; background: var(--surface); overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  .rv-cmt.saved { border-color: var(--border); background: var(--surface-2); }
+  .rv-cmt.in-list { margin-left: 10px; }
+  .rv-anchor {
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted);
+  }
+  .rv-quote {
+    display: block; margin-top: 3px; color: var(--ok);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .rv-body { padding: 9px 10px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  .rv-cmt textarea {
+    display: block; width: 100%; padding: 9px 10px; border: 0; resize: vertical;
+    background: none; color: var(--text); font: inherit; font-size: 13px;
+  }
+  .rv-cmt textarea:focus { outline: none; }
+  .rv-acts { display: flex; align-items: center; gap: 6px; padding: 0 8px 8px; }
+  .rv-acts .sp { flex: 1; }
+
+  /* The mode's own footer. Present only once there is a checkout to review, so
+     the mode has no chrome at all before then. */
+  .rv-foot {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-top: 1px solid var(--border); background: var(--surface-2);
+  }
+  .rv-n { flex: 1; min-width: 0; font-size: 12.5px; color: var(--muted); }
+  .rv-n b { color: var(--text); }
+  .rv-warn { color: var(--warn); }
+  .btn-sm {
+    flex: 0 0 auto; padding: 6px 11px; border-radius: 8px; border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--muted); font-size: 12.5px; font-weight: 700;
+  }
+  .btn-sm:hover:not(:disabled) { color: var(--text); }
+  .btn-sm.primary {
+    background: var(--accent); border-color: var(--accent); color: var(--accent-text);
+  }
+  .btn-sm:disabled { opacity: .45; cursor: default; }
+  .btn-sm svg { width: 13px; height: 13px; vertical-align: -2px; margin-right: 4px; }
+  .btn-ghost {
+    display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px;
+    border-radius: 7px; color: var(--muted); font-size: 12px; font-weight: 600;
+  }
+  .btn-ghost:hover { color: var(--text); background: var(--surface); }
+  .btn-ghost svg { width: 13px; height: 13px; }
 
   /* the project tree — same row as the lists above it, plus a twisty and an
      indent that comes from the component (depth is a paddingLeft, so a deep
