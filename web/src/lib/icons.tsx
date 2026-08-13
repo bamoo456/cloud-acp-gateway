@@ -184,6 +184,18 @@ export function fileIcon(kind: FileIcon): ReactElement {
   );
 }
 
+// The file panel's expand toggle: diagonal arrows out to the corners, and the
+// same pair pointing back in once the panel already fills the window.
+export function IconExpand({ collapse = false }: { collapse?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      {collapse
+        ? <><path d="M20 10h-6V4M4 14h6v6" /><path d="M21 3l-7 7M3 21l7-7" /></>
+        : <><path d="M14 4h6v6M10 20H4v-6" /><path d="M20 4l-7 7M4 20l7-7" /></>}
+    </svg>
+  );
+}
+
 export function IconRefresh() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">

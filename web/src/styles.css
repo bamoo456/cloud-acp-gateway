@@ -1054,6 +1054,17 @@
     #files { max-height: calc(100dvh - 52px - env(safe-area-inset-top) - 14px); }
   }
   #files.open { display: flex; animation: pop .14s ease-out; }
+  /* Expanded: the whole window, at both breakpoints. width/height must be reset
+     with it — the desktop column rule sets both, and a fixed box with a width
+     ignores `right` and ends up a narrow panel against the LEFT edge. z-index
+     clears the header (30) and the chat's edge rail (35), and stays under the
+     file menu (40/50) which renders outside this element. Specificity (id +
+     class) is what beats the desktop block below, so placement here is fine. */
+  #files.expanded {
+    position: fixed; inset: 0; width: auto; height: auto; max-width: none; max-height: none;
+    margin: 0; border: none; border-radius: 0; box-shadow: none; z-index: 36;
+    padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+  }
   #files-scrim { position: fixed; inset: 0; z-index: 20; display: none; }
   #files-scrim.open { display: block; }
   .files-btn.on, .sessions-btn.on { color: var(--accent); background: var(--surface-2); }
