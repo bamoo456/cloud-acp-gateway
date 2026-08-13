@@ -12,14 +12,36 @@ export function newTerminalId(): string {
   return crypto.randomUUID();
 }
 
-export async function listTerminals(): Promise<string[]> {
+// A tab as the gateway sees it. `name` is "" until someone renames it, and the
+// UI falls back to the tab's position.
+export interface TerminalTab { id: string; name: string }
+
+export async function listTerminals(): Promise<TerminalTab[]> {
   try {
     const r = await fetch(base() + "/terminal/status", { credentials: "same-origin" });
     if (!r.ok) return [];
-    const body = (await r.json()) as { sessions?: Array<{ id?: string }> };
-    return (body.sessions ?? []).map((s) => s.id).filter((id): id is string => !!id);
+    const body = (await r.json()) as { sessions?: Array<{ id?: string; name?: string }> };
+    return (body.sessions ?? [])
+      .filter((s): s is { id: string; name?: string } => !!s.id)
+      .map((s) => ({ id: s.id, name: s.name ?? "" }));
   } catch {
     return []; // offline or an older gateway — start fresh rather than fail to open
+  }
+}
+
+// The name lives on the gateway, not in localStorage: the console is driven
+// from a phone and a desktop against the same shells, and a label only one of
+// them can see is worse than no label.
+export async function renameTerminal(id: string, name: string): Promise<void> {
+  try {
+    await fetch(base() + "/terminal/rename" + qs(id), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+  } catch (e) {
+    console.error("renameTerminal failed", e);
   }
 }
 

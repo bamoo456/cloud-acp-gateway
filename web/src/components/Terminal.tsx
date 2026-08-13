@@ -4,11 +4,58 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import {
   newTerminalId, listTerminals, startTerminal, terminalStreamUrl,
-  sendTerminalInput, resizeTerminal, stopTerminal,
+  sendTerminalInput, resizeTerminal, stopTerminal, renameTerminal, type TerminalTab,
 } from "../lib/terminal.ts";
+import { useRowMenu } from "./FileMenu.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import { readTerminalHeight, saveTerminalHeight, clampTerminalHeight, MIN_TERMINAL_HEIGHT, MAX_TERMINAL_HEIGHT } from "../lib/terminalHeight.ts";
 import { IconPlus, IconX } from "../lib/icons.tsx";
+
+// Matches the gateway's own cap (src/terminal.ts), so the box stops taking
+// characters the server would only trim off again.
+const MAX_TAB_NAME = 40;
+
+// One tab's chip in the tab row: its label, and the × that kills its shell.
+//
+// Renaming is reached the way every other "do something to this row" in the
+// console is — right-click on a desktop, long press on a phone, via the shared
+// useRowMenu gestures — plus double-click, which is what a tab strip trains you
+// to try. useRowMenu wants a menu position; a rename box opens in place, so the
+// coordinates go unused.
+function TabChip({ tab, index, active, editing, draft, onPick, onRenameStart, onDraft, onCommit, onCancel, onClose }: {
+  tab: TerminalTab; index: number; active: boolean; editing: boolean; draft: string;
+  onPick: () => void; onRenameStart: () => void; onDraft: (v: string) => void;
+  onCommit: () => void; onCancel: () => void; onClose: () => void;
+}) {
+  const menu = useRowMenu(onRenameStart);
+  // Falls back to the position, so an unnamed tab still has something to click.
+  const label = tab.name || String(index + 1);
+
+  return (
+    <span className={"term-tab" + (active ? " on" : "")}>
+      {editing ? (
+        <input className="term-tab-edit" autoFocus value={draft} maxLength={MAX_TAB_NAME}
+          aria-label={`Rename terminal ${label}`}
+          onChange={(e) => onDraft(e.target.value)}
+          onBlur={onCommit}
+          onKeyDown={(e) => {
+            // Keep both out of the shell underneath, which is still mounted.
+            e.stopPropagation();
+            if (e.key === "Enter") onCommit();
+            else if (e.key === "Escape") onCancel();
+          }} />
+      ) : (
+        <>
+          <button role="tab" aria-selected={active} title={`${label} — right-click or double-click to rename`}
+            onClick={onPick} onDoubleClick={onRenameStart} {...menu}>
+            {label}
+          </button>
+          <button className="term-tab-x" aria-label={`Close terminal ${label}`} onClick={onClose}><IconX /></button>
+        </>
+      )}
+    </span>
+  );
+}
 
 // One tab: an xterm bound to one gateway shell. Every tab stays mounted while
 // the panel is open — switching hides the inactive ones rather than tearing
@@ -115,16 +162,19 @@ export function Terminal({ cwd, onEmpty }: { cwd?: string; onEmpty: () => void }
   const [height, setHeight] = useState(readTerminalHeight);
   // null while we ask the gateway which shells already exist — rendering a tab
   // before that would spawn a duplicate of one we're about to adopt.
-  const [tabs, setTabs] = useState<string[] | null>(null);
+  const [tabs, setTabs] = useState<TerminalTab[] | null>(null);
   const [active, setActive] = useState("");
+  // The tab being renamed, and the text in its box. Null is the ordinary state.
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
 
   useEffect(() => {
     let cancelled = false;
-    void listTerminals().then((ids) => {
+    void listTerminals().then((found) => {
       if (cancelled) return;
-      const initial = ids.length ? ids : [newTerminalId()];
+      const initial = found.length ? found : [{ id: newTerminalId(), name: "" }];
       setTabs(initial);
-      setActive(initial[0]);
+      setActive(initial[0].id);
     });
     return () => { cancelled = true; };
   }, []);
@@ -142,17 +192,26 @@ export function Terminal({ cwd, onEmpty }: { cwd?: string; onEmpty: () => void }
   const dropTab = (id: string) => {
     setTabs((prev) => {
       if (!prev) return prev;
-      const next = prev.filter((t) => t !== id);
+      const at = prev.findIndex((t) => t.id === id);
+      const next = prev.filter((t) => t.id !== id);
       if (!next.length) onEmpty();
-      setActive((cur) => (cur === id ? next[Math.max(0, prev.indexOf(id) - 1)] ?? "" : cur));
+      setActive((cur) => (cur === id ? next[Math.max(0, at - 1)]?.id ?? "" : cur));
       return next;
     });
   };
 
   const addTab = () => {
     const id = newTerminalId();
-    setTabs((prev) => [...(prev ?? []), id]);
+    setTabs((prev) => [...(prev ?? []), { id, name: "" }]);
     setActive(id);
+  };
+
+  const commitRename = () => {
+    if (!editing) return;
+    const name = draft.trim().slice(0, MAX_TAB_NAME);
+    setTabs((prev) => prev?.map((t) => (t.id === editing ? { ...t, name } : t)) ?? prev);
+    void renameTerminal(editing, name);
+    setEditing(null);
   };
 
   return (
@@ -161,19 +220,18 @@ export function Terminal({ cwd, onEmpty }: { cwd?: string; onEmpty: () => void }
         size={height} min={MIN_TERMINAL_HEIGHT} max={MAX_TERMINAL_HEIGHT} clamp={clampTerminalHeight}
         onSize={setHeight} onCommit={saveTerminalHeight} />
       <div className="term-tabs" role="tablist">
-        {(tabs ?? []).map((id, i) => (
-          <span key={id} className={"term-tab" + (id === active ? " on" : "")}>
-            <button role="tab" aria-selected={id === active} onClick={() => setActive(id)}>
-              {i + 1}
-            </button>
-            <button className="term-tab-x" aria-label={`Close terminal ${i + 1}`}
-              onClick={() => { void stopTerminal(id); dropTab(id); }}><IconX /></button>
-          </span>
+        {(tabs ?? []).map((t, i) => (
+          <TabChip key={t.id} tab={t} index={i} active={t.id === active}
+            editing={editing === t.id} draft={draft}
+            onPick={() => setActive(t.id)}
+            onRenameStart={() => { setEditing(t.id); setDraft(t.name); }}
+            onDraft={setDraft} onCommit={commitRename} onCancel={() => setEditing(null)}
+            onClose={() => { void stopTerminal(t.id); dropTab(t.id); }} />
         ))}
         <button className="term-newtab" aria-label="New terminal" onClick={addTab}><IconPlus /></button>
       </div>
-      {(tabs ?? []).map((id) => (
-        <TermTab key={id} id={id} cwd={cwd} active={id === active} onExit={dropTab} />
+      {(tabs ?? []).map((t) => (
+        <TermTab key={t.id} id={t.id} cwd={cwd} active={t.id === active} onExit={dropTab} />
       ))}
     </div>
   );
