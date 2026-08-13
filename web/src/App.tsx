@@ -114,7 +114,7 @@ export function App() {
           </button>
         </div>
       )}
-      {terminalEnabled && terminalOpen && <Terminal cwd={cwd} />}
+      {terminalEnabled && terminalOpen && <Terminal cwd={cwd} onEmpty={() => setTerminalOpen(false)} />}
       {locked && <LockScreen />}
     </>
   );
