@@ -1,4 +1,4 @@
-import type { PermissionOption } from "../types.ts";
+import type { PermissionOption, RateLimit } from "../types.ts";
 
 export interface HistorySession { sessionId: string; title: string | null; updatedAt: string; }
 export interface DiscoveredHistorySession extends HistorySession { cwd: string; source: "claude-cli"; }
@@ -510,6 +510,24 @@ export async function getRunning(): Promise<RunningTask[]> {
     return Array.isArray(j?.tasks) ? j.tasks : [];
   } catch {
     return [];
+  }
+}
+
+// This account's Claude quota windows, keyed the same way the ACP rate-limit
+// path keys them ("five_hour", "seven_day", …) and carrying the same
+// {utilization, resetsAt} shape, so both sources land in one store map and the
+// gauge renders them identically. Unlike the ACP path this needs no turn to have
+// happened. `null` means the gateway couldn't say (too old to have the route,
+// offline, no Claude credential) — which is different from "no windows".
+export async function getUsageLimits(): Promise<Record<string, RateLimit> | null> {
+  try {
+    const r = await fetch(base() + "/usage/limits");
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (j?.status !== "ok" || !j.windows || typeof j.windows !== "object") return null;
+    return j.windows as Record<string, RateLimit>;
+  } catch {
+    return null;
   }
 }
 

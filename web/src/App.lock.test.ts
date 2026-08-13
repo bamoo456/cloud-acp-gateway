@@ -27,6 +27,7 @@ describe("screen lock — connection-driven (no idle/visibility timer)", () => {
     vi.doMock("./lib/api.ts", () => ({
       getRunning: vi.fn().mockResolvedValue([]),
       getInboxPending: vi.fn().mockResolvedValue([]),
+      getUsageLimits: vi.fn().mockResolvedValue(null),
       answerInbox: vi.fn().mockResolvedValue(true),
       getHistory: vi.fn().mockResolvedValue([]),
       getDiscoveredHistory: vi.fn().mockResolvedValue([]),
