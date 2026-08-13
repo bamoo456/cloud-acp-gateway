@@ -1245,6 +1245,62 @@ describe("Sidebar recent conversations", () => {
     expect(deleteSession).not.toHaveBeenCalled();
   });
 
+  // Reach a row's rename box the way a phone has to: the long-press/right-click
+  // menu, then a TAP on its Rename row.
+  async function openRenameFromMenu(rowBtn: HTMLButtonElement) {
+    await act(async () => { rowBtn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    const renameRow = [...container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row")]
+      .find((b) => b.textContent?.includes("Rename conversation"));
+    expect(renameRow).not.toBeUndefined();
+    await act(async () => { renameRow!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    return container.querySelector<HTMLInputElement>(".sess-confirm .rename-input")!;
+  }
+
+  // A Recent row can name a conversation in a folder this client isn't in, and the
+  // rename sidecar is per-cwd — so the row's OWN agent and folder have to travel
+  // with it, not the active ones.
+  test("renaming a Recent row posts that row's own agent and folder", async () => {
+    await seedRecentSessions(sixteenRecents());
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    const renameSession = vi.fn();
+    useStore.setState({ renameSession } as any);
+
+    const rowBtn = container.querySelector<HTMLButtonElement>(".recent-list .sess-row .sess-item")!;
+    expect(rowBtn.textContent).toContain("Cross folder work");
+
+    const input = await openRenameFromMenu(rowBtn);
+    expect(input.value).toBe("Cross folder work");
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Renamed elsewhere");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const save = [...container.querySelectorAll<HTMLButtonElement>(".sess-confirm .btn")]
+      .find((b) => b.textContent === "Save")!;
+    await act(async () => { save.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(renameSession).toHaveBeenCalledWith("Renamed elsewhere", {
+      sessionId: "x1", agentName: "claude", cwd: "/other-repo",
+    });
+    expect(container.querySelector(".sess-confirm")).toBeNull();
+  });
+
+  // An unnamed row displays a short session id. Prefilling the box with it would
+  // persist the id as the conversation's name on the very next Save.
+  test("an unnamed row opens the rename box empty, not with its short id", async () => {
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "abcdef123456", title: "", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+    ]);
+    await renderSidebar();
+
+    const rowBtn = container.querySelector<HTMLButtonElement>(".recent-list .sess-row .sess-item")!;
+    expect(rowBtn.textContent).toContain("abcdef12");
+
+    const input = await openRenameFromMenu(rowBtn);
+    expect(input.value).toBe("");
+  });
+
   test("the desktop column collapses and expands via sidebarOpen", async () => {
     await renderSidebar();
     const { useStore } = await import("../store/store.ts");
