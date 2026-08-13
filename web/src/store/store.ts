@@ -14,7 +14,7 @@ import {
 } from "./reducers.ts";
 import type {
   Session, Model, Mode, ConfigOption, SlashCommand, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
-  AgentSkin, MessageImage, MessageFile, PromptCapabilities, ElicitationResponse,
+  AgentSkin, MessageImage, MessageFile, PromptCapabilities, ElicitationResponse, RateLimit,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
 
@@ -87,6 +87,11 @@ interface State {
   modes: Mode[];
   commands: SlashCommand[];
   configOptions: ConfigOption[];
+  // rateLimitType -> the latest window the agent reported. Account-wide rather
+  // than per-session (every session on this agent shares the same quota), and
+  // agent-scoped: it resets alongside models/modes because only Claude reports
+  // these and another agent's account has nothing to do with them.
+  rateLimits: Record<string, RateLimit>;
   promptCapabilities: PromptCapabilities; // what the active agent accepts in a prompt (image, …)
   pendingPermissions: PendingPermission[];
   promptStateRevision: number;
@@ -515,7 +520,7 @@ export const useStore = create<State>((set, get) => {
     set({
       agentReady: false, tip: "Reconnecting…",
       sessions: {}, activeId: null,
-      models: [], modes: [], commands: [], configOptions: [],
+      models: [], modes: [], commands: [], configOptions: [], rateLimits: {},
       promptCapabilities: {}, pendingPermissions: [],
       busy: false, busySessionIds: {},
       promptStateRevision: get().promptStateRevision + 1,
@@ -548,6 +553,15 @@ export const useStore = create<State>((set, get) => {
     if (p.update.sessionUpdate === "config_option_update") {
       if (p.update.configOptions) set({ configOptions: p.update.configOptions });
       return;
+    }
+    // Rate limits ride on a usage_update but describe the account, not the
+    // session — merge them before the sid check (which drops frames for
+    // conversations this client isn't holding) and fall through so the same
+    // update's used/size still reaches the session reducer. One event carries
+    // one window, so this accumulates rather than replaces.
+    const rl = p.update._meta?.["_claude/rateLimit"] as RateLimit | undefined;
+    if (p.update.sessionUpdate === "usage_update" && rl?.rateLimitType) {
+      set({ rateLimits: { ...get().rateLimits, [rl.rateLimitType]: rl } });
     }
     const st = get();
     const remotePrompt = p.update.sessionUpdate === "user_message_chunk";
@@ -860,7 +874,7 @@ export const useStore = create<State>((set, get) => {
     set({
       agentName, cwd: cwd || get().cwd,
       conn: "connecting", agentReady: false, tip,
-      sessions: {}, activeId: null, models: [], modes: [], commands: [], configOptions: [],
+      sessions: {}, activeId: null, models: [], modes: [], commands: [], configOptions: [], rateLimits: {},
       promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
@@ -968,7 +982,7 @@ export const useStore = create<State>((set, get) => {
     cwd: initialAgent?.cwd || cfg.fsRoot || "",
     conn: "connecting", agentReady: false, tip: "Connecting to the local agent…",
     sessions: {}, activeId: null,
-    models: [], modes: [], commands: [], configOptions: [],
+    models: [], modes: [], commands: [], configOptions: [], rateLimits: {},
     promptCapabilities: {},
     pendingPermissions: [],
     promptStateRevision: 0,
@@ -1051,7 +1065,7 @@ export const useStore = create<State>((set, get) => {
         // switch retains sessions, wiping it would drop a background session's prompt
         // (its badge) on a switch-away/back. Entries carry their agentName so the
         // badge only surfaces prompts answerable on the now-active agent.
-        models: [], modes: [], commands: [], configOptions: [],
+        models: [], modes: [], commands: [], configOptions: [], rateLimits: {},
         promptCapabilities: {}, busy: false, busySessionIds: {}, joining: false,
         promptStateRevision: get().promptStateRevision + 1,
       });

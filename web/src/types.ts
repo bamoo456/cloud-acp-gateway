@@ -113,6 +113,19 @@ export interface ToolContentItem {
   content?: ContentBlock;
 }
 
+// One rate-limit window as the Claude adapter reports it, forwarded on a
+// `usage_update` under _meta["_claude/rateLimit"]. An event carries exactly one
+// window, so the store keys them by `rateLimitType` to build the full picture.
+// `utilization` is a 0..1 fraction and `resetsAt` Unix *seconds* — both verified
+// against the Claude CLI, which renders them as `Math.floor(u * 100)` and
+// `new Date(resetsAt * 1000)`.
+export interface RateLimit {
+  status?: string;
+  rateLimitType?: string;
+  utilization?: number;
+  resetsAt?: number;
+}
+
 export interface SessionUpdate {
   sessionUpdate: string;
   content?: ContentBlock;
@@ -126,7 +139,11 @@ export interface SessionUpdate {
   // Read only to recover the `kind`/`locations` the adapter didn't map — see
   // lib/toolInput.ts for why that recovery exists and what it refuses to guess.
   rawInput?: unknown;
-  _meta?: { claudeCode?: { toolName?: string } };
+  _meta?: { claudeCode?: { toolName?: string }; "_claude/rateLimit"?: RateLimit };
+  // usage_update: tokens the session's context window currently holds, and how
+  // big that window is. Both agents emit these; the rate-limit _meta is Claude-only.
+  used?: number;
+  size?: number;
   entries?: PlanEntry[];
   availableCommands?: SlashCommand[];
   currentModeId?: string;
@@ -178,6 +195,10 @@ export interface Session {
   working: boolean;
   modelId?: string | null;
   mode?: string | null;
+  // Context-window occupancy from the latest usage_update. Absent until the
+  // agent sends one, which it only does once a turn has produced tokens.
+  contextUsed?: number;
+  contextSize?: number;
   viewOnly?: boolean;
   suppressReplay?: boolean;
   // streaming cursors (item ids of the currently-open assistant / thought bubble)
