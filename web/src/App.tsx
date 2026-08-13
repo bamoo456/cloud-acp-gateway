@@ -24,6 +24,7 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 // "HTMLCanvasElement.getContext not implemented" warning (xterm degrades
 // gracefully; no test fails).
 import { Terminal } from "./components/Terminal.tsx";
+import { UsageStrip } from "./components/UsageStrip.tsx";
 import { IconTerminal } from "./lib/icons.tsx";
 import type { AgentRef } from "./types.ts";
 
@@ -36,6 +37,10 @@ export function App() {
   const locked = useStore((s) => s.locked);
   const cwd = useStore((s) => s.cwd);
   const terminalEnabled = useStore((s) => s.cfg.terminalEnabled);
+  // The strip is shared: it docks the terminal toggle and the usage gauge, and
+  // either one alone is reason enough to show it.
+  const hasUsage = useStore((s) =>
+    !!(s.activeId && s.sessions[s.activeId]?.contextSize) || Object.keys(s.rateLimits).length > 0);
   const [panel, setPanel] = useState(false);
   const [picker, setPicker] = useState(false);
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
@@ -120,14 +125,20 @@ export function App() {
           they have to be direct #root flex children to stack under that row
           instead of becoming a 4th column inside it. The strip is always
           present when the gateway offers a terminal: it is the only affordance
-          that opens the panel, and it doubles as the panel's title bar. */}
-      {terminalEnabled && (
+          that opens the panel, and it doubles as the panel's title bar. It also
+          appears on a terminal-less gateway once there is usage to report. */}
+      {(terminalEnabled || hasUsage) && (
         <div className="statusbar">
-          <button className={"sb-chip" + (terminalOpen ? " on" : "")} aria-pressed={terminalOpen}
-            onClick={() => setTerminalOpen((v) => !v)}>
-            <IconTerminal />Terminal
-          </button>
-          <span className="sb-hint">or <kbd>⌃`</kbd></span>
+          {terminalEnabled && (
+            <>
+              <button className={"sb-chip" + (terminalOpen ? " on" : "")} aria-pressed={terminalOpen}
+                onClick={() => setTerminalOpen((v) => !v)}>
+                <IconTerminal />Terminal
+              </button>
+              <span className="sb-hint">or <kbd>⌃`</kbd></span>
+            </>
+          )}
+          <UsageStrip />
         </div>
       )}
       {terminalEnabled && terminalOpen && <Terminal cwd={cwd} onEmpty={() => setTerminalOpen(false)} />}
