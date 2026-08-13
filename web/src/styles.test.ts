@@ -22,8 +22,8 @@ describe("global styles", () => {
   test("chat content cannot widen the mobile viewport", () => {
     expect(cssRule(".thread")).toMatch(/width\s*:\s*min\(760px,\s*100%\)/);
     expect(cssRule(".thread")).toMatch(/min-width\s*:\s*0/);
-    expect(cssRule(".msg.user .bubble")).toMatch(/overflow-wrap\s*:\s*anywhere/);
-    expect(cssRule(".msg.assistant")).toMatch(/max-width\s*:\s*100%/);
+    expect(cssRule(".turn.user .body")).toMatch(/overflow-wrap\s*:\s*anywhere/);
+    expect(cssRule(".turn")).toMatch(/max-width\s*:\s*100%/);
     expect(cssRule(".tool")).toMatch(/max-width\s*:\s*100%/);
     expect(cssRule(".diff")).toMatch(/max-width\s*:\s*100%/);
     expect(cssRule(".diff .path")).toMatch(/text-overflow\s*:\s*ellipsis/);
@@ -135,11 +135,10 @@ describe("global styles", () => {
   test("nothing outside the identity dot is tinted by --agent-color", () => {
     // The chat column's 3px rail and the composer's ring both used to carry it.
     // Only the .idot and the explicit "hue" opt-in may read the agent's colour.
-    const outsideHue = styles.replace(/:root\[data-identity="hue"\]\s*\{[^}]*\}/g, "");
-    const tinted = outsideHue.split("\n").filter((line) => line.includes("var(--agent-color"));
+    const tinted = [...styles.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
+      .filter(([, , body]) => body.includes("var(--agent-color"))
+      .map(([, selector]) => selector.trim().split("\n").pop()!.trim());
 
-    for (const line of tinted) {
-      expect(line).toMatch(/\.idot/);
-    }
+    expect(tinted.sort()).toEqual(['.idot', ':root[data-identity="hue"]']);
   });
 });
