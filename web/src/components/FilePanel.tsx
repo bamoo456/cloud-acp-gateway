@@ -27,7 +27,7 @@ import {
   clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH,
   DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
 } from "../lib/panelWidth.ts";
-import { IconBack, IconX, IconRefresh, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, fileIcon } from "../lib/icons.tsx";
+import { IconBack, IconX, IconRefresh, IconExpand, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, fileIcon } from "../lib/icons.tsx";
 
 // The file preview panel: what the agent actually produced, rather than what it
 // said about it. Two modes, three lists and one viewer.
@@ -260,6 +260,12 @@ export function FilePanel() {
     return () => { mq.removeEventListener("change", sync); window.removeEventListener("resize", sync); };
   }, []);
 
+  // Expanded takes the whole window (see the stylesheet), for a wide diff or a
+  // mockup that a 440px column cuts in half. Not persisted, and deliberately
+  // separate from the dragged width: it is a look at one thing, not a new
+  // shape for the panel to keep.
+  const [expanded, setExpanded] = useState(false);
+
   // Which row was right-clicked / long-pressed, and where the menu goes. Null
   // is the ordinary state: no menu.
   const [menu, setMenu] = useState<FileMenuTarget | null>(null);
@@ -306,9 +312,11 @@ export function FilePanel() {
       {/* Mobile only (CSS): on desktop the panel is a column and dimming the
           chat behind it would be wrong. */}
       <div id="files-scrim" className={open ? "open" : ""} onClick={closeFiles} />
-      <aside id="files" className={open ? "open" : ""} aria-hidden={!open}
-        style={desktop ? { width, maxWidth: width } : undefined}>
-        {desktop && <ResizeHandle className="wf-resize" label="Resize the files panel" edge="left" axis="x"
+      <aside id="files" className={(open ? "open" : "") + (expanded ? " expanded" : "")} aria-hidden={!open}
+        // No inline width while expanded: it would beat the stylesheet's
+        // full-window rule, leaving a 440px panel pinned to the left edge.
+        style={desktop && !expanded ? { width, maxWidth: width } : undefined}>
+        {desktop && !expanded && <ResizeHandle className="wf-resize" label="Resize the files panel" edge="left" axis="x"
           size={width} min={MIN_PANEL_WIDTH} max={MAX_PANEL_WIDTH} clamp={clampPanelWidth}
           onSize={setWidth} onCommit={savePanelWidth} />}
         <div className="wf-head">
@@ -325,6 +333,8 @@ export function FilePanel() {
             <button className="icon-btn" title="Refresh" disabled={loading}
               onClick={() => { loadChanges(); setTreeKey((k) => k + 1); }}><IconRefresh /></button>
           )}
+          <button className="icon-btn" aria-pressed={expanded} title={expanded ? "Collapse" : "Expand"}
+            onClick={() => setExpanded((v) => !v)}><IconExpand collapse={expanded} /></button>
           <button className="icon-btn" title="Close" onClick={closeFiles}><IconX /></button>
         </div>
 
