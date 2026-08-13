@@ -1,0 +1,206 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Terminal strip — making it visible</title>
+<!--
+  Throwaway mockup. Not wired to anything, not imported by the app.
+
+  The bottom strip that opens the terminal is too quiet: a muted chip on a
+  surface-2 bar reads as a footer, not as a control. Each frame below is one way
+  to fix that, shown CLOSED (the state that has to attract the eye) — except E,
+  where the open state is the whole point.
+
+  Colours and metrics copied from web/src/styles.css. Nothing is interactive.
+-->
+<style>
+  :root {
+    --bg: #f4f3f1; --surface: #ffffff; --surface-2: #f0efec;
+    --text: #1f1e1d; --muted: #84827d; --border: #e7e5e0; --border-strong: #d9d6d0;
+    --accent: #d97757; --accent-text: #fff; --ok: #3a9b5c;
+    --radius: 16px; --shadow: 0 10px 30px #00000018; --term-bg: #0b0f14;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1f1e1d; --surface: #292826; --surface-2: #211f1e; --text: #eeede9;
+      --muted: #9a978f; --border: #38362f; --border-strong: #46443c;
+      --shadow: 0 10px 30px #00000055;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px 28px 80px; background: var(--bg); color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .lede { margin: 0 0 20px; color: var(--muted); max-width: 72ch; }
+  .opt { margin: 0 0 30px; max-width: 720px; }
+  .opt-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+  .tag { flex: 0 0 auto; width: 24px; height: 24px; border-radius: 7px; display: grid;
+    place-items: center; background: var(--accent); color: var(--accent-text);
+    font-size: 13px; font-weight: 800; }
+  .opt-head b { font-size: 15px; }
+  .opt-head .sub { color: var(--muted); font-size: 13px; }
+  .note { margin: 9px 0 0; color: var(--muted); font-size: 13px; max-width: 66ch; }
+  .note b { color: var(--text); font-weight: 650; }
+
+  .stage { border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    background: var(--bg); box-shadow: var(--shadow); }
+  .body { height: 60px; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+  .composer-wrap { padding: 8px 12px 12px; }
+  .composer { background: var(--surface); border-radius: var(--radius); padding: 8px 8px 8px 12px;
+    box-shadow: 0 0 0 1.5px var(--accent), var(--shadow); }
+  .composer .ph { color: var(--muted); font-size: 15px; padding: 4px 0 10px; }
+
+  /* ── today ── */
+  .sb { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px;
+    background: var(--surface-2); border-top: 1px solid var(--border); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px;
+    border-radius: 999px; font-size: 12.5px; font-weight: 650; color: var(--muted); }
+  .chip svg { width: 14px; height: 14px; }
+
+  /* A — accent chip */
+  .sb.a .chip { color: var(--accent); background: var(--bg);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+
+  /* B — dark strip */
+  .sb.b { background: var(--term-bg); border-top-color: #ffffff1a; }
+  .sb.b .chip { color: #d7d5cf; }
+  .sb.b .chip svg { color: #7ec27e; }
+  .sb.b .meta { color: #6b6b64; font-size: 12px; margin-left: auto; padding-right: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* C — taller, solid button */
+  .sb.c { height: 38px; }
+  .sb.c .chip { height: 28px; padding: 0 12px; border-radius: 8px; font-size: 13px;
+    background: var(--accent); color: var(--accent-text); box-shadow: none; }
+  .sb.c .chip svg { width: 15px; height: 15px; }
+  .sb.c .hint { color: var(--muted); font-size: 12px; }
+  kbd { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 3px 5px;
+    border-radius: 4px; background: var(--surface-2); border: 1px solid var(--border-strong);
+    color: var(--muted); }
+
+  /* D — grip handle */
+  .sb.d { flex-direction: column; gap: 0; height: 34px; padding: 0;
+    justify-content: center; background: var(--surface-2); position: relative; }
+  .sb.d .grip { width: 46px; height: 4px; border-radius: 999px; background: var(--border-strong); }
+  .sb.d .chip { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); }
+  .sb.d .chip { color: var(--text); }
+
+  /* E — tabs live in the strip */
+  .sb.e { background: var(--term-bg); border-top-color: #ffffff1a; height: 34px; gap: 6px; }
+  .sb.e .chip { color: #eeede9; }
+  .sb.e .tab { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px;
+    border-radius: 7px; font-size: 12px; font-weight: 650; color: #9a978f; }
+  .sb.e .tab.on { background: #ffffff1a; color: #eeede9; }
+  .sb.e .plus { color: #9a978f; display: grid; place-items: center; width: 22px; height: 22px; }
+  .sb.e .plus svg, .sb.e .tab svg { width: 12px; height: 12px; }
+  .sb.e .sep { width: 1px; height: 16px; background: #ffffff1f; margin: 0 2px; }
+  .term { background: var(--term-bg); height: 74px; padding: 6px 12px; color: #d7d5cf;
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .term .p { color: #6ea8fe; } .term .c { color: #7ec27e; }
+</style>
+
+<h1>Terminal strip — making it visible</h1>
+<p class="lede">
+  Today the strip is a muted chip on a <code>surface-2</code> bar: it reads as a
+  footer rather than a control, so the terminal is hard to find. Every frame is
+  the <b>closed</b> state — the one that has to catch your eye — except E, where
+  the open state is the point. Pick one.
+</p>
+
+<!-- A -->
+<div class="opt">
+  <div class="opt-head"><span class="tag">A</span><b>Accent chip</b>
+    <span class="sub">— smallest change: colour and outline the chip, nothing else moves</span></div>
+  <div class="stage">
+    <div class="body">thread</div>
+    <div class="composer-wrap"><div class="composer"><div class="ph">Reply to Claude…</div></div></div>
+    <div class="sb a"><span class="chip">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l5 5-5 5"/><path d="M12 17h8"/></svg>Terminal</span></div>
+  </div>
+  <p class="note">Reads as a control instead of a label, and costs nothing in
+    height or layout. <b>Still competes with the composer's accent ring</b> for
+    the same colour, a few pixels away.</p>
+</div>
+
+<!-- B -->
+<div class="opt">
+  <div class="opt-head"><span class="tag">B</span><b>Dark strip</b>
+    <span class="sub">— the bar takes the terminal's own colour, so it looks like what it opens</span></div>
+  <div class="stage">
+    <div class="body">thread</div>
+    <div class="composer-wrap"><div class="composer"><div class="ph">Reply to Claude…</div></div></div>
+    <div class="sb b">
+      <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l5 5-5 5"/><path d="M12 17h8"/></svg>Terminal</span>
+      <span class="meta">zsh</span>
+    </div>
+  </div>
+  <p class="note">A dark band against a light app is the strongest signal here
+    without spending accent colour, and it <b>previews the panel</b> — the strip
+    is visibly the top edge of the thing that slides up. Weaker in dark mode,
+    where the contrast against <code>--bg</code> is smaller.</p>
+</div>
+
+<!-- C -->
+<div class="opt">
+  <div class="opt-head"><span class="tag">C</span><b>Taller bar, solid button</b>
+    <span class="sub">— 38px, filled accent button, room for a shortcut hint</span></div>
+  <div class="stage">
+    <div class="body">thread</div>
+    <div class="composer-wrap"><div class="composer"><div class="ph">Reply to Claude…</div></div></div>
+    <div class="sb c">
+      <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l5 5-5 5"/><path d="M12 17h8"/></svg>Terminal</span>
+      <span class="hint">or <kbd>⌃`</kbd></span>
+    </div>
+  </div>
+  <p class="note">Impossible to miss, and a real tap target on a phone. <b>Costs
+    another 8px of permanent height</b> and puts a filled accent button in the
+    same eyeline as the send button, which is the one thing that colour currently
+    means.</p>
+</div>
+
+<!-- D -->
+<div class="opt">
+  <div class="opt-head"><span class="tag">D</span><b>Drawer grip</b>
+    <span class="sub">— a pull handle, so the strip reads as a drawer you drag open</span></div>
+  <div class="stage">
+    <div class="body">thread</div>
+    <div class="composer-wrap"><div class="composer"><div class="ph">Reply to Claude…</div></div></div>
+    <div class="sb d">
+      <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l5 5-5 5"/><path d="M12 17h8"/></svg>Terminal</span>
+      <span class="grip"></span>
+    </div>
+  </div>
+  <p class="note">The grip says “draggable”, which matches the resize handle the
+    panel already has, and invites a swipe on mobile. <b>Says “there is more
+    below” without saying it is a shell</b> — and it needs the drag-to-open
+    gesture actually implemented, or the affordance lies.</p>
+</div>
+
+<!-- E -->
+<div class="opt">
+  <div class="opt-head"><span class="tag">E</span><b>Tabs in the strip</b>
+    <span class="sub">— shown open: the strip absorbs the tab row instead of the panel carrying it</span></div>
+  <div class="stage">
+    <div class="body">thread</div>
+    <div class="composer-wrap"><div class="composer"><div class="ph">Reply to Claude…</div></div></div>
+    <div class="sb e">
+      <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l5 5-5 5"/><path d="M12 17h8"/></svg>Terminal</span>
+      <span class="sep"></span>
+      <span class="tab on">1 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></span>
+      <span class="tab">2 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></span>
+      <span class="plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>
+    </div>
+    <div class="term"><span class="p">~/workspace/cloud-acp-gateway</span><br><span class="c">&gt;</span> npm test</div>
+  </div>
+  <p class="note">Merges two bars into one: <b>saves the ~30px the tab row costs
+    today</b>, and the strip stops being a bar with one thing on it. Combine with
+    B's dark treatment (drawn here) for the closed state. Downside: the closed
+    state is then just the chip again, so this fixes the open state, not
+    discoverability — pair it with A, B or C.</p>
+</div>
+
+<p class="note" style="max-width:70ch;margin-top:26px">
+  <b>B</b> is the one I would take: it is the strongest signal that costs no
+  height and no accent colour, and the strip ends up looking like the panel it
+  opens. <b>B + E</b> if you also want the tab row folded in — they are the same
+  dark bar, so they compose cleanly. <b>C</b> if discoverability on a phone
+  matters more than the 8px.
+</p>
