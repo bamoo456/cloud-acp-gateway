@@ -393,10 +393,22 @@
     padding: 12px 12px; border-radius: 11px; text-align: left;
   }
   .sess-item:hover { background: var(--surface-2); }
-  .sess-item.active { background: var(--surface-2); }
+  /* The conversation the main view is showing. A background wash alone was the
+     marker before, and it was the same wash :hover paints — so the row you're in
+     was indistinguishable from the row under the pointer. The inset rail is what
+     carries the signal now (inset, not a border, so nothing shifts and the 11px
+     corners still clip it); the wash only backs it up. */
+  .sess-item.active {
+    background: var(--surface-2);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .sess-item.active .name { color: var(--accent); }
   .sess-item.recent { padding-block: 10px; }
   .sess-item.with-folder { align-items: center; }
-  .sess-item.recent.active { background: #d977571f; }
+  /* Same tint the default skin hardcoded, but derived — so it agrees with the
+     rail and the title in the skins where --accent is a near-white or near-black
+     neutral instead of the warm default. */
+  .sess-item.recent.active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .sess-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .sess-item .name { flex: 1; min-width: 0; font-size: 16px; font-weight: 600;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
