@@ -9,6 +9,7 @@ test("native client config exposes capabilities without credentials or commands"
     rpcPath: "/send",
     defaultAgent: "codex",
     fsRoot: "/workspace",
+    terminalEnabled: true,
     agents: [{
       name: "codex",
       cwd: "/workspace/app",
@@ -23,6 +24,7 @@ test("native client config exposes capabilities without credentials or commands"
 
   assert.equal(config.schemaVersion, CLIENT_CONFIG_SCHEMA_VERSION);
   assert.deepEqual(config.transport, { ssePath: "/stream", rpcPath: "/send" });
+  assert.deepEqual(config.features, { nativeConsole: true, terminal: true });
   assert.deepEqual(config.agents, [{
     name: "codex",
     cwd: "/workspace/app",

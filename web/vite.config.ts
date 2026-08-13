@@ -19,6 +19,7 @@ export default defineConfig({
       "/history": { target: GATEWAY, changeOrigin: true },
       "/fs": { target: GATEWAY, changeOrigin: true },
       "/uploads": { target: GATEWAY, changeOrigin: true },
+      "/terminal": { target: GATEWAY, changeOrigin: true },
       "/healthz": { target: GATEWAY, changeOrigin: true },
     },
   },

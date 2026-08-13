@@ -13,6 +13,7 @@ export function readConfig(): AppConfig {
     defaultAgent: parsed.defaultAgent ?? "claude",
     agents: parsed.agents ?? [{ name: parsed.defaultAgent ?? "claude", cwd: "" }],
     fsRoot: parsed.fsRoot ?? "",
+    terminalEnabled: parsed.terminalEnabled ?? false,
   };
 }
 

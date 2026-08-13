@@ -117,6 +117,11 @@
      not on body (whose only child is #root). Without this, a long thread grows
      #root past the viewport and pushes the composer off-screen. */
   #root { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  /* sidebar + chat + files row, stacked above the terminal panel (if open) —
+     #root's own column direction is what docks the terminal at the bottom
+     full-width, so the row-vs-column (mobile stack vs desktop side-by-side)
+     behavior for sidebar/chat/files lives here instead, one level down. */
+  .app-row { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
   /* the header/main/composer column; sits right of the desktop sidebar */
   .content { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
   /* S4 edge accent: a thin identity-coloured rail down the chat column's left edge
@@ -504,7 +509,7 @@
 
   /* ---- desktop: history panel is a persistent left column (not an overlay) ---- */
   @media (min-width: 860px) {
-    #root { flex-direction: row; }
+    .app-row { flex-direction: row; }
     #scrim { display: none !important; }
     /* The clock button becomes the column's collapse toggle up here (below the
        breakpoint it opens the overlay sheet instead). */
@@ -923,6 +928,68 @@
   .lock-input:focus { border-color: var(--accent); }
   .lock-input.error { border-color: var(--err); }
   .lockscreen .btn.primary { width: 100%; }
+  /* bottom-docked shell (Terminal), DevTools-style — its own always-dark
+     surface regardless of the active theme, since that's what every terminal
+     emulator looks like. A flex item under #root (a sibling of .app-row), not
+     an overlay: sidebar/chat/files stay visible above it. Height is inline
+     (dragged via .term-resize); available at every breakpoint, unlike the
+     sidebar/files width handles, which only apply once they're a column. */
+  .term-panel { position: relative; flex: 0 0 auto; width: 100%; display: flex; flex-direction: column;
+    background: #0b0f14; border-top: 1px solid #ffffff1a; z-index: 5; }
+  .term-resize { position: absolute; top: -3px; left: 0; right: 0; height: 7px; z-index: 2;
+    cursor: row-resize; touch-action: none; }
+  .term-resize:hover, .term-resize:focus-visible { background: var(--accent); opacity: .5; outline: none; }
+  /* Set on <body> for the length of a vertical drag — same reason as
+     body.resizing (avoids text selection + cursor flicker), separate class so
+     the two drag axes don't fight over which cursor to show. */
+  body.resizing-v { user-select: none; cursor: row-resize; }
+  /* The strip that opens the terminal, and names it while it is open — always
+     present, so the panel needs no title bar of its own. Sits between the app
+     row and the panel, and is the last thing above the composer when closed. */
+  /* Height comes from the chip plus padding (28 + 5 + 5 = 38) rather than a
+     fixed value, so the home-indicator inset can be added below it instead of
+     eating into it — box-sizing is border-box everywhere here. */
+  .statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+    padding: 5px 10px; padding-bottom: calc(5px + env(safe-area-inset-bottom));
+    background: var(--surface-2); border-top: 1px solid var(--border); }
+  .statusbar .sb-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px;
+    padding: 0 12px; border-radius: 8px; font-size: 13px; font-weight: 650;
+    background: var(--accent); color: var(--accent-text); transition: background .12s; }
+  .statusbar .sb-chip:hover, .statusbar .sb-chip.on { background: var(--accent-press); }
+  .statusbar .sb-chip svg { width: 15px; height: 15px; }
+  .statusbar .sb-hint { color: var(--muted); font-size: 12px; }
+  .statusbar kbd { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 3px 5px;
+    border-radius: 4px; background: var(--bg); border: 1px solid var(--border-strong); color: var(--muted); }
+  /* No physical Ctrl key to press — the button is the whole story on a phone. */
+  @media (max-width: 640px) { .statusbar .sb-hint { display: none; } }
+  /* The strip — or the panel, when that is open — is now the bottom edge of the
+     app, so it owns the home-indicator gap and the composer above it must stop
+     reserving one of its own. */
+  #root:has(.statusbar) footer { padding-bottom: 10px; }
+  .statusbar:has(+ .term-panel) { padding-bottom: 5px; }
+  .term-panel { padding-bottom: env(safe-area-inset-bottom); }
+  /* one chip per shell, numbered; the whole row is flush against the panel's
+     top edge, under the drag handle */
+  .term-tabs { flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
+    padding: 5px 8px; border-bottom: 1px solid #ffffff14; }
+  .term-tab { display: inline-flex; align-items: center; border-radius: 7px; color: #9a978f;
+    font-size: 12px; font-weight: 650; }
+  .term-tab:hover { background: #ffffff10; color: #eeede9; }
+  .term-tab.on { background: #ffffff1a; color: #eeede9; }
+  .term-tab > button:first-child { padding: 3px 4px 3px 9px; color: inherit; font: inherit;
+    max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .term-tab-edit { width: 110px; margin: 1px 3px; padding: 2px 6px; border-radius: 5px;
+    border: 1px solid var(--accent); background: #0b0f14; color: #eeede9;
+    font: inherit; font-size: 12px; outline: none; }
+  .term-tab-x { display: grid; place-items: center; padding: 3px 7px 3px 3px; opacity: .5; }
+  .term-tab-x:hover { opacity: 1; }
+  .term-tab-x svg { width: 12px; height: 12px; }
+  .term-newtab { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px;
+    color: #9a978f; }
+  .term-newtab:hover { background: #ffffff10; color: #eeede9; }
+  .term-newtab svg { width: 15px; height: 15px; }
+  .term-view { flex: 1; min-height: 0; padding: 4px 8px; }
+  .term-view .xterm { height: 100%; }
   /* folder picker sheet — reuses .amenu chrome */
   .amenu.fp { width: 330px; max-height: min(70vh, 560px); overflow-y: auto; }
   /* desktop: a centered modal (the trigger is the sidebar folder bar, not the menu button) */
