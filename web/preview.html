@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>acp-gateway — visual preview</title>
+  <script type="application/json" id="acpg-cfg">{
+    "token": "preview",
+    "defaultAgent": "claude",
+    "agents": [
+      { "name": "claude", "cwd": "/Users/dev/git/my-apps/cloud-acp-gateway", "kind": "claude", "discover": true },
+      { "name": "codex", "cwd": "/Users/dev/git/my-apps/cloud-acp-gateway", "kind": "codex", "skin": "codex" },
+      { "name": "opencode", "cwd": "/Users/dev/git/my-apps/cloud-acp-gateway", "kind": "opencode", "skin": "opencode" }
+    ],
+    "fsRoot": "/Users/dev",
+    "terminalEnabled": true
+  }</script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/preview.tsx"></script>
+</body>
+</html>

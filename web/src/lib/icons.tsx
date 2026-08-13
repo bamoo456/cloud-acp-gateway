@@ -275,7 +275,9 @@ export function IconThinking() {
 
 export function IconCheck() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="#3a9b5c" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+    // currentColor, not a fixed green: green means diff "+" and nothing else
+    // (docs/ui-refactor-plan.md §1.1), so a completed tick takes its host's ink.
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
       <path d="M20 6L9 17l-5-5" />
     </svg>
   );
@@ -378,10 +380,13 @@ export function IconLogin() {
 
 export function Robot() {
   return (
-    <svg className="robot" viewBox="0 0 24 24" fill="#d97757">
+    // The identity glyph takes its colour from its host (ink by default, the
+    // brand hue only under data-identity="hue" — see .mark in styles.css), so
+    // the eyes have to be knocked out with the page colour rather than #fff.
+    <svg className="robot" viewBox="0 0 24 24" fill="currentColor">
       <rect x="6" y="7" width="12" height="9" rx="2.5" />
-      <rect x="9" y="10" width="2" height="2" rx=".5" fill="#fff" />
-      <rect x="13" y="10" width="2" height="2" rx=".5" fill="#fff" />
+      <rect x="9" y="10" width="2" height="2" rx=".5" fill="var(--bg)" />
+      <rect x="13" y="10" width="2" height="2" rx=".5" fill="var(--bg)" />
       <rect x="7" y="16" width="2" height="3" rx="1" />
       <rect x="11" y="16" width="2" height="3" rx="1" />
       <rect x="15" y="16" width="2" height="3" rx="1" />
