@@ -152,7 +152,11 @@ interface State {
   toggleAuto: () => void;
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
-  renameSession: (title: string) => void;
+  // No target = the active conversation (the ActionMenu path); a target = any
+  // conversation, active or not (the sidebar's per-row rename). A sidebar row
+  // carries its OWN agent and folder — a discovered row names a conversation in
+  // a folder this client isn't even in — so the target must supply all three.
+  renameSession: (title: string, target?: { sessionId: string; agentName: string; cwd: string }) => void;
   // No argument = the active conversation (the ActionMenu path); an id = any
   // conversation, active or not (the sidebar's per-row delete).
   deleteSession: (sessionId?: string) => Promise<void>;
@@ -1067,8 +1071,8 @@ export const useStore = create<State>((set, get) => {
       void get().openHistorySession({ sessionId: id, title: s?.title ?? null });
     },
     setTip(t) { set({ tip: t }); },
-    renameSession(title) {
-      const sid = get().activeId;
+    renameSession(title, target) {
+      const sid = target?.sessionId ?? get().activeId;
       if (!sid || sid.startsWith("pending-")) return;
       const t = title.trim();
       patch(sid, (s) => ({ ...s, title: t || s.title }));
@@ -1080,11 +1084,21 @@ export const useStore = create<State>((set, get) => {
       // neither: the title this session falls back to is the gateway's to derive,
       // and posting the name being cleared would just persist it again.
       if (t) {
-        touchSessionActivity(sid, t);
+        // Only the ACTIVE conversation gets an activity touch. A targeted rename
+        // can name a row this client never opened, owned by another agent in
+        // another folder: touchSessionActivity would record it under the active
+        // agent/cwd and stamp it as just-used, reordering Recent around a
+        // conversation nothing actually ran. The id-keyed cache rewrite below is
+        // the whole job there — the gateway rewrites its own rows either way.
+        if (!target) touchSessionActivity(sid, t);
         set({ recentSessions: renameRecentCache(sid, t) });
       }
       // persist, then nudge the sidebar to re-pull its list so the entry updates
-      apiRename(get().agentName, get().sessions[sid]?.cwd || get().cwd, sid, t)
+      apiRename(
+        target?.agentName ?? get().agentName,
+        target?.cwd || get().sessions[sid]?.cwd || get().cwd,
+        sid, t,
+      )
         .then(() => set((st) => ({ historyNonce: st.historyNonce + 1 })))
         .catch(() => {});
     },
