@@ -430,6 +430,15 @@
     padding: 12px 0 14px; animation: pop .12s ease-out;
   }
   .sess-confirm .delete-title { padding: 0 14px 2px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* The rename card is the same card with an input where the delete note is.
+     16px is deliberate: iOS zooms the page in on any focused field below it. */
+  .sess-confirm .rename-input {
+    /* the card pads nothing horizontally — every child brings its own 14px */
+    width: calc(100% - 28px); margin: 0 14px;
+    padding: 9px 11px; border-radius: 10px; border: 1px solid var(--border-strong);
+    background: var(--surface-2); color: var(--text); outline: none; font: inherit; font-size: 16px;
+  }
+  .sess-confirm .rename-input:focus { border-color: var(--accent); }
   .sess-confirm .actions { display: flex; gap: 8px; padding: 10px 14px 0; }
   .sess-confirm .actions .btn { flex: 1; }
   /* Per-row agent mark in the unified (cross-agent) list — a touch smaller than

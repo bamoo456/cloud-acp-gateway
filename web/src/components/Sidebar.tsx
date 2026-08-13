@@ -12,7 +12,7 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconTrash, WorkingDots } from "../lib/icons.tsx";
+import { IconFolder, IconChevron, IconTrash, IconPencil, WorkingDots } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import type { AgentRef } from "../types.ts";
 
@@ -55,28 +55,32 @@ function discoverable(agent: AgentRef) {
 function sessionTitle(id: string, title?: string | null) {
   return title && title !== "Untitled" ? title : id.slice(0, 8);
 }
-// What identifies a row's conversation to DELETE /history/session (the id is
-// enough — the gateway resolves the owning provider itself), plus what the
-// confirm card should call it.
-type DeleteTarget = { sessionId: string; agentName: string; title: string };
+// What a row's actions need to name its conversation. DELETE /history/session
+// takes the id alone (the gateway resolves the owning provider itself), but
+// POST /history/rename writes a per-cwd sidecar, so a rename also needs the
+// row's OWN agent and folder — a discovered row points at a folder this client
+// isn't in. `name` is the real title and is empty when there isn't one; the
+// short-id fallback is a display label, never something to persist.
+type RowTarget = { sessionId: string; agentName: string; cwd: string; name: string };
+const rowLabel = (t: RowTarget) => t.name || t.sessionId.slice(0, 8);
 // One list row: the session button and its delete affordance as SIBLINGS — a
 // <button> cannot legally nest another. A component rather than a render
-// helper because useRowMenu is a hook. Rows with no `del` (Running, Current)
+// helper because useRowMenu is a hook. Rows with no `target` (Running, Current)
 // render without the affordance or the menu gestures.
-function SessionRow({ className, onOpen, del, running, onAskDelete, onMenu, children }: {
+function SessionRow({ className, onOpen, target, running, onAskDelete, onMenu, children }: {
   className: string; onOpen: () => void;
-  del?: DeleteTarget; running?: boolean;
-  onAskDelete: (t: DeleteTarget) => void;
-  onMenu: (t: DeleteTarget, x: number, y: number) => void;
+  target?: RowTarget; running?: boolean;
+  onAskDelete: (t: RowTarget) => void;
+  onMenu: (t: RowTarget, x: number, y: number) => void;
   children: React.ReactNode;
 }) {
-  const menu = useRowMenu((x, y) => { if (del && !running) onMenu(del, x, y); });
+  const menu = useRowMenu((x, y) => { if (target && !running) onMenu(target, x, y); });
   return (
     <div className="sess-row">
-      <button className={className} onClick={onOpen} {...(del ? menu : {})}>{children}</button>
-      {del && (
+      <button className={className} onClick={onOpen} {...(target ? menu : {})}>{children}</button>
+      {target && (
         <button className="sess-del" title="Delete conversation" aria-label="Delete conversation"
-          disabled={running} onClick={() => onAskDelete(del)}><IconTrash /></button>
+          disabled={running} onClick={() => onAskDelete(target)}><IconTrash /></button>
       )}
     </div>
   );
@@ -84,11 +88,11 @@ function SessionRow({ className, onOpen, del, running, onAskDelete, onMenu, chil
 // The row's right-click / long-press menu: FileMenu's sheet-or-dropdown
 // pattern with a single destructive action.
 const MENU_W = 214;
-const MENU_H = 120;
+const MENU_H = 168;
 const SHEET_QUERY = "(max-width: 640px)"; // matches .wf-menu's own sheet breakpoint
-function SessionRowMenu({ target, onDelete, onClose }: {
-  target: DeleteTarget & { x: number; y: number };
-  onDelete: () => void; onClose: () => void;
+function SessionRowMenu({ target, onRename, onDelete, onClose }: {
+  target: RowTarget & { x: number; y: number };
+  onRename: () => void; onDelete: () => void; onClose: () => void;
 }) {
   // Read once, on open: the menu lives for a few seconds and a device does not
   // cross the breakpoint inside them.
@@ -107,8 +111,11 @@ function SessionRowMenu({ target, onDelete, onClose }: {
   return (
     <>
       <div className="wf-menu-scrim" onPointerDown={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
-      <div className={"wf-menu" + (sheet ? " sheet" : "")} style={style} role="menu" aria-label={target.title}>
-        <div className="wf-menu-head"><div className="nm">{target.title}</div></div>
+      <div className={"wf-menu" + (sheet ? " sheet" : "")} style={style} role="menu" aria-label={rowLabel(target)}>
+        <div className="wf-menu-head"><div className="nm">{rowLabel(target)}</div></div>
+        <button className="wf-menu-row" role="menuitem" onClick={onRename}>
+          <IconPencil /><span>Rename conversation</span>
+        </button>
         <button className="wf-menu-row danger" role="menuitem" onClick={onDelete}>
           <IconTrash /><span>Delete conversation</span>
         </button>
@@ -327,11 +334,23 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const searchOpen = q.trim().length > 0;
   // Delete is two-step everywhere: the trash (or menu row) only nominates a
   // target; the fixed confirm card is what actually calls the store.
-  const [confirmDel, setConfirmDel] = useState<DeleteTarget | null>(null);
-  const [rowMenu, setRowMenu] = useState<(DeleteTarget & { x: number; y: number }) | null>(null);
+  const [confirmDel, setConfirmDel] = useState<RowTarget | null>(null);
+  const [rowMenu, setRowMenu] = useState<(RowTarget & { x: number; y: number }) | null>(null);
+  // Rename uses the confirm card's shape rather than an input in the row: below
+  // 860px this panel is a near-full-height sheet, so an in-place box on a row
+  // near the bottom lands under the on-screen keyboard, and the long press that
+  // would open it is a timer callback — iOS routinely declines to raise the
+  // keyboard for a focus that no tap asked for. The card is top-anchored and is
+  // reached by TAPPING a menu row, so both problems go away.
+  const [renaming, setRenaming] = useState<RowTarget | null>(null);
+  const [draft, setDraft] = useState("");
+  // Prefilled with the REAL title, so an unnamed conversation opens an empty box:
+  // rows fall back to a short session id for display, and saving that would
+  // persist the id as the conversation's name.
+  const startRename = (t: RowTarget) => { setDraft(t.name); setRenaming(t); };
   const rowActions = {
     onAskDelete: setConfirmDel,
-    onMenu: (t: DeleteTarget, x: number, y: number) => setRowMenu({ ...t, x, y }),
+    onMenu: (t: RowTarget, x: number, y: number) => setRowMenu({ ...t, x, y }),
   };
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
     const active = !!s.sessions[it.sessionId] && !s.sessions[it.sessionId].viewOnly;
@@ -339,7 +358,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       <SessionRow key={variant + ":" + it.agentName + ":" + it.sessionId}
         className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "")}
         onOpen={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}
-        del={{ sessionId: it.sessionId, agentName: it.agentName, title: it.title || it.sessionId.slice(0, 8) }}
+        target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: s.cwd, name: it.title || "" }}
         running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
@@ -390,7 +409,10 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
         // touch, so handing it the stale one is how the stale one gets re-recorded.
         // `named`, not `title` — the short-id display fallback is not a name.
         onOpen={() => { void s.openRecentSession(named ? { ...it, title: named } : it); onClose(); }}
-        del={{ sessionId: it.sessionId, agentName: it.agentName, title }}
+        // `named`, not `title`, for the same reason the open above uses it: the
+        // short-id display fallback is not a name, and a rename box must not be
+        // prefilled with one.
+        target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: named }}
         running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
@@ -408,7 +430,7 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       <SessionRow key={"discovered:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
         className={"sess-item recent with-folder" + (active ? " active" : "")}
         onOpen={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}
-        del={{ sessionId: it.sessionId, agentName: it.agentName, title: it.title || it.sessionId.slice(0, 8) }}
+        target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: it.title || "" }}
         running={isRunning(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
@@ -550,13 +572,42 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
         )}
         {rowMenu && (
           <SessionRowMenu target={rowMenu} onClose={() => setRowMenu(null)}
+            onRename={() => { startRename(rowMenu); setRowMenu(null); }}
             onDelete={() => { setConfirmDel(rowMenu); setRowMenu(null); }} />
+        )}
+        {renaming && (
+          <>
+            <div className="sess-confirm-scrim" onPointerDown={() => setRenaming(null)} />
+            <form className="sess-confirm" role="dialog" aria-label="Rename conversation"
+              onSubmit={(e) => {
+                e.preventDefault();
+                // Cleared on purpose is a valid save: it drops the custom title and
+                // hands the name back to whatever the gateway derives. Spelled out
+                // rather than spread — a target opened from the row menu also
+                // carries that menu's coordinates.
+                s.renameSession(draft, {
+                  sessionId: renaming.sessionId, agentName: renaming.agentName, cwd: renaming.cwd,
+                });
+                setRenaming(null);
+              }}>
+              <div className="delete-title">Rename conversation</div>
+              <div className="amenu-note">{rowLabel(renaming)} · {basename(renaming.cwd)}</div>
+              <input className="rename-input" autoFocus value={draft} maxLength={120}
+                placeholder="Conversation title" aria-label="Conversation title"
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Escape") setRenaming(null); }} />
+              <div className="actions">
+                <button type="button" className="btn" onClick={() => setRenaming(null)}>Cancel</button>
+                <button type="submit" className="btn primary">Save</button>
+              </div>
+            </form>
+          </>
         )}
         {confirmDel && (
           <>
             <div className="sess-confirm-scrim" onPointerDown={() => setConfirmDel(null)} />
             <div className="sess-confirm" role="dialog" aria-label="Delete conversation">
-              <div className="delete-title">{confirmDel.title}</div>
+              <div className="delete-title">{rowLabel(confirmDel)}</div>
               <div className="amenu-note">
                 Permanently deletes this conversation's transcript from the agent's own history.
                 It can't be undone, and it won't be resumable from your terminal afterwards either.
