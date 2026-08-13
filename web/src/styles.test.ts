@@ -41,6 +41,19 @@ describe("global styles", () => {
     expect(styles).toMatch(/@media \(min-width: 1100px\)[\s\S]*?#files \{[^}]*max-height:\s*none/);
   });
 
+  test("the expanded files panel fills the window instead of pinning left", () => {
+    // A fixed box with inset:0 but the column rule's width still applied is
+    // over-constrained: `right` is dropped and the panel lands 440px wide
+    // against the left edge.
+    const rule = cssRule("#files.expanded");
+
+    expect(rule).toMatch(/position\s*:\s*fixed/);
+    expect(rule).toMatch(/inset\s*:\s*0/);
+    expect(rule).toMatch(/width\s*:\s*auto/);
+    expect(rule).toMatch(/max-width\s*:\s*none/);
+    expect(rule).toMatch(/max-height\s*:\s*none/);
+  });
+
   test("button reset neutralizes native control appearance so icons center on iOS", () => {
     // iOS Safari renders native-appearance <button>s with internal content
     // insets and ignores grid/flex centering, which knocks the send arrow

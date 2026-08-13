@@ -709,6 +709,31 @@ describe("FilePanel", () => {
     vi.unstubAllGlobals();
   });
 
+  test("Expand hands the panel the whole window, and hands it back", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    const panel = container.querySelector<HTMLElement>("#files")!;
+    const expand = [...container.querySelectorAll<HTMLButtonElement>(".wf-head .icon-btn")]
+      .find((b) => b.title === "Expand")!;
+    await act(async () => { expand.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(panel.classList.contains("expanded")).toBe(true);
+    // The inline width would beat the stylesheet's full-window rule.
+    expect(panel.style.width).toBe("");
+    expect(container.querySelector(".wf-resize")).toBeNull();
+
+    await act(async () => { expand.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(panel.classList.contains("expanded")).toBe(false);
+    expect(panel.style.width).not.toBe("");
+    expect(container.querySelector(".wf-resize")).not.toBeNull();
+    vi.unstubAllGlobals();
+  });
+
   test("below the column breakpoint there is nothing to drag", async () => {
     vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
       matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(),
