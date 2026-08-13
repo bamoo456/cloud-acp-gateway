@@ -78,7 +78,11 @@ const authHeader = "Basic " + Buffer.from(
 // ACPG_FS_ROOT at module load, and a top-level import would be hoisted above the
 // fixture setup that sets it (tsx compiles this to CJS, so no top-level await
 // either). Node caches the module, so every later call reuses this same load.
-async function startHttpServer(): Promise<{ get: (p: string, headers?: Record<string, string>) => Promise<Response>; close: () => Promise<void> }> {
+async function startHttpServer(): Promise<{
+  get: (p: string, headers?: Record<string, string>) => Promise<Response>;
+  post: (p: string, body: unknown) => Promise<Response>;
+  close: () => Promise<void>;
+}> {
   const { handleRequest } = await import("./gateway.ts");
   const srv = http.createServer(handleRequest);
   return new Promise((resolve) => {
@@ -87,6 +91,11 @@ async function startHttpServer(): Promise<{ get: (p: string, headers?: Record<st
       const base = `http://127.0.0.1:${port}`;
       resolve({
         get: (p, headers) => fetch(base + p, { headers: headers ?? { authorization: authHeader } }),
+        post: (p, body) => fetch(base + p, {
+          method: "POST",
+          headers: { authorization: authHeader, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
         close: () => new Promise((r) => srv.close(() => r())),
       });
     });
@@ -439,10 +448,134 @@ test("every workspace route sits behind the gateway account", async () => {
   const { get, close } = await startHttpServer();
   try {
     for (const route of ["/workspace/changes", "/workspace/file", "/workspace/diff", "/workspace/raw",
-                         "/workspace/outputs", "/workspace/render"]) {
+                         "/workspace/outputs", "/workspace/render", "/workspace/commits", "/workspace/review"]) {
       const r = await get(q(route, { cwd: REPO, path: "kept.txt" }), {});
       assert.equal(r.status, 401, route);
     }
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/commits lists the checkout's history", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const r = await get(q("/workspace/commits", { cwd: REPO }));
+    assert.equal(r.status, 200);
+    const body = await r.json() as { repo: string; commits: Array<{ sha: string; subject: string; shortSha: string }> };
+    assert.equal(body.repo, REPO);
+    assert.equal(body.commits[0].subject, "initial");
+    assert.equal(body.commits[0].shortSha.length, 7);
+  } finally {
+    await close();
+  }
+});
+
+test("?rev= makes changes and diff describe a commit rather than the worktree", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
+    const changed = await get(q("/workspace/changes", { cwd: REPO, rev: head }));
+    const list = await changed.json() as { files: Array<{ path: string; status: string }> };
+    // The initial commit added kept.txt; the worktree's OTHER dirty files
+    // (report.html, shot.png) are not part of it and must not appear.
+    assert.deepEqual(list.files.map((f) => f.path), ["kept.txt"]);
+    assert.equal(list.files[0].status, "added");
+
+    const diff = await get(q("/workspace/diff", { cwd: REPO, path: "kept.txt", rev: head }));
+    const body = await diff.json() as { diff: string; status: string };
+    assert.equal(body.status, "added");
+    assert.match(body.diff, /^\+two$/m);
+    // "three" is the uncommitted edit — a committed diff must not contain it.
+    assert.doesNotMatch(body.diff, /^\+three$/m);
+  } finally {
+    await close();
+  }
+});
+
+test("a revision that would reach git as a flag is refused, not run", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    for (const route of ["/workspace/changes", "/workspace/diff", "/workspace/review"]) {
+      const r = await get(q(route, { cwd: REPO, path: "kept.txt", rev: "--upload-pack=touch /tmp/pwned" }));
+      assert.equal(r.status, 400, route);
+      assert.equal(((await r.json()) as { code: string }).code, "bad-revision", route);
+    }
+    // Both at once is a client bug: one diff has one revision, and answering
+    // with either would show a diff nobody asked for.
+    assert.equal((await get(q("/workspace/changes", { cwd: REPO, rev: "HEAD", base: "main" }))).status, 400);
+    assert.equal((await post(q("/workspace/review", { cwd: REPO, base: "-n" }), { comments: [] })).status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/review round-trips a draft, scoped per revision", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    const c = { path: "kept.txt", side: "new", line: 3, code: "+three", body: "why three?" };
+    const saved = await post(q("/workspace/review", { cwd: REPO }), { comments: [c] });
+    assert.equal(saved.status, 200);
+    assert.equal(((await saved.json()) as { saved: boolean }).saved, true);
+
+    const back = await get(q("/workspace/review", { cwd: REPO }));
+    const body = await back.json() as { scope: string; comments: unknown[]; counts: Record<string, number> };
+    assert.equal(body.scope, "working");
+    assert.deepEqual(body.comments, [c]);
+    assert.deepEqual(body.counts, { working: 1 });
+
+    // A different revision is a different draft — asking about a commit must
+    // not hand back the working tree's comments.
+    const other = await get(q("/workspace/review", { cwd: REPO, base: "main" }));
+    const otherBody = await other.json() as { scope: string; comments: unknown[]; counts: Record<string, number> };
+    assert.equal(otherBody.scope, "branch:main");
+    assert.deepEqual(otherBody.comments, []);
+    // …but the counts cover every scope, which is what badges the tab.
+    assert.deepEqual(otherBody.counts, { working: 1 });
+  } finally {
+    // Leave REPO as the other tests found it: the draft directory is invisible
+    // to `git status` (it ignores itself), but the review route is not the only
+    // reader of this checkout.
+    fs.rmSync(path.join(REPO, ".acp-review"), { recursive: true, force: true });
+    await close();
+  }
+});
+
+test("/workspace/review refuses a malformed comment instead of storing it", async () => {
+  const { post, close } = await startHttpServer();
+  try {
+    const bad = [
+      { comments: "not an array" },
+      { comments: [{ path: "kept.txt", side: "sideways", line: 1, body: "x" }] },
+      { comments: [{ path: "kept.txt", side: "new", line: 0, body: "x" }] },
+      { comments: [{ path: "kept.txt", side: "new", line: 1, body: "" }] },
+      {},
+    ];
+    for (const body of bad) {
+      const r = await post(q("/workspace/review", { cwd: REPO }), body);
+      assert.equal(r.status, 400, JSON.stringify(body).slice(0, 50));
+    }
+    assert.equal(fs.existsSync(path.join(REPO, ".acp-review", "drafts.json")), false);
+  } finally {
+    fs.rmSync(path.join(REPO, ".acp-review"), { recursive: true, force: true });
+    await close();
+  }
+});
+
+test("a folder that isn't a checkout gets no draft directory planted in it", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    const plain = path.join(ROOT, "notarepo");
+    fs.mkdirSync(plain, { recursive: true });
+    const r = await post(q("/workspace/review", { cwd: plain }), {
+      comments: [{ path: "a.txt", side: "new", line: 1, body: "hi" }],
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), { saved: false, reason: "not-a-repo" });
+    assert.deepEqual(fs.readdirSync(plain), [], "no hidden directory should have been created");
+
+    const back = await get(q("/workspace/review", { cwd: plain }));
+    assert.equal(((await back.json()) as { persisted: boolean }).persisted, false);
   } finally {
     await close();
   }

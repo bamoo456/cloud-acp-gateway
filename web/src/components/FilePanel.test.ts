@@ -72,6 +72,13 @@ describe("FilePanel", () => {
       getHtmlRender,
       findWorkspaceFiles: vi.fn().mockResolvedValue({ files: [], truncated: false, fromGit: true }),
       rawFileUrl: (cwd: string, p: string) => `/workspace/raw?cwd=${cwd}&path=${p}`,
+      // Review mode's surface. The panel reads the draft counts alongside the
+      // change list (that is what badges the tab), so these have to exist even
+      // for the tests that never open that mode.
+      getReviewDraft: vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true }),
+      saveReviewDraft: vi.fn().mockResolvedValue(true),
+      getCommits: vi.fn().mockResolvedValue({ repo: "/repo", commits: [] }),
+      revParam: () => "",
     }));
   });
 
