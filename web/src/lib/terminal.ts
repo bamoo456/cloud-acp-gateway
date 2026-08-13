@@ -9,7 +9,14 @@ const base = () => location.protocol + "//" + location.host;
 const qs = (id: string) => `?id=${encodeURIComponent(id)}`;
 
 export function newTerminalId(): string {
-  return crypto.randomUUID();
+  // randomUUID() is secure-context-only, and this gateway is legitimately
+  // served over plain HTTP on a LAN address when TLS is terminated elsewhere
+  // (ACPG_TLS=off) — there it is undefined and calling it would throw before a
+  // single tab rendered. The id is a handle the gateway tells tabs apart by,
+  // not a secret, so any collision-unlikely token does. Shape matches the
+  // gateway's ID_RE.
+  return crypto.randomUUID?.()
+    ?? `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // A tab as the gateway sees it. `name` is "" until someone renames it, and the
