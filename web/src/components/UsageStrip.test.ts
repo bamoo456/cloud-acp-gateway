@@ -80,7 +80,9 @@ describe("UsageStrip", () => {
       },
     });
     expect([...container.querySelectorAll(".u-seg")].map((e) => e.textContent))
-      .toEqual(["10%context", "36%5h1h 32m", "57%7d1d 9h", "10%Opus"]);
+      // "36%5h1h 32m" was three numbers in a row; the word says which duration
+      // is the window and which is the countdown.
+      .toEqual(["10%context", "36%5hin 1h 32m", "57%7din 1d 9h", "10%Opus"]);
   });
 
   test("each window keeps a label of its own, since the phone layout drops the countdowns", async () => {
