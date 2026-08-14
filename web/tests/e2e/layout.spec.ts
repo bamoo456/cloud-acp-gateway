@@ -42,7 +42,7 @@ for (const vp of VIEWPORTS) {
     await page.goto("/");
 
     // The thread windows older messages (only the latest slice mounts), so a raw
-    // .msg count tops out at the visible window. Assert the long-thread signals
+    // .turn count tops out at the visible window. Assert the long-thread signals
     // directly: the "earlier messages" hint is present AND <main> overflows.
     await page.waitForFunction(() => {
       const main = document.querySelector("main");
@@ -59,26 +59,27 @@ for (const vp of VIEWPORTS) {
   });
 }
 
-test("conversation action menu opens with the expected actions + model submenu", async ({ page }) => {
+test("conversation action menu opens with the expected actions", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
 
   await page.click('button[title="Conversation menu"]');
   await expect(page.locator(".amenu")).toBeVisible();
   // Share was replaced by a CLI resume command (#35).
   await expect(page.locator(".amenu").getByText("Copy resume command")).toBeVisible();
   await expect(page.locator(".amenu").getByText("Text size")).toBeVisible();
-  await expect(page.locator(".amenu").getByText("Permission mode")).toBeVisible();
   await expect(page.locator(".amenu").getByText("Auto-approve permissions")).toBeVisible();
-  // model/mode/auto moved out of the composer into the menu
-  await expect(page.locator("footer .crow .mode")).toHaveCount(0);
+  await expect(page.locator(".amenu").getByText("Rename", { exact: true })).toBeVisible();
 
-  // drill into the model submenu (its header only exists in that view)
-  await page.locator(".amenu").getByText("Model", { exact: true }).click();
-  await expect(page.locator(".amenu .ahead")).toContainText("Model");
-  await expect(page.locator(".amenu .arow")).toHaveCount(1); // the one seeded model
+  // What is NOT here is the point: P3 moved "what is running" — agent, model,
+  // thinking level, permission mode — out of both the composer row and this
+  // menu, into the engine dock above the composer. The menu is settings and
+  // conversation actions only.
+  await expect(page.locator("footer .crow .mode")).toHaveCount(0);
+  await expect(page.locator(".amenu").getByText("Model", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".amenu").getByText("Permission mode")).toHaveCount(0);
 });
 
 // The rename field was unreachable on a phone. The action sheet renders inside
@@ -116,11 +117,11 @@ test("text size menu scales chat text and persists", async ({ page }) => {
     route.fulfill({ json: { textSize: storedTextSize } });
   });
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .md").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll(".turn.agent .body .md").length > 0);
 
-  const assistant = page.locator(".msg.assistant .md").first();
+  const assistant = page.locator(".turn.agent .body .md").first();
   const baseAssistantSize = await assistant.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
-  const baseHeaderSize = await page.locator("header .title").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  const baseHeaderSize = await page.locator("header .crumb-path .ttl").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
 
   await page.click('button[title="Conversation menu"]');
   await expect(page.locator(".amenu").getByText("Text size")).toBeVisible();
@@ -129,15 +130,15 @@ test("text size menu scales chat text and persists", async ({ page }) => {
   await page.locator(".amenu").getByRole("button", { name: /Large/ }).click();
 
   const largeAssistantSize = await assistant.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
-  const largeHeaderSize = await page.locator("header .title").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  const largeHeaderSize = await page.locator("header .crumb-path .ttl").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
   expect(largeAssistantSize).toBeGreaterThan(baseAssistantSize);
   expect(largeHeaderSize).toBe(baseHeaderSize);
   // The choice was persisted to the gateway (our /prefs mock captured it).
   await expect.poll(() => storedTextSize).toBe("large");
 
   await page.reload();
-  await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .md").length > 0);
-  const persistedAssistantSize = await page.locator(".msg.assistant .md").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  await page.waitForFunction(() => document.querySelectorAll(".turn.agent .body .md").length > 0);
+  const persistedAssistantSize = await page.locator(".turn.agent .body .md").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
   expect(persistedAssistantSize).toBe(largeAssistantSize);
 });
 
@@ -241,16 +242,19 @@ test("sidebar can start a new chat in the current folder", async ({ page }) => {
     "/workspace",
   ]);
 
-  const sidebarNewChat = page.locator("#panel").getByRole("button", { name: "New chat" });
-  await expect(sidebarNewChat).toBeVisible();
-  await sidebarNewChat.click();
+  // "New chat" is the crumb's own button since P4 — the sidebar lists folders
+  // and their conversations, and starts none. What is under test is unchanged:
+  // whichever cwd the folder bar is showing is the cwd session/new carries.
+  const newChat = page.getByRole("button", { name: "New chat" });
+  await expect(newChat).toBeVisible();
+  await newChat.click();
 
   await expect.poll(() => page.evaluate(() => (window as any).__sessionNewCalls?.map((p: any) => p.cwd))).toEqual([
     "",
     "/workspace",
     "/workspace",
   ]);
-  await expect(page.locator("header .title")).toHaveText("Untitled");
+  await expect(page.locator("header .crumb-path .ttl")).toHaveText("Untitled");
 });
 
 test("mobile folder picker keeps the Use this folder action reachable", async ({ page }) => {
@@ -295,7 +299,7 @@ test("mobile folder picker keeps the Use this folder action reachable", async ({
 test("the URL tracks the active session (for refresh / share)", async ({ page }) => {
   await page.addInitScript(SEED_SSE(1));
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
   await expect.poll(() => new URL(page.url()).searchParams.get("session")).toBe("sess-1");
 });
 
@@ -311,17 +315,18 @@ test("rename updates the header title AND the sidebar entry, and POSTs it", asyn
     return r.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
-  await expect(page.locator("#panel .all-section .sess-item .name")).toHaveText("Original title");
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
+  // P4 replaced the flat all/recent lists with one folder-grouped list, so the
+  // conversation now appears exactly once — the rename has to reach that row.
+  await expect(page.locator("#panel .sess-item .name")).toHaveText("Original title");
 
   await page.click('button[title="Conversation menu"]');
   await page.getByText("Rename", { exact: true }).click();
   await page.locator(".rename-input").fill("My renamed chat");
   await page.getByRole("button", { name: "Save" }).click();
 
-  await expect(page.locator("header .title")).toHaveText("My renamed chat");
-  await expect(page.locator("#panel .all-section .sess-item .name")).toHaveText("My renamed chat"); // sidebar refreshed
-  await expect(page.locator("#panel .recent-section .sess-item .name")).toHaveText("My renamed chat");
+  await expect(page.locator("header .crumb-path .ttl")).toHaveText("My renamed chat");
+  await expect(page.locator("#panel .sess-item .name")).toHaveText("My renamed chat"); // sidebar refreshed
   expect(posted).toBe("My renamed chat");
 });
 
@@ -349,11 +354,116 @@ test("Esc cancels the folder browser", async ({ page }) => {
   await expect(page.locator("#fb")).toHaveCount(0);
 });
 
+// The usage strip is the only shrinkable segment in the status bar (its
+// siblings are nowrap, so they never give a pixel back) — every other segment
+// is therefore paid for out of the quota's width. On a phone a big diffstat
+// alone pushed all four quota windows off the right edge, into a scroll nobody
+// can see: the strip read "ctx 56%" and nothing else. The diffstat and a
+// healthy "connected" drop below 640px so the quota fits.
+test("the quota windows stay on screen on a phone, behind a big diffstat", async ({ page }) => {
+  const CWD = "/home/user/workspace";
+  await page.route(/\/usage\/limits/, (r) => r.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      status: "ok",
+      windows: {
+        // Four windows at their widest: "100%" is one digit more than a normal
+        // reading, and Opus/Sonnet carry the longest labels.
+        five_hour: { rateLimitType: "five_hour", utilization: 0.36 },
+        seven_day: { rateLimitType: "seven_day", utilization: 0.57 },
+        seven_day_opus: { rateLimitType: "seven_day_opus", utilization: 0.84 },
+        seven_day_sonnet: { rateLimitType: "seven_day_sonnet", utilization: 1 },
+      },
+    }),
+  }));
+  await page.route(/\/workspace\/changes/, (r) => r.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      repo: CWD,
+      files: Array.from({ length: 500 }, (_, i) => ({
+        path: `src/f${i}.ts`, status: "modified",
+        additions: i === 0 ? 94358 : 0, deletions: i === 0 ? 7162 : 0,
+      })),
+    }),
+  }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(SEED_SSE(1));
+  await page.goto(`/?cwd=${encodeURIComponent(CWD)}`);
+
+  await expect(page.locator(".usage-strip .u-seg")).toHaveCount(4);
+  await expect(page.locator(".statusbar .sb-diff")).toBeHidden();
+  await expect(page.locator(".statusbar .conn")).toBeHidden();
+  const strip = await page.locator(".usage-strip").evaluate((el) => ({
+    scroll: el.scrollWidth, client: el.clientWidth,
+  }));
+  expect(strip.scroll, "every quota window must fit without a hidden sideways scroll")
+    .toBeLessThanOrEqual(strip.client + 1);
+
+  // Desktop has the room for all of it, and keeps it.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.locator(".statusbar .sb-diff")).toBeVisible();
+  await expect(page.locator(".statusbar .conn")).toHaveText("connected");
+});
+
+// iOS zooms the page in when a field under 16px takes focus, and never zooms
+// back out — so on a phone the composer and every panel field have a 16px
+// floor. The composer sat at 15.5px (14px on the "small" text size) and the
+// search box at 15px, which meant tapping either one left the layout zoomed.
+test("no field a phone can focus sits under 16px", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route(/\/history\?/, (r) => r.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ sessions: [{ sessionId: "sess-1", title: "A chat", updatedAt: new Date().toISOString() }] }),
+  }));
+  await page.addInitScript(SEED_SSE(1));
+  await page.goto("/");
+  await expect(page.locator(".composer .cm-content")).toBeVisible();
+  await page.click("button.sessions-btn"); // mounts the sidebar's search field
+
+  const fields = await page.evaluate(() =>
+    [...document.querySelectorAll("input:not([type=file]), textarea, .cm-content")].map((el) => ({
+      what: el.getAttribute("placeholder") || el.className || el.tagName,
+      size: parseFloat(getComputedStyle(el).fontSize),
+    })));
+  expect(fields.length, "the composer and the search field must both be mounted").toBeGreaterThanOrEqual(2);
+  for (const f of fields) expect(f.size, `${f.what} is below the iOS zoom threshold`).toBeGreaterThanOrEqual(16);
+
+  // Desktop keeps its own smaller sizes — the floor is a phone rule only.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const composer = await page.locator(".composer .cm-content").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(composer).toBeLessThan(16);
+});
+
+// A 390px column holds about 30 monospace characters. A code block that scrolls
+// sideways therefore shows a third of every line, with no affordance saying the
+// rest exists — tool output read as clipped garbage on a phone. It wraps now;
+// the desktop keeps its columns, which is why the second half of this test
+// asserts the overflow is still there at 1280.
+test("a code block wraps on a phone and still scrolls on a desktop", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(SEED_SSE(1));
+  await page.goto("/");
+
+  const pre = page.locator(".turn.agent .body .md pre").last();
+  await expect(pre).toBeVisible();
+  const phone = await pre.evaluate((el) => ({
+    scroll: el.scrollWidth, client: el.clientWidth, right: Math.round(el.getBoundingClientRect().right),
+  }));
+  expect(phone.scroll, "no line may hide past the right edge of the block")
+    .toBeLessThanOrEqual(phone.client + 1);
+  expect(phone.right, "and the block itself must stay on screen").toBeLessThanOrEqual(390);
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const desktop = await pre.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+  expect(desktop.scroll, "a wide screen keeps the block's own columns intact")
+    .toBeGreaterThan(desktop.client);
+});
+
 test("slash-command menu dismisses on an outside click", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
 
   await page.click('button[title="Slash commands"]');
   await expect(page.locator(".cmds.open")).toBeVisible();
