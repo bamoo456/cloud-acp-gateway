@@ -114,6 +114,17 @@ describe("global styles", () => {
     expect(hue).toMatch(/--accent-text\s*:\s*#fff/);
   });
 
+  test("every popup sits above the scrim that closes it", () => {
+    // The scrim is transparent on desktop, so a menu below it still LOOKS
+    // clickable — it just isn't: every click lands on the scrim and only closes
+    // the menu. jsdom has no hit-testing, so this is the layer that can catch it.
+    const z = (selector: string) => Number(cssRule(selector).match(/z-index\s*:\s*(\d+)/)?.[1]);
+    const scrim = z(".amenu-scrim");
+
+    expect(scrim).toBeGreaterThan(0);
+    for (const menu of [".amenu", ".view-menu"]) expect(z(menu)).toBeGreaterThan(scrim);
+  });
+
   test("exactly one bar reserves the home-indicator inset", () => {
     // Three stacked bars each adding env(safe-area-inset-bottom) is ~100px of
     // dead space on an iPhone. Whichever one is last owns it: the tab bar on a
