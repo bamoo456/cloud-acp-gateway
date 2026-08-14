@@ -42,7 +42,7 @@ for (const vp of VIEWPORTS) {
     await page.goto("/");
 
     // The thread windows older messages (only the latest slice mounts), so a raw
-    // .msg count tops out at the visible window. Assert the long-thread signals
+    // .turn count tops out at the visible window. Assert the long-thread signals
     // directly: the "earlier messages" hint is present AND <main> overflows.
     await page.waitForFunction(() => {
       const main = document.querySelector("main");
@@ -59,26 +59,27 @@ for (const vp of VIEWPORTS) {
   });
 }
 
-test("conversation action menu opens with the expected actions + model submenu", async ({ page }) => {
+test("conversation action menu opens with the expected actions", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
 
   await page.click('button[title="Conversation menu"]');
   await expect(page.locator(".amenu")).toBeVisible();
   // Share was replaced by a CLI resume command (#35).
   await expect(page.locator(".amenu").getByText("Copy resume command")).toBeVisible();
   await expect(page.locator(".amenu").getByText("Text size")).toBeVisible();
-  await expect(page.locator(".amenu").getByText("Permission mode")).toBeVisible();
   await expect(page.locator(".amenu").getByText("Auto-approve permissions")).toBeVisible();
-  // model/mode/auto moved out of the composer into the menu
-  await expect(page.locator("footer .crow .mode")).toHaveCount(0);
+  await expect(page.locator(".amenu").getByText("Rename", { exact: true })).toBeVisible();
 
-  // drill into the model submenu (its header only exists in that view)
-  await page.locator(".amenu").getByText("Model", { exact: true }).click();
-  await expect(page.locator(".amenu .ahead")).toContainText("Model");
-  await expect(page.locator(".amenu .arow")).toHaveCount(1); // the one seeded model
+  // What is NOT here is the point: P3 moved "what is running" — agent, model,
+  // thinking level, permission mode — out of both the composer row and this
+  // menu, into the engine dock above the composer. The menu is settings and
+  // conversation actions only.
+  await expect(page.locator("footer .crow .mode")).toHaveCount(0);
+  await expect(page.locator(".amenu").getByText("Model", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".amenu").getByText("Permission mode")).toHaveCount(0);
 });
 
 // The rename field was unreachable on a phone. The action sheet renders inside
@@ -116,11 +117,11 @@ test("text size menu scales chat text and persists", async ({ page }) => {
     route.fulfill({ json: { textSize: storedTextSize } });
   });
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .md").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll(".turn.agent .body .md").length > 0);
 
-  const assistant = page.locator(".msg.assistant .md").first();
+  const assistant = page.locator(".turn.agent .body .md").first();
   const baseAssistantSize = await assistant.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
-  const baseHeaderSize = await page.locator("header .title").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  const baseHeaderSize = await page.locator("header .crumb-path .ttl").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
 
   await page.click('button[title="Conversation menu"]');
   await expect(page.locator(".amenu").getByText("Text size")).toBeVisible();
@@ -129,15 +130,15 @@ test("text size menu scales chat text and persists", async ({ page }) => {
   await page.locator(".amenu").getByRole("button", { name: /Large/ }).click();
 
   const largeAssistantSize = await assistant.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
-  const largeHeaderSize = await page.locator("header .title").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  const largeHeaderSize = await page.locator("header .crumb-path .ttl").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
   expect(largeAssistantSize).toBeGreaterThan(baseAssistantSize);
   expect(largeHeaderSize).toBe(baseHeaderSize);
   // The choice was persisted to the gateway (our /prefs mock captured it).
   await expect.poll(() => storedTextSize).toBe("large");
 
   await page.reload();
-  await page.waitForFunction(() => document.querySelectorAll(".msg.assistant .md").length > 0);
-  const persistedAssistantSize = await page.locator(".msg.assistant .md").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  await page.waitForFunction(() => document.querySelectorAll(".turn.agent .body .md").length > 0);
+  const persistedAssistantSize = await page.locator(".turn.agent .body .md").first().evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
   expect(persistedAssistantSize).toBe(largeAssistantSize);
 });
 
@@ -241,16 +242,19 @@ test("sidebar can start a new chat in the current folder", async ({ page }) => {
     "/workspace",
   ]);
 
-  const sidebarNewChat = page.locator("#panel").getByRole("button", { name: "New chat" });
-  await expect(sidebarNewChat).toBeVisible();
-  await sidebarNewChat.click();
+  // "New chat" is the crumb's own button since P4 — the sidebar lists folders
+  // and their conversations, and starts none. What is under test is unchanged:
+  // whichever cwd the folder bar is showing is the cwd session/new carries.
+  const newChat = page.getByRole("button", { name: "New chat" });
+  await expect(newChat).toBeVisible();
+  await newChat.click();
 
   await expect.poll(() => page.evaluate(() => (window as any).__sessionNewCalls?.map((p: any) => p.cwd))).toEqual([
     "",
     "/workspace",
     "/workspace",
   ]);
-  await expect(page.locator("header .title")).toHaveText("Untitled");
+  await expect(page.locator("header .crumb-path .ttl")).toHaveText("Untitled");
 });
 
 test("mobile folder picker keeps the Use this folder action reachable", async ({ page }) => {
@@ -295,7 +299,7 @@ test("mobile folder picker keeps the Use this folder action reachable", async ({
 test("the URL tracks the active session (for refresh / share)", async ({ page }) => {
   await page.addInitScript(SEED_SSE(1));
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
   await expect.poll(() => new URL(page.url()).searchParams.get("session")).toBe("sess-1");
 });
 
@@ -311,17 +315,18 @@ test("rename updates the header title AND the sidebar entry, and POSTs it", asyn
     return r.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
-  await expect(page.locator("#panel .all-section .sess-item .name")).toHaveText("Original title");
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
+  // P4 replaced the flat all/recent lists with one folder-grouped list, so the
+  // conversation now appears exactly once — the rename has to reach that row.
+  await expect(page.locator("#panel .sess-item .name")).toHaveText("Original title");
 
   await page.click('button[title="Conversation menu"]');
   await page.getByText("Rename", { exact: true }).click();
   await page.locator(".rename-input").fill("My renamed chat");
   await page.getByRole("button", { name: "Save" }).click();
 
-  await expect(page.locator("header .title")).toHaveText("My renamed chat");
-  await expect(page.locator("#panel .all-section .sess-item .name")).toHaveText("My renamed chat"); // sidebar refreshed
-  await expect(page.locator("#panel .recent-section .sess-item .name")).toHaveText("My renamed chat");
+  await expect(page.locator("header .crumb-path .ttl")).toHaveText("My renamed chat");
+  await expect(page.locator("#panel .sess-item .name")).toHaveText("My renamed chat"); // sidebar refreshed
   expect(posted).toBe("My renamed chat");
 });
 
@@ -353,7 +358,7 @@ test("slash-command menu dismisses on an outside click", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
   await page.goto("/");
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
 
   await page.click('button[title="Slash commands"]');
   await expect(page.locator(".cmds.open")).toBeVisible();
