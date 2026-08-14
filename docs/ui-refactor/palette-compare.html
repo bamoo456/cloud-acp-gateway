@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>色系候選 · Quiet Console</title>
+<style>
+/* Four candidates for the tidied palette, each rendered over the real app
+   (web/src/preview.tsx) rather than as swatches — the only honest way to judge
+   a neutral ramp is against the type and the frames that sit on it.
+   Every candidate keeps the structure and the four colour meanings of §1.1;
+   what moves is the neutral ramp, and in C/D the three meaning colours. */
+:root {
+  --bg:#eeeeec; --panel:#fbfbfa; --text:#17181a; --muted:#6b6d70; --faint:#96979a;
+  --line:#dcdcd8; --line-strong:#c8c8c3; --ink:#17181a; --on-ink:#fbfbfa;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang TC",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+}
+* { box-sizing:border-box; }
+body { margin:0; padding:28px 24px 64px; background:var(--bg); color:var(--text); font-family:var(--sans); }
+h1 { margin:0 0 4px; font-size:19px; letter-spacing:-.01em; }
+.lede { margin:0 0 20px; max-width:70ch; color:var(--muted); font-size:13.5px; line-height:1.6; }
+.bar { position:sticky; top:0; z-index:5; display:flex; gap:6px; align-items:center;
+  margin:0 -24px 22px; padding:10px 24px; background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(6px); border-bottom:1px solid var(--line); }
+.bar b { font:600 11px/1 var(--mono); letter-spacing:.08em; text-transform:uppercase; color:var(--faint); margin-right:4px; }
+button { font:12px/1 var(--mono); padding:6px 11px; border:1px solid var(--line-strong);
+  border-radius:6px; background:var(--panel); color:var(--muted); cursor:pointer; }
+button[aria-pressed="true"] { background:var(--ink); border-color:var(--ink); color:var(--on-ink); }
+.card { margin-bottom:26px; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:var(--panel); }
+.head { display:flex; align-items:baseline; gap:10px; padding:11px 14px; border-bottom:1px solid var(--line); }
+.tag { font:600 11px/1 var(--mono); padding:3px 6px; border-radius:4px; background:var(--ink); color:var(--on-ink); }
+.name { font-weight:650; font-size:14px; }
+.note { color:var(--muted); font-size:12.5px; }
+.swatches { display:flex; gap:0; padding:0 14px 12px; }
+.sw { width:26px; height:18px; border:1px solid var(--line-strong); border-left:none; }
+.sw:first-child { border-left:1px solid var(--line-strong); border-radius:3px 0 0 3px; }
+.sw:last-child { border-radius:0 3px 3px 0; }
+img { display:block; width:100%; height:auto; border-top:1px solid var(--line); }
+.card img.dark { display:none; }
+body.dark .card img.light { display:none; }
+body.dark .card img.dark { display:block; }
+</style>
+</head>
+<body>
+<h1>色系候選</h1>
+<p class="lede">四個候選，全部套在真實畫面上（<code>web/src/preview.tsx</code> 的 harness），因為中性色階只能對著實際的字與框判斷。四種顏色語意（ink＝互動／進行中、amber＝需要你、red＝失敗與 diff −、green＝diff +）在四個候選裡都不變；移動的是中性色階，C 與 D 另外調了那三個語意色的濃度。</p>
+
+<div class="bar">
+  <b>Theme</b>
+  <button id="t-light" aria-pressed="true">light</button>
+  <button id="t-dark" aria-pressed="false">dark</button>
+</div>
+
+<div class="card">
+  <div class="head"><span class="tag">A</span><span class="name">Paper（現況）</span>
+    <span class="note">暖灰紙、暖黑字。分支上現在就是這一組。</span></div>
+  <div class="swatches"><i class="sw" style="background:#f4f3f1"></i><i class="sw" style="background:#f0efec"></i><i class="sw" style="background:#d9d6d0"></i><i class="sw" style="background:#84827d"></i><i class="sw" style="background:#1f1e1d"></i></div>
+  <img class="light" src="palettes/palette-a-paper-light.png" alt="A paper light">
+  <img class="dark" src="palettes/palette-a-paper-dark.png" alt="A paper dark">
+</div>
+
+<div class="card">
+  <div class="head"><span class="tag">B</span><span class="name">Slate</span>
+    <span class="note">把暖度從兩條色階裡拿掉，中性偏冷。程式碼與 diff 的紅綠會更跳。</span></div>
+  <div class="swatches"><i class="sw" style="background:#f5f6f7"></i><i class="sw" style="background:#eef0f2"></i><i class="sw" style="background:#d2d6db"></i><i class="sw" style="background:#6f757d"></i><i class="sw" style="background:#17191c"></i></div>
+  <img class="light" src="palettes/palette-b-slate-light.png" alt="B slate light">
+  <img class="dark" src="palettes/palette-b-slate-dark.png" alt="B slate dark">
+</div>
+
+<div class="card">
+  <div class="head"><span class="tag">C</span><span class="name">Contrast</span>
+    <span class="note">純白／純黑底，字近全黑全白，三個語意色加深一階才壓得住。對比最高，也最硬。</span></div>
+  <div class="swatches"><i class="sw" style="background:#ffffff"></i><i class="sw" style="background:#f2f2f2"></i><i class="sw" style="background:#c9c9c9"></i><i class="sw" style="background:#5c5c5c"></i><i class="sw" style="background:#0a0a0a"></i></div>
+  <img class="light" src="palettes/palette-c-contrast-light.png" alt="C contrast light">
+  <img class="dark" src="palettes/palette-c-contrast-dark.png" alt="C contrast dark">
+</div>
+
+<div class="card">
+  <div class="head"><span class="tag">D</span><span class="name">Sepia</span>
+    <span class="note">A 的暖色階再往紙的方向壓一階，語意色同步調低，三個顏色坐在紙上而不是浮在上面。</span></div>
+  <div class="swatches"><i class="sw" style="background:#efece5"></i><i class="sw" style="background:#e9e5dc"></i><i class="sw" style="background:#cec8bb"></i><i class="sw" style="background:#7d786e"></i><i class="sw" style="background:#2a2723"></i></div>
+  <img class="light" src="palettes/palette-d-sepia-light.png" alt="D sepia light">
+  <img class="dark" src="palettes/palette-d-sepia-dark.png" alt="D sepia dark">
+</div>
+
+<script>
+const L = document.getElementById("t-light"), D = document.getElementById("t-dark");
+function set(dark) {
+  document.body.classList.toggle("dark", dark);
+  L.setAttribute("aria-pressed", String(!dark));
+  D.setAttribute("aria-pressed", String(dark));
+}
+L.onclick = () => set(false);
+D.onclick = () => set(true);
+</script>
+</body>
+</html>
