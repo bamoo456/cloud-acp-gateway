@@ -17,11 +17,14 @@ export const isEffortOption = (o: ConfigOption) => {
   return k.includes("reason") || k.includes("thought");
 };
 
-// How much the agent may do without asking. Same keywords ActionMenu's
-// configRank uses for its approval group, for the same reason as above.
+// How much the agent may do without asking. The approval keywords are the ones
+// ActionMenu's configRank already groups by (codex reports "Approval Preset"),
+// plus "mode" as a whole word — claude reports the same setting as an option
+// simply named "Mode", and matching it loosely would swallow "Model", whose
+// name contains these four letters.
 export const isModeOption = (o: ConfigOption) => {
   const k = keyOf(o);
-  return k.includes("approval") || k.includes("permission") || k.includes("sandbox");
+  return /\bmode\b/.test(k) || k.includes("approval") || k.includes("permission") || k.includes("sandbox");
 };
 
 // The label an option currently reads as. Falls back to the raw value: an agent
@@ -50,7 +53,8 @@ export function engineReadout(
 ): EngineReadout {
   const modelOption = configOptions.find(isModelOption) ?? null;
   const effortOption = configOptions.find(isEffortOption) ?? null;
-  const modeOption = configOptions.find(isModeOption) ?? null;
+  // Never the model option, whichever way an agent spells the two.
+  const modeOption = configOptions.find((o) => o !== modelOption && isModeOption(o)) ?? null;
   const fromModels = models.find((m) => m.modelId === modelId)?.name;
   const modelName = modelOption ? currentChoice(modelOption) : fromModels;
   const modeName = modeOption ? currentChoice(modeOption) : modes.find((m) => m.id === modeId)?.name;

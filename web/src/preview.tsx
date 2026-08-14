@@ -183,6 +183,18 @@ useStore.setState({
       id: "thinking", name: "Thinking", category: "reasoning", type: "select", currentValue: "high",
       options: [{ value: "off", name: "Off" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }],
     },
+    // Claude reports the permission mode as an option plainly named "Mode" —
+    // the shape that has to keep working, since "Model" contains the same four
+    // letters and a loose match would swallow it.
+    {
+      id: "mode", name: "Mode", description: "Session permission mode", type: "select", currentValue: "acceptEdits",
+      options: [
+        { value: "auto", name: "Auto", description: "Use a model classifier to approve/deny permission prompts" },
+        { value: "default", name: "Default", description: "Standard behavior, prompts for dangerous operations" },
+        { value: "acceptEdits", name: "Accept Edits", description: "Auto-accept file edit operations" },
+        { value: "plan", name: "Plan Mode", description: "Planning mode, no actual tool execution" },
+      ],
+    },
   ],
   modes: [
     { id: "default", name: "Default", description: "Standard behavior, prompts for dangerous operations" },

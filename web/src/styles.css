@@ -901,7 +901,7 @@
      input's rather than running out to the pane's edge: 760px of content plus
      the 12px gutters footer pads with, box-sizing being border-box here. */
   .dock { position: relative; flex: 0 0 auto; display: flex; align-items: center;
-    width: min(784px, 100%); margin: 0 auto; padding: 0 12px 6px; }
+    width: min(784px, 100%); margin: 0 auto; padding: 7px 12px; }
   .dock .sp { flex: 1; min-width: 0; }
   .mchip {
     display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px;
