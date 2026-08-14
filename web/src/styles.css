@@ -220,8 +220,10 @@
   @keyframes agent-pulse { 0%, 100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
   /* The empty state's oversized identity glyph is muted like every other
      identity mark — the brand colour only comes back under "hue" (§1.2). */
-  .empty .robot, .empty .codex-mark, .empty .opencode-mark { color: var(--muted); }
-  :root[data-identity="hue"] .empty .robot { color: var(--agent-claude); }
+  /* The agent glyph, in the agent's own colour — codex and opencode carry
+     theirs inside the SVG, claude's is drawn in currentColor, so without this
+     the three of them disagree (the same fix .sess-item .mark.who.claude needs). */
+  .empty .robot { color: var(--agent-claude); }
   /* Re-login button — one per agent inside the engine dock's menu. */
   .agent-login-btn { width: 34px; height: 34px; border-radius: 8px;
     display: grid; place-items: center; color: var(--muted); flex: 0 0 auto;
@@ -1215,6 +1217,10 @@
   .u-seg b { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
   .u-seg b.warn { color: var(--warn); }
   .u-seg b.err { color: var(--err); }
+  /* Which window, then when it resets — one step apart in the ramp, so they
+     stop reading as one long number. */
+  .u-seg .lb { color: var(--muted); }
+  .u-seg .note { color: var(--faint); }
   .u-bar { width: 38px; height: 4px; border-radius: 2px; background: var(--border-strong);
     overflow: hidden; flex: 0 0 auto; }
   .u-bar i { display: block; height: 100%; border-radius: 3px; background: var(--muted); }

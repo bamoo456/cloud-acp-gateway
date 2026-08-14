@@ -34,7 +34,10 @@ function Segment({ pct, label, note, title }: { pct: number; label: string; note
       <span className="u-bar"><i className={tone} style={{ width: Math.min(100, pct) + "%" }} /></span>
       <b className={tone}>{pct}%</b>
       <span className="lb">{label}</span>
-      {note && <span className="note">{note}</span>}
+      {/* "5h 2h 15m" was two durations butted together and read as neither: the
+          first is WHICH window, the second is when it resets. The word says
+          which is which in the two characters it costs. */}
+      {note && <span className="note">in {note}</span>}
     </span>
   );
 }
