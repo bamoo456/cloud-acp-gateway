@@ -81,6 +81,27 @@ test("conversation action menu opens with the expected actions + model submenu",
   await expect(page.locator(".amenu .arow")).toHaveCount(1); // the one seeded model
 });
 
+// The rename field was unreachable on a phone. The action sheet renders inside
+// <header>, which is a stacking context (position:relative + z-index:30), so
+// anything above 30 at the root paints over it — the bottom tab bar was z-40 and
+// covered the sheet's lower edge, input and Save both. Playwright's actionability
+// check is the assertion here: a click on a covered element fails.
+test("the rename field and its Save button are tappable on a phone", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(SEED_SSE(2));
+  await page.goto("/");
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
+
+  await page.click('button[title="Conversation menu"]');
+  await page.locator(".amenu").getByRole("button", { name: "Rename", exact: true }).click();
+  const input = page.locator(".amenu .rename-input");
+  await input.click();
+  await input.fill("named on the phone");
+  await page.locator(".amenu .rename-body .btn").click();
+
+  await expect(page.locator("header .crumb-path .ttl")).toHaveText("named on the phone");
+});
+
 test("text size menu scales chat text and persists", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
