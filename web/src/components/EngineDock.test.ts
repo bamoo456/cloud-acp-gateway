@@ -35,6 +35,22 @@ describe("engineReadout", () => {
     expect(r.model?.option).toBeNull();
   });
 
+  test("takes the permission mode from a config option, or from session modes", async () => {
+    const { engineReadout } = await import("../lib/engine.ts");
+    const APPROVAL: ConfigOption = {
+      id: "approval_policy", name: "Approval Preset", category: "approval", type: "select",
+      currentValue: "on-request", options: [{ value: "on-request", name: "On request" }],
+    };
+
+    expect(engineReadout([APPROVAL], [], null).mode?.name).toBe("On request");
+    // Claude reports no such option — the mode is a session mode instead, and
+    // the dock has to read it from there rather than showing nothing.
+    const fromModes = engineReadout([], [], null, [{ id: "plan", name: "Plan Mode" }], "plan");
+    expect(fromModes.mode?.name).toBe("Plan Mode");
+    expect(fromModes.mode?.option).toBeNull();
+    expect(engineReadout([MODEL], [], null).mode).toBeNull();
+  });
+
   test("a currentValue the option no longer lists still reads as something", async () => {
     // Changing model rebuilds the effort options and can clamp the mode, so a
     // stale currentValue is a real state, not a hypothetical one.

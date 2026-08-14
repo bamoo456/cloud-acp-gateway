@@ -31,6 +31,7 @@ function useElapsed(running: boolean): number {
 export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) => void }) {
   const s = useStore();
   const [open, setOpen] = useState(false);
+  const [modeOpen, setModeOpen] = useState(false);
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   // The same flag the thread's own working indicator reads, so the two can't
   // disagree about whether a turn is in flight.
@@ -39,18 +40,52 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
   // Read straight from the store on every render, never cached: changing model
   // rebuilds the effort options and can clamp the mode (see src/gateway.ts's
   // note on the same), so a memo here would serve a list the agent has dropped.
-  const { model, effort } = engineReadout(s.configOptions, s.models, sess?.modelId);
+  const { model, effort, mode } = engineReadout(s.configOptions, s.models, sess?.modelId, s.modes, sess?.mode);
 
   useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    if (!open && !modeOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { setOpen(false); setModeOpen(false); } };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [open, modeOpen]);
 
   const agents = s.cfg.agents;
   return (
     <div className="dock">
+      {/* How much the agent may do without asking, at the near end of the row:
+          it is the setting most likely to be changed mid-conversation, and it
+          qualifies every permission prompt in the thread above it. */}
+      {mode && (
+        <>
+          <button className="mchip mode" aria-haspopup="menu" aria-expanded={modeOpen}
+            title="Permission mode" onClick={() => setModeOpen((v) => !v)}>
+            <span className="am">{mode.name}</span>
+            <span className="chev"><IconChevronDown /></span>
+          </button>
+          {modeOpen && (
+            <>
+              <div className="amenu-scrim" onClick={() => setModeOpen(false)} />
+              <div className="amenu engine-menu mode-menu" role="menu">
+                {mode.option
+                  ? <OptionGroup label={mode.option.name} option={mode.option}
+                      onPick={(v) => { s.setConfigOption(mode.option!.id, v); setModeOpen(false); }} />
+                  : (
+                    <>
+                      <div className="amenu-subhead">Mode</div>
+                      {s.modes.map((m) => (
+                        <button key={m.id} className={"arow" + (m.id === sess?.mode ? " on" : "")} role="menuitem"
+                          onClick={() => { if (m.id !== sess?.mode) s.setMode(m.id); setModeOpen(false); }}>
+                          <span className="col"><span>{m.name}</span>{m.description && <span className="sub">{m.description}</span>}</span>
+                          {m.id === sess?.mode && <span className="gt">✓</span>}
+                        </button>
+                      ))}
+                    </>
+                  )}
+              </div>
+            </>
+          )}
+        </>
+      )}
       <span className="sp" />
       <button className={"mchip" + (running ? " running" : "")} aria-haspopup="menu" aria-expanded={open}
         title="Agent, model and thinking level" onClick={() => setOpen((v) => !v)}>

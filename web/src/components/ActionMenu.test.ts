@@ -31,7 +31,7 @@ describe("ActionMenu config options", () => {
     vi.doUnmock("../lib/clipboard.ts");
   });
 
-  test("leaves model and thinking level to the dock, and keeps the rest in order", async () => {
+  test("leaves the engine settings to the dock, and keeps the rest in order", async () => {
     const { ActionMenu } = await import("./ActionMenu.tsx");
     const { useStore } = await import("../store/store.ts");
     useStore.setState({
@@ -69,13 +69,14 @@ describe("ActionMenu config options", () => {
     act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
     const rowNames = menuRows();
 
-    // The engine readout above the composer both shows and switches these two,
-    // so repeating them here would be the same fact in two places (§1.4).
+    // The dock above the composer shows and switches all three, so repeating
+    // them here would be the same fact in two places (§1.4).
     expect(rowNames).not.toContain("Model");
     expect(rowNames).not.toContain("Reasoning Effort");
+    expect(rowNames).not.toContain("Approval Preset");
     expect(container.textContent).not.toContain("GPT-5.5");
     // Everything the dock does NOT own stays, in the same order as before.
-    expect(rowNames.slice(0, 2)).toEqual(["Approval Preset", "Auto-approve permissions"]);
+    expect(rowNames.slice(0, 2)).toEqual(["Auto-approve permissions", "Text size"]);
     expect(rowNames).not.toContain("Switch agent");
     expect(rowNames).not.toContain("Change model");
     expect(rowNames).not.toContain("Permission mode");
@@ -95,11 +96,12 @@ describe("ActionMenu config options", () => {
     act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
     const rowNames = menuRows();
 
-    // An agent that reports no config options still gets its permission mode
-    // here — that one is about approvals, not about the engine — but its model
-    // list belongs to the dock, which falls back to s.models for exactly this.
-    expect(rowNames.slice(0, 3)).toEqual(["Permission mode", "Auto-approve permissions", "Text size"]);
+    // An agent that reports no config options at all still has its model and
+    // its permission mode in the dock, which falls back to s.models / s.modes
+    // for exactly this — so neither shows up here either.
+    expect(rowNames.slice(0, 3)).toEqual(["Auto-approve permissions", "Text size", "Agent identity"]);
     expect(rowNames).not.toContain("Model");
+    expect(rowNames).not.toContain("Permission mode");
     expect(rowNames).not.toContain("Switch agent");
     expect(rowNames).not.toContain("Change model");
     expect(rowNames).not.toContain("New chat");

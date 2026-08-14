@@ -459,15 +459,17 @@
   .sess-confirm .rename-input:focus { border-color: var(--accent); }
   .sess-confirm .actions { display: flex; gap: 8px; padding: 10px 14px 0; }
   .sess-confirm .actions .btn { flex: 1; }
-  /* Per-row identity in the unified (cross-agent) list: a mono wordmark (§1.2),
-     centred against the title row. */
+  /* Per-row identity in the unified (cross-agent) list: the agent's own glyph,
+     centred against the title row. A list this dense is scanned by shape, not
+     read word by word — an agent with no glyph falls back to its name. */
   .sess-item .mark.who {
-    flex: 0 0 auto; align-self: center; max-width: 68px;
+    flex: 0 0 auto; align-self: center;
     display: inline-flex; align-items: center; gap: 4px; overflow: hidden;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; color: var(--faint);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; color: var(--muted);
   }
+  .sess-item .mark.who svg { width: 15px; height: 15px; flex: 0 0 auto; }
   .sess-item .mark.who .wm {
-    color: var(--faint); font-size: 10.5px;
+    max-width: 68px; color: var(--faint); font-size: 10.5px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   /* Row state, and only state — identity is the wordmark beside it (§1.2).
@@ -871,6 +873,8 @@
      as .amenu everywhere else. */
   .amenu.engine-menu { position: absolute; right: 12px; bottom: calc(100% + 4px); top: auto;
     width: 260px; max-height: min(60vh, 460px); transform-origin: bottom right; }
+  /* The mode chip is at the other end of the row, so its menu hangs the other way. */
+  .amenu.engine-menu.mode-menu { right: auto; left: 12px; transform-origin: bottom left; }
   /* Three short lists, not a settings screen: tighter rows than the action
      sheet's, and no row is allowed to wrap a folder path into three lines. */
   .engine-menu .arow { padding: 8px 12px; font-size: 13.5px; }

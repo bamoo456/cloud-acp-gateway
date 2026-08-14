@@ -114,7 +114,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const session: Session = {
   id: "s-usage", title: "Usage gauge caching", createdAt: Date.now() - 900_000,
   agentName: "claude", cwd: CWD, lastActiveAt: Date.now(),
-  hasContent: true, working: true, modelId: "opus", mode: null,
+  hasContent: true, working: true, modelId: "opus", mode: "acceptEdits",
   contextUsed: 34_000, contextSize: 200_000,
   curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null,
   seq: 20, historyStart: 12, loadingOlder: false,
@@ -183,6 +183,11 @@ useStore.setState({
       id: "thinking", name: "Thinking", category: "reasoning", type: "select", currentValue: "high",
       options: [{ value: "off", name: "Off" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }],
     },
+  ],
+  modes: [
+    { id: "default", name: "Default", description: "Standard behavior, prompts for dangerous operations" },
+    { id: "acceptEdits", name: "Accept Edits", description: "Auto-accept file edit operations" },
+    { id: "plan", name: "Plan Mode", description: "Planning mode, no actual tool execution" },
   ],
   promptCapabilities: { image: true, embeddedContext: true },
   tip: "",
