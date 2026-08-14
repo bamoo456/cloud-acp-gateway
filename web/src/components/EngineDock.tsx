@@ -57,7 +57,7 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
           qualifies every permission prompt in the thread above it. */}
       {mode && (
         <>
-          <button className="mchip mode" aria-haspopup="menu" aria-expanded={modeOpen}
+          <button className="mchip mchip-mode" aria-haspopup="menu" aria-expanded={modeOpen}
             title="Permission mode" onClick={() => setModeOpen((v) => !v)}>
             <span className="am">{mode.name}</span>
             <span className="chev"><IconChevronDown /></span>
