@@ -31,7 +31,7 @@ describe("ActionMenu config options", () => {
     vi.doUnmock("../lib/clipboard.ts");
   });
 
-  test("groups agent and model settings first without duplicating New chat", async () => {
+  test("leaves model and thinking level to the dock, and keeps the rest in order", async () => {
     const { ActionMenu } = await import("./ActionMenu.tsx");
     const { useStore } = await import("../store/store.ts");
     useStore.setState({
@@ -69,12 +69,17 @@ describe("ActionMenu config options", () => {
     act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
     const rowNames = menuRows();
 
-    expect(rowNames.slice(0, 3)).toEqual(["Model", "Reasoning Effort", "Approval Preset"]);
+    // The engine readout above the composer both shows and switches these two,
+    // so repeating them here would be the same fact in two places (§1.4).
+    expect(rowNames).not.toContain("Model");
+    expect(rowNames).not.toContain("Reasoning Effort");
+    expect(container.textContent).not.toContain("GPT-5.5");
+    // Everything the dock does NOT own stays, in the same order as before.
+    expect(rowNames.slice(0, 2)).toEqual(["Approval Preset", "Auto-approve permissions"]);
     expect(rowNames).not.toContain("Switch agent");
     expect(rowNames).not.toContain("Change model");
     expect(rowNames).not.toContain("Permission mode");
     expect(rowNames).not.toContain("New chat");
-    expect(container.textContent).toContain("GPT-5.5");
   });
 
   test("uses the same settings order for Claude fallback controls", async () => {
@@ -90,7 +95,11 @@ describe("ActionMenu config options", () => {
     act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
     const rowNames = menuRows();
 
-    expect(rowNames.slice(0, 3)).toEqual(["Model", "Permission mode", "Auto-approve permissions"]);
+    // An agent that reports no config options still gets its permission mode
+    // here — that one is about approvals, not about the engine — but its model
+    // list belongs to the dock, which falls back to s.models for exactly this.
+    expect(rowNames.slice(0, 3)).toEqual(["Permission mode", "Auto-approve permissions", "Text size"]);
+    expect(rowNames).not.toContain("Model");
     expect(rowNames).not.toContain("Switch agent");
     expect(rowNames).not.toContain("Change model");
     expect(rowNames).not.toContain("New chat");

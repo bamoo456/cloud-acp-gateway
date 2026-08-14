@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { TEXT_SIZE_OPTIONS, useStore } from "../store/store.ts";
 import { resumeCommand } from "../lib/config.ts";
+import { isModelOption, isEffortOption } from "../lib/engine.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { setLockPin, clearLock, MIN_PIN_LENGTH } from "../lib/lock.ts";
 import { IDENTITY_OPTIONS, applyIdentity, readIdentity, type Identity } from "../lib/identity.ts";
@@ -37,7 +38,6 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   const [identity, setIdentity] = useState<Identity>(readIdentity);
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const resumableId = s.activeId && !s.activeId.startsWith("pending-") ? s.activeId : null;
-  const curModel = s.models.find((m) => m.modelId === sess?.modelId)?.name || "";
   const curMode = s.modes.find((m) => m.id === sess?.mode)?.name || "";
   const curTextSize = TEXT_SIZE_OPTIONS.find((o) => o.id === s.textSize)?.label || "Default";
   const curIdentity = IDENTITY_OPTIONS.find((o) => o.id === identity)?.label || "Wordmark";
@@ -62,7 +62,12 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   const resumeHint = hasHistory
     ? "continue this conversation in your terminal"
     : "this agent's conversations can't be resumed";
+  // Model and thinking level are the dock's job (§3 P3) — it reads them out
+  // above the composer and switches them there, so listing them here too would
+  // be the same fact in two places (§1.4). Filtered with the dock's own
+  // predicates rather than a second guess at which option is which.
   const configOptions = s.configOptions
+    .filter((o) => !isModelOption(o) && !isEffortOption(o))
     .map((option, index) => ({ option, index }))
     .sort((a, b) => configRank(a.option) - configRank(b.option) || a.index - b.index)
     .map(({ option }) => option);
@@ -121,15 +126,12 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
                 </button>
               );
             })}
+            {/* Permission mode only: on an agent that reports no config options
+                the dock still owns the model list (it falls back to s.models). */}
             {!hasConfigOptions && (
-              <>
-                <button className="arow" onClick={() => setView("model")} disabled={!s.models.length}>
-                  <IconModel /><span className="col"><span>Model</span></span><span className="gt">{curModel} <IconChevron /></span>
-                </button>
-                <button className="arow" onClick={() => setView("mode")} disabled={!s.modes.length}>
-                  <IconShield /><span className="col"><span>Permission mode</span></span><span className="gt">{curMode} <IconChevron /></span>
-                </button>
-              </>
+              <button className="arow" onClick={() => setView("mode")} disabled={!s.modes.length}>
+                <IconShield /><span className="col"><span>Permission mode</span></span><span className="gt">{curMode} <IconChevron /></span>
+              </button>
             )}
             <button className={"arow" + (s.autoApprove ? " on" : "")} onClick={() => s.toggleAuto()}>
               <IconBolt /><span className="col"><span>Auto-approve permissions</span><span className="sub">skip the approval prompt for tool calls</span></span>
@@ -157,18 +159,6 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
             <button className="arow danger" onClick={() => setView("delete")} disabled={!resumableId || isRunning}>
               <IconTrash /><span className="col"><span>Delete conversation</span>{isRunning && <span className="sub">still running — stop it first</span>}</span>
             </button>
-          </>
-        )}
-        {view === "model" && (
-          <>
-            <div className="ahead"><button className="iback" onClick={() => setView("main")}><IconBack /></button>Model</div>
-            {s.models.map((m) => (
-              <button key={m.modelId} className="arow" onClick={() => { if (m.modelId !== sess?.modelId) s.setModel(m.modelId); onClose(); }}>
-                <span className="col"><span>{m.name}</span>{m.description && <span className="sub">{m.description}</span>}</span>
-                {m.modelId === sess?.modelId && <span className="gt">✓</span>}
-              </button>
-            ))}
-            {!s.models.length && <div className="panel-empty">No models available.</div>}
           </>
         )}
         {view === "mode" && (
