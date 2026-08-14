@@ -94,7 +94,7 @@ describe("App usage strip", () => {
 
     const strip = container.querySelector(".statusbar .usage-strip");
     expect(strip).not.toBeNull();
-    expect(strip!.textContent).toBe("87%context");
+    expect(strip!.textContent).toBe("ctx87%");
   });
 
   test("the quota poll fills the strip with no session usage at all", async () => {
@@ -111,7 +111,7 @@ describe("App usage strip", () => {
     // Percentages and labels only: the countdown text is a function of the wall
     // clock, and formatUntil already has exact coverage in format.test.ts.
     expect([...container.querySelectorAll(".u-seg b")].map((e) => e.textContent)).toEqual(["13%", "59%", "10%"]);
-    expect([...container.querySelectorAll(".u-seg .lb")].map((e) => e.textContent)).toEqual(["5h", "7d", "Fable"]);
+    expect([...container.querySelectorAll(".u-seg .lb")].map((e) => e.textContent)).toEqual(["5h", "wk", "Fable"]);
   });
 
   test("a gateway that can't report quota leaves the strip alone", async () => {

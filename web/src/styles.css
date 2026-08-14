@@ -1221,11 +1221,14 @@
      stop reading as one long number. */
   .u-seg .lb { color: var(--muted); }
   .u-seg .note { color: var(--faint); }
-  .u-bar { width: 38px; height: 4px; border-radius: 2px; background: var(--border-strong);
-    overflow: hidden; flex: 0 0 auto; }
-  .u-bar i { display: block; height: 100%; border-radius: 3px; background: var(--muted); }
-  .u-bar i.warn { background: var(--warn); }
-  .u-bar i.err { background: var(--err); }
+  /* Four blocks, the shape a terminal statusline uses — at 11px a quarter-full
+     block is legible where three pixels of a continuous fill are not. The tone
+     lives on the bar so the lit blocks and the percentage can't disagree. */
+  .u-bar { display: inline-flex; gap: 2px; flex: 0 0 auto; }
+  .u-bar i { width: 7px; height: 5px; border-radius: 1px; background: var(--border-strong); }
+  .u-bar i.on { background: var(--muted); }
+  .u-bar.warn i.on { background: var(--warn); }
+  .u-bar.err i.on { background: var(--err); }
   /* A phone can't fit four windows spelled out. Drop the bars and the reset
      countdowns; the percentage and its window label ("36% 5h") are the part you
      act on, and they stay. */

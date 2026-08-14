@@ -9,7 +9,7 @@ import { formatUntil } from "../lib/format.ts";
 // balance, not a window, and reads as one more quota bar when it isn't one.
 const WINDOWS: Array<{ type: string; label: string; title: string }> = [
   { type: "five_hour", label: "5h", title: "Session limit" },
-  { type: "seven_day", label: "7d", title: "Weekly limit" },
+  { type: "seven_day", label: "wk", title: "Weekly limit" },
   { type: "seven_day_opus", label: "Opus", title: "Opus weekly limit" },
   { type: "seven_day_sonnet", label: "Sonnet", title: "Sonnet weekly limit" },
 ];
@@ -24,20 +24,29 @@ function percent(utilization: number): number {
 // Half the window gone is worth noticing, four fifths is worth acting on. This
 // is the one place amber and red mean "the number itself is getting bad" rather
 // than "needs you" / "failed" (§1.1) — a quota is the one fact on screen that
-// has a fuel gauge's semantics, and the bar is 38px of colour, not a badge.
+// has a fuel gauge's semantics, and it says so with a gauge, not a badge.
 const WARN_AT = 50, ERR_AT = 80;
 
-function Segment({ pct, label, note, title }: { pct: number; label: string; note?: string; title: string }) {
+// Blocks rather than one continuous fill, the shape a terminal statusline uses:
+// at this size a quarter-full block is legible where three pixels of a 38px bar
+// are not. Ceil, so any spend at all lights the first block.
+const BLOCKS = 4;
+
+// label · gauge · percent · countdown, in that order — the label leads so the
+// row parses left to right, and the countdown trails as one unspaced token
+// ("2h12m"), which is why it can sit next to the window's own name without the
+// two reading as one figure.
+function Segment({ pct, label, note, title }: { pct: number; label?: string; note?: string; title: string }) {
   const tone = pct >= ERR_AT ? "err" : pct >= WARN_AT ? "warn" : "";
+  const lit = Math.min(BLOCKS, Math.ceil((pct / 100) * BLOCKS));
   return (
     <span className="u-seg" title={title}>
-      <span className="u-bar"><i className={tone} style={{ width: Math.min(100, pct) + "%" }} /></span>
+      {label && <span className="lb">{label}</span>}
+      <span className={"u-bar " + tone} aria-hidden>
+        {Array.from({ length: BLOCKS }, (_, i) => <i key={i} className={i < lit ? "on" : ""} />)}
+      </span>
       <b className={tone}>{pct}%</b>
-      <span className="lb">{label}</span>
-      {/* "5h 2h 15m" was two durations butted together and read as neither: the
-          first is WHICH window, the second is when it resets. The word says
-          which is which in the two characters it costs. */}
-      {note && <span className="note">in {note}</span>}
+      {note && <span className="note">{note}</span>}
     </span>
   );
 }
@@ -66,7 +75,7 @@ export function UsageStrip() {
     // then the same tokens against 1000000), and a gauge reading 101% looks
     // broken rather than full.
     segments.push(
-      <Segment key="context" pct={Math.min(100, Math.round((used / sess.contextSize) * 100))} label="context"
+      <Segment key="context" pct={Math.min(100, Math.round((used / sess.contextSize) * 100))} label="ctx"
         title={`${used.toLocaleString()} / ${sess.contextSize.toLocaleString()} tokens in context`} />,
     );
   }

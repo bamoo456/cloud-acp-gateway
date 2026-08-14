@@ -59,8 +59,10 @@ export function formatUntil(epochSeconds: number, now = Date.now()): string {
   const total = Math.floor((epochSeconds * 1000 - now) / 60000);
   if (!Number.isFinite(total) || total <= 0) return "";
   const d = Math.floor(total / 1440), h = Math.floor((total % 1440) / 60), m = total % 60;
-  if (d) return h ? `${d}d ${h}h` : `${d}d`;
-  if (h) return m ? `${h}h ${m}m` : `${h}h`;
+  // Unspaced ("2h12m", not "2h 12m") so a countdown is one token in a row that
+  // is otherwise made of separate ones — it cannot be misread as two figures.
+  if (d) return h ? `${d}d${h}h` : `${d}d`;
+  if (h) return m ? `${h}h${m}m` : `${h}h`;
   return `${m}m`;
 }
 

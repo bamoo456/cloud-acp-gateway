@@ -47,8 +47,8 @@ describe("UsageStrip", () => {
   test("context occupancy is shown as a percentage of the window", async () => {
     await render({ ...withContext(48_000, 200_000), rateLimits: {} });
     const seg = container.querySelector(".u-seg")!;
-    expect(seg.textContent).toBe("24%context");
-    expect(seg.querySelector("i")!.getAttribute("style")).toContain("width: 24%");
+    expect(seg.textContent).toBe("ctx24%");
+    expect(seg.querySelectorAll(".u-bar i.on")).toHaveLength(1); // 24% lights one of four
   });
 
   test("a context window reported over full reads 100%, not 101%", async () => {
@@ -56,14 +56,14 @@ describe("UsageStrip", () => {
     // the session moved onto the 1M window.
     await render({ ...withContext(202_610, 200_000), rateLimits: {} });
     const seg = container.querySelector(".u-seg")!;
-    expect(seg.textContent).toBe("100%context");
-    expect(seg.querySelector("i")!.getAttribute("style")).toContain("width: 100%");
+    expect(seg.textContent).toBe("ctx100%");
+    expect(seg.querySelectorAll(".u-bar i.on")).toHaveLength(4);
   });
 
   test("a window that grows mid-session is measured against the new size", async () => {
     // The same tokens against the 1M window are 20%, not 100%.
     await render({ ...withContext(202_610, 1_000_000), rateLimits: {} });
-    expect(container.querySelector(".u-seg")!.textContent).toBe("20%context");
+    expect(container.querySelector(".u-seg")!.textContent).toBe("ctx20%");
   });
 
   test("windows read left to right: context, session, week, then per-model", async () => {
@@ -80,9 +80,9 @@ describe("UsageStrip", () => {
       },
     });
     expect([...container.querySelectorAll(".u-seg")].map((e) => e.textContent))
-      // "36%5h1h 32m" was three numbers in a row; the word says which duration
-      // is the window and which is the countdown.
-      .toEqual(["10%context", "36%5hin 1h 32m", "57%7din 1d 9h", "10%Opus"]);
+      // label, then gauge, then percent, then the countdown as one token — the
+      // row reads left to right instead of as a run of loose numbers.
+      .toEqual(["ctx10%", "5h36%1h32m", "wk57%1d9h", "Opus10%"]);
   });
 
   test("each window keeps a label of its own, since the phone layout drops the countdowns", async () => {
@@ -94,7 +94,7 @@ describe("UsageStrip", () => {
         seven_day: { rateLimitType: "seven_day", utilization: 0.57, resetsAt: 1_700_000_000 },
       },
     });
-    expect([...container.querySelectorAll(".u-seg .lb")].map((e) => e.textContent)).toEqual(["5h", "7d"]);
+    expect([...container.querySelectorAll(".u-seg .lb")].map((e) => e.textContent)).toEqual(["5h", "wk"]);
   });
 
   test("float dust doesn't cost a percent: 0.57 is 57%, not 56%", async () => {
@@ -111,7 +111,10 @@ describe("UsageStrip", () => {
       rateLimits: { five_hour: { rateLimitType: "five_hour", utilization: 0.999 } },
     });
     expect(container.querySelector(".u-seg b")!.textContent).toBe("99%");
-    expect(container.querySelector(".u-bar i")!.className).toBe("err");
+    // The tone lives on the bar now, so the lit blocks and the percentage
+    // cannot disagree about which band the number is in.
+    expect(container.querySelector(".u-bar")!.className).toContain("err");
+    expect(container.querySelectorAll(".u-bar i.on")).toHaveLength(4);
   });
 
   test("a window the agent hasn't reported is left out rather than shown as 0%", async () => {
