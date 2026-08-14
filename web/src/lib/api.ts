@@ -520,14 +520,18 @@ export async function getRunning(): Promise<RunningTask[]> {
 // happened. `null` means the gateway couldn't say (too old to have the route,
 // offline, no credential) — which is different from "no windows". `kind`
 // selects which account the gateway reads — Claude's own OAuth usage endpoint,
-// or Codex's ChatGPT-backend one on "codex".
-export async function getUsageLimits(kind: "claude" | "codex" = "claude"): Promise<Record<string, RateLimit> | null> {
+// or Codex's ChatGPT-backend one on "codex". `unlimited` is set for a
+// Business/enterprise seat, which reports no windows at all — metered by
+// credits instead — so the UI has something to show besides a blank row.
+export interface UsageLimitsResult { windows: Record<string, RateLimit>; unlimited?: boolean }
+
+export async function getUsageLimits(kind: "claude" | "codex" = "claude"): Promise<UsageLimitsResult | null> {
   try {
     const r = await fetch(base() + "/usage/limits?kind=" + kind);
     if (!r.ok) return null;
     const j = await r.json();
     if (j?.status !== "ok" || !j.windows || typeof j.windows !== "object") return null;
-    return j.windows as Record<string, RateLimit>;
+    return { windows: j.windows as Record<string, RateLimit>, unlimited: j.unlimited === true || undefined };
   } catch {
     return null;
   }

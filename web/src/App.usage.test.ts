@@ -101,9 +101,11 @@ describe("App usage strip", () => {
     // The point of the /usage/limits route: 5h and weekly appear without anyone
     // having sent a prompt, which is exactly what the ACP path cannot do.
     getUsageLimits.mockResolvedValue({
-      five_hour: { utilization: 0.13, resetsAt: Math.floor(Date.now() / 1000) + 92 * 60 },
-      seven_day: { utilization: 0.59, resetsAt: Math.floor(Date.now() / 1000) + 30 * 3600 },
-      "weekly_scoped:Fable": { utilization: 0.1, label: "Fable" },
+      windows: {
+        five_hour: { utilization: 0.13, resetsAt: Math.floor(Date.now() / 1000) + 92 * 60 },
+        seven_day: { utilization: 0.59, resetsAt: Math.floor(Date.now() / 1000) + 30 * 3600 },
+        "weekly_scoped:Fable": { utilization: 0.1, label: "Fable" },
+      },
     });
     await mountAndConnect();
     await vi.waitFor(() => expect(container.querySelector(".usage-strip")).not.toBeNull());

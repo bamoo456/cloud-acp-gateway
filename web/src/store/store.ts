@@ -93,6 +93,10 @@ interface State {
   // screen (UsageStrip.tsx shows the active one by default, every provider on
   // hover/click), so switching agents must never wipe another provider's data.
   rateLimits: Record<string, Record<string, RateLimit>>;
+  // provider kind -> whether that account reported no windows because it's a
+  // Business/enterprise seat metered by credits instead (UsageStrip.tsx shows
+  // this as an unbounded gauge rather than leaving the row blank).
+  quotaUnlimited: Record<string, boolean>;
   promptCapabilities: PromptCapabilities; // what the active agent accepts in a prompt (image, …)
   pendingPermissions: PendingPermission[];
   promptStateRevision: number;
@@ -178,7 +182,7 @@ interface State {
   // a listing covers one folder (or one provider's discoverable store), so absence
   // from it means "not asked about", never "no longer named".
   mergeHistoryTitles: (rows: Array<{ agentName: string; sessionId: string; title: string | null }>) => void;
-  ingestUsageLimits: (kind: string, windows: Record<string, RateLimit>) => void;
+  ingestUsageLimits: (kind: string, windows: Record<string, RateLimit>, unlimited?: boolean) => void;
   ingestRunningTasks: (tasks: RunningTask[]) => void;
   ingestInboxItems: (items: InboxItem[], expectedRevision: number) => void;
   ensureConnected: () => void;
@@ -1008,7 +1012,7 @@ export const useStore = create<State>((set, get) => {
     cwd: initialAgent?.cwd || cfg.fsRoot || "",
     conn: "connecting", agentReady: false, tip: "Connecting to the local agent…",
     sessions: {}, activeId: null,
-    models: [], modes: [], commands: [], configOptions: [], rateLimits: {},
+    models: [], modes: [], commands: [], configOptions: [], rateLimits: {}, quotaUnlimited: {},
     promptCapabilities: {},
     pendingPermissions: [],
     promptStateRevision: 0,
@@ -1384,12 +1388,19 @@ export const useStore = create<State>((set, get) => {
     // same window alive. Other providers' entries are untouched. Same object
     // back when nothing moved, since this runs on a timer and the strip
     // subscribes to the map.
-    ingestUsageLimits(kind, windows) {
-      const prev = get().rateLimits[kind] ?? {};
-      const same = Object.keys(windows).length === Object.keys(prev).length
+    ingestUsageLimits(kind, windows, unlimited) {
+      const prevWindows = get().rateLimits[kind] ?? {};
+      const sameWindows = Object.keys(windows).length === Object.keys(prevWindows).length
         && Object.entries(windows).every(([k, w]) =>
-          prev[k]?.utilization === w.utilization && prev[k]?.resetsAt === w.resetsAt);
-      if (!same) set({ rateLimits: { ...get().rateLimits, [kind]: windows } });
+          prevWindows[k]?.utilization === w.utilization && prevWindows[k]?.resetsAt === w.resetsAt);
+      const prevUnlimited = !!get().quotaUnlimited[kind];
+      const nextUnlimited = !!unlimited;
+      if (sameWindows && prevUnlimited === nextUnlimited) return;
+      set({
+        rateLimits: sameWindows ? get().rateLimits : { ...get().rateLimits, [kind]: windows },
+        quotaUnlimited: prevUnlimited === nextUnlimited
+          ? get().quotaUnlimited : { ...get().quotaUnlimited, [kind]: nextUnlimited },
+      });
     },
 
     // Called by the /running poll: store the live snapshot and fold it into the

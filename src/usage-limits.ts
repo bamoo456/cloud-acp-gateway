@@ -33,7 +33,7 @@ export interface UsageWindow {
 }
 
 export type UsageLimits =
-  | { status: "ok"; windows: Record<string, UsageWindow>; fetchedAt: number }
+  | { status: "ok"; windows: Record<string, UsageWindow>; fetchedAt: number; unlimited?: boolean }
   | { status: "unavailable"; reason: UnavailableReason };
 
 // `reauth` covers every "the credential can't authorize this" case, including
@@ -252,7 +252,13 @@ export function normalizeCodexLimits(body: unknown, fetchedAt: number): UsageLim
     if (util === null) continue;
     windows[key] = { utilization: util, resetsAt: resetSeconds(w?.reset_at) };
   }
-  return { status: "ok", windows, fetchedAt };
+  // A Business/enterprise seat reports `rate_limit: null` — metered by credits
+  // instead of a window, so there is nothing above to align. `unlimited` is the
+  // one fact of that path this gateway surfaces; the credit balance and
+  // spend-control detail stay unread.
+  const credits = root.credits as Record<string, unknown> | undefined;
+  const unlimited = credits?.unlimited === true || undefined;
+  return { status: "ok", windows, fetchedAt, unlimited };
 }
 
 async function fetchCodexLimits(codexHome: string, now: number): Promise<UsageLimits> {
