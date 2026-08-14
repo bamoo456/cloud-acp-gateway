@@ -1221,11 +1221,19 @@
   .u-bar.err i.on { background: var(--err); }
   /* A phone can't fit four windows spelled out. Drop the bars and the reset
      countdowns; the percentage and its window label ("36% 5h") are the part you
-     act on, and they stay. */
+     act on, and they stay.
+     The strip is also the only shrinkable item in the row (its siblings are
+     nowrap, so they never give a pixel back), which means every other segment
+     is paid for out of the quota's width — on a phone a big diffstat alone
+     pushed all four windows off the right edge. So the two segments that are
+     not acted on from a phone go instead: the diffstat, which the Changes
+     panel/tab badge still carries, and a healthy connection, which §1.1 says
+     should be silent anyway. `offline`/`connecting` still speak up. */
   @media (max-width: 640px) {
     .usage-strip .u-bar, .usage-strip .note,
     .usage-popover .u-bar, .usage-popover .note { display: none; }
     .u-seg { padding: 0 7px; }
+    .statusbar .sb-diff, .statusbar .conn.ok { display: none; }
   }
   /* The strip — or the panel, when that is open — is the bottom edge of the
      app, so it owns the home-indicator gap and the composer above it must stop

@@ -169,12 +169,13 @@ export function App() {
           home-indicator inset, and the connection is a fact it always has. */}
       <div className="statusbar">
         {/* Silent when healthy (§1.1): muted text, no green dot; only a broken
-            connection speaks up. */}
-        <span className={"sb-seg conn" + (conn === "offline" ? " off" : "")}>
+            connection speaks up. `ok` marks the healthy state so the phone
+            layout can take that silence all the way and drop the word. */}
+        <span className={"sb-seg conn" + (conn === "connected" ? " ok" : conn === "offline" ? " off" : "")}>
           {conn === "connected" ? "connected" : conn === "offline" ? "offline" : "connecting"}
         </span>
         {changeStat && changeStat.files > 0 && (
-          <span className="sb-seg" title={`${changeStat.files} changed file${changeStat.files === 1 ? "" : "s"} in this folder`}>
+          <span className="sb-seg sb-diff" title={`${changeStat.files} changed file${changeStat.files === 1 ? "" : "s"} in this folder`}>
             {changeStat.files} file{changeStat.files === 1 ? "" : "s"}
             {changeStat.additions > 0 && <b className="add">+{changeStat.additions}</b>}
             {changeStat.deletions > 0 && <b className="del">−{changeStat.deletions}</b>}
