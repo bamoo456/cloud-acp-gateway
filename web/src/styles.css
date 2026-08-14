@@ -336,8 +336,10 @@
   }
   .view-btn:hover { background: var(--surface); color: var(--text); }
   .view-btn svg { width: 11px; height: 11px; }
+  /* Above .amenu-scrim (40), like .amenu is: the scrim is transparent here, so
+     a menu underneath it stays visible while the scrim eats every click on it. */
   .view-menu {
-    position: absolute; right: 0; top: 24px; z-index: 20; min-width: 158px; padding: 4px;
+    position: absolute; right: 0; top: 24px; z-index: 50; min-width: 158px; padding: 4px;
     background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px;
     box-shadow: var(--shadow);
   }
