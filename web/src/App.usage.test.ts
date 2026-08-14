@@ -127,4 +127,14 @@ describe("App usage strip", () => {
     await mountAndConnect();
     expect(container.querySelector(".usage-strip")).toBeNull();
   });
+
+  // Distinct from the null case above: the gateway answered, and the answer was
+  // "this account's credential is stale". That is the user's move to make, so
+  // the strip has to say it instead of staying empty and looking broken.
+  test("an expired credential surfaces as a re-auth, not as an empty strip", async () => {
+    getUsageLimits.mockResolvedValue({ windows: {}, unavailable: "expired" });
+    await mountAndConnect();
+    await vi.waitFor(() => expect(container.querySelector(".usage-strip .u-seg")).not.toBeNull());
+    expect(container.querySelector(".usage-strip")!.textContent).toBe("quotare-auth");
+  });
 });

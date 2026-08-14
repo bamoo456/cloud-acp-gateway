@@ -113,7 +113,9 @@ export function App() {
       if (useStore.getState().locked) return;
       for (const kind of kinds) {
         void getUsageLimits(kind).then((result) => {
-          if (alive && result) useStore.getState().ingestUsageLimits(kind, result.windows, result.unlimited);
+          if (alive && result) {
+            useStore.getState().ingestUsageLimits(kind, result.windows, result.unlimited, result.unavailable);
+          }
         });
       }
     };

@@ -59,6 +59,29 @@ function Segment(
 
 const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", codex: "Codex" };
 
+// The gateway's reasons for having no quota to report. These three mean the
+// credential is gone or stale, which no amount of polling fixes and only the
+// user can — so they are "needs you" (amber, §1.1). The rest (network,
+// http-error, rate-limited) fix themselves at the next poll and stay quiet.
+const REAUTH_REASONS = new Set(["expired", "reauth", "no-credential"]);
+
+// Shown only when a provider has no windows at all to show. A gauge that
+// renders nothing when the credential expired is indistinguishable from a
+// broken one — which is exactly how this looked before it said anything.
+function unavailableSegment(kind: string, reason: string): ReactNode {
+  const reauth = REAUTH_REASONS.has(reason);
+  const who = PROVIDER_LABEL[kind] || kind;
+  return (
+    <span className="u-seg" key={"unavailable:" + kind}
+      title={reauth
+        ? `${who} quota unavailable (${reason}) — sign in again on the gateway host`
+        : `${who} quota unavailable (${reason})`}>
+      <span className="lb">quota</span>
+      <b className={reauth ? "warn" : ""}>{reauth ? "re-auth" : reason}</b>
+    </span>
+  );
+}
+
 function ProviderMark({ kind }: { kind: string }) {
   return kind === "codex" ? <CodexMark /> : <Robot />;
 }
@@ -117,6 +140,7 @@ export function UsageStrip() {
   const sess = useStore((s) => (s.activeId ? s.sessions[s.activeId] : null));
   const rateLimits = useStore((s) => s.rateLimits);
   const quotaUnlimited = useStore((s) => s.quotaUnlimited);
+  const quotaUnavailable = useStore((s) => s.quotaUnavailable);
   const activeKind = useStore(activeQuotaKind);
   // The countdowns are the only thing here that goes stale without a store
   // update, so re-render once a minute rather than leaving "1h 32m" frozen at
@@ -156,11 +180,18 @@ export function UsageStrip() {
   const activeSegments = buildQuotaSegments(
     activeKind ? rateLimits[activeKind] ?? {} : {}, activeKind ? quotaUnlimited[activeKind] : undefined,
   );
-  // A provider counts as "has something to show" if it reported real windows
-  // OR turned out to be unlimited — an unlimited account's own windows are
-  // legitimately `{}`, so that alone can't be the test.
-  const providerKinds = Array.from(new Set([...Object.keys(rateLimits), ...Object.keys(quotaUnlimited)]))
-    .filter((k) => Object.keys(rateLimits[k] ?? {}).length > 0 || quotaUnlimited[k])
+  const activeReason = activeKind ? quotaUnavailable[activeKind] : undefined;
+  if (activeKind && activeReason && !activeSegments.length) {
+    activeSegments.push(unavailableSegment(activeKind, activeReason));
+  }
+  // A provider counts as "has something to show" if it reported real windows,
+  // turned out to be unlimited, or can't be read at all — an unlimited
+  // account's own windows are legitimately `{}`, so that alone can't be the
+  // test, and a provider that only has a reason still has something to say.
+  const providerKinds = Array.from(
+    new Set([...Object.keys(rateLimits), ...Object.keys(quotaUnlimited), ...Object.keys(quotaUnavailable)]),
+  )
+    .filter((k) => Object.keys(rateLimits[k] ?? {}).length > 0 || quotaUnlimited[k] || quotaUnavailable[k])
     .sort();
 
   if (!ctxSegment && !activeSegments.length && !providerKinds.length) return null;
@@ -175,12 +206,17 @@ export function UsageStrip() {
         // Every provider with data, not just the active one — the strip itself
         // stays a one-line glance, this is the "show me everything" view.
         <span className="usage-popover">
-          {providerKinds.map((kind) => (
-            <span className="usage-popover-row" key={kind}>
-              <span className="usage-popover-mark" title={PROVIDER_LABEL[kind] || kind}><ProviderMark kind={kind} /></span>
-              <span className="usage-popover-segs">{buildQuotaSegments(rateLimits[kind] ?? {}, quotaUnlimited[kind])}</span>
-            </span>
-          ))}
+          {providerKinds.map((kind) => {
+            const segs = buildQuotaSegments(rateLimits[kind] ?? {}, quotaUnlimited[kind]);
+            const reason = quotaUnavailable[kind];
+            if (reason && !segs.length) segs.push(unavailableSegment(kind, reason));
+            return (
+              <span className="usage-popover-row" key={kind}>
+                <span className="usage-popover-mark" title={PROVIDER_LABEL[kind] || kind}><ProviderMark kind={kind} /></span>
+                <span className="usage-popover-segs">{segs}</span>
+              </span>
+            );
+          })}
         </span>
       )}
     </span>
