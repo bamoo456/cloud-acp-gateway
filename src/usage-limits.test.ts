@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { normalizeLimits, parseCredential, normalizeCodexLimits, parseCodexCredential } from "./usage-limits.ts";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { normalizeLimits, parseCredential, normalizeCodexLimits, parseCodexCredential, readCredential } from "./usage-limits.ts";
 
 const AT = 1_700_000_000_000;
 
@@ -108,6 +111,40 @@ describe("parseCredential", () => {
 
   it("unparseable content is simply no credential", () => {
     assert.equal(parseCredential("not json"), "no-credential");
+  });
+});
+
+describe("readCredential", () => {
+  // Writes ~/.claude/.credentials.json into a throwaway dir and returns the dir.
+  function claudeDir(oauth: unknown): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cred-"));
+    fs.writeFileSync(path.join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: oauth }));
+    return dir;
+  }
+  const live = { accessToken: "live", expiresAt: Date.now() + 3_600_000 };
+  const stale = { accessToken: "stale", expiresAt: Date.now() - 1_000 };
+
+  it("prefers the file, and never touches the keychain while it is live", () => {
+    let asked = false;
+    const out = readCredential(claudeDir(live), () => { asked = true; return "no-credential"; });
+    assert.deepEqual(out, live);
+    assert.equal(asked, false, "a live file must not provoke a Keychain ACL prompt");
+  });
+
+  // The bug this test exists for: Claude Code writes the keychain and can leave
+  // the file behind at an older expiry. A stale file that short-circuits here
+  // shadows a live keychain entry, and the quota reads "expired" forever.
+  it("falls back to the keychain when the file is stale", () => {
+    assert.deepEqual(readCredential(claudeDir(stale), () => live), live);
+  });
+
+  it("keeps the file's reason when the keychain is no help either", () => {
+    assert.equal(readCredential(claudeDir(stale), () => "no-credential"), "expired");
+  });
+
+  it("reports the keychain's own reason when there is no file", () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cred-"));
+    assert.equal(readCredential(empty, () => "reauth"), "reauth");
   });
 });
 

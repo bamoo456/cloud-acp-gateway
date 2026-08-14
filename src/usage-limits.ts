@@ -118,23 +118,8 @@ export function parseCredential(raw: string): Credential | UnavailableReason {
   return { accessToken, expiresAt };
 }
 
-// File first, keychain second. The file needs no Keychain ACL, which matters
-// because this process runs under launchd rather than in the user's terminal
-// session.
-//
-// There is deliberately no refresh path. Claude Code's own recovery is to run
-// `claude /status`, which from a background process can launch the user's
-// default browser via /usr/bin/open (CodexBar issue #1844). A headless gateway
-// must fail closed and let the user re-auth in their own terminal instead.
-function readCredential(claudeDir: string): Credential | UnavailableReason {
-  const file = path.join(claudeDir, ".credentials.json");
-  if (fs.existsSync(file)) {
-    try {
-      return parseCredential(fs.readFileSync(file, "utf8"));
-    } catch {
-      // fall through to the keychain
-    }
-  }
+// The second source. Needs a Keychain ACL, which is why it is second.
+function keychainCredential(): Credential | UnavailableReason {
   if (process.platform !== "darwin") return "no-credential";
   try {
     const raw = execFileSync(
@@ -146,6 +131,46 @@ function readCredential(claudeDir: string): Credential | UnavailableReason {
   } catch {
     return "no-credential";
   }
+}
+
+// File first, keychain second. The file needs no Keychain ACL, which matters
+// because this process runs under launchd rather than in the user's terminal
+// session.
+//
+// But a file that parses is not the same as a file that still holds a live
+// token: Claude Code writes the keychain and can leave
+// `~/.claude/.credentials.json` behind at an older expiry, and an expired file
+// that short-circuits here shadows a perfectly good keychain entry — the quota
+// then reads "expired" forever with nothing on screen to say so. So a file that
+// yields a reason rather than a credential is not the answer, only the fallback
+// answer: try the keychain, and keep the file's reason if that fails too, since
+// it is the more specific of the two.
+//
+// There is deliberately no refresh path. Claude Code's own recovery is to run
+// `claude /status`, which from a background process can launch the user's
+// default browser via /usr/bin/open (CodexBar issue #1844). A headless gateway
+// must fail closed and let the user re-auth in their own terminal instead.
+//
+// `readKeychain` is a parameter so the tests can drive the second source; the
+// default is the real one. Exported for the same reason.
+export function readCredential(
+  claudeDir: string,
+  readKeychain: () => Credential | UnavailableReason = keychainCredential,
+): Credential | UnavailableReason {
+  const file = path.join(claudeDir, ".credentials.json");
+  let fileReason: UnavailableReason | null = null;
+  if (fs.existsSync(file)) {
+    try {
+      const parsed = parseCredential(fs.readFileSync(file, "utf8"));
+      if (typeof parsed !== "string") return parsed;
+      fileReason = parsed;
+    } catch {
+      // unreadable — the keychain is the only source left
+    }
+  }
+  const fromKeychain = readKeychain();
+  if (typeof fromKeychain !== "string") return fromKeychain;
+  return fileReason ?? fromKeychain;
 }
 
 let cache: { at: number; value: UsageLimits } | null = null;
