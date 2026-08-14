@@ -49,7 +49,6 @@
     --chat-code-size: 13.5px;
     --chat-table-size: 14px;
     --chat-plan-size: 15px;
-    --composer-text-size: 16px;
     /* Two faces, and only two: the page's own sans, and one mono for machine
        text (paths, diffs, counts, labels). Tokens rather than 45 copies of the
        same stack — that is how three of them had already drifted, one of them
@@ -65,7 +64,6 @@
     --chat-code-size: 12.5px;
     --chat-table-size: 13px;
     --chat-plan-size: 14px;
-    --composer-text-size: 15px;
   }
   :root[data-text-size="large"] {
     --chat-user-size: 17px;
@@ -74,7 +72,6 @@
     --chat-code-size: 14.5px;
     --chat-table-size: 15.5px;
     --chat-plan-size: 16.5px;
-    --composer-text-size: 17.5px;
   }
   :root[data-text-size="xl"] {
     --chat-user-size: 18.5px;
@@ -83,7 +80,6 @@
     --chat-code-size: 15.5px;
     --chat-table-size: 16.5px;
     --chat-plan-size: 18px;
-    --composer-text-size: 19px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -966,7 +962,10 @@
      inline as you type. Override CodeMirror's monospace defaults so prose uses
      the app font; code spans/blocks switch back to monospace below. */
   .composer .cm-input { width: 100%; }
-  .composer .cm-editor { background: transparent; font-size: var(--composer-text-size); }
+  /* What you type and what it becomes are the same message, so they are the
+     same size — the composer used to run a scale of its own, half a pixel off
+     the user turn it produces, at every tier. */
+  .composer .cm-editor { background: transparent; font-size: var(--chat-user-size); }
   .composer .cm-editor.cm-focused { outline: none; }
   .composer .cm-scroller { max-height: 200px; line-height: 1.5; font-family: inherit; }
   .composer .cm-content { padding: 6px 2px; color: var(--text); caret-color: var(--text); }
@@ -1188,8 +1187,14 @@
   .statusbar .sb-seg b.add { color: var(--ok); }
   .statusbar .sb-seg b.del { color: var(--err); }
   .statusbar .conn.off { color: var(--err); }
-  .statusbar .sb-term { color: var(--muted); }
-  .statusbar .sb-term:hover, .statusbar .sb-term.on { background: var(--surface); color: var(--text); }
+  /* The one control in a bar that is otherwise all readouts, so it is the one
+     thing here drawn in ink rather than muted — and when the terminal is open
+     it inverts, which is the same "on" language the tab bar and the panel
+     toggles use. */
+  .statusbar .sb-term { color: var(--text); background: var(--surface); font-weight: 500; }
+  .statusbar .sb-term:hover { background: var(--bg); }
+  .statusbar .sb-term.on { background: var(--ink); color: var(--on-ink); }
+  .statusbar .sb-term.on kbd { border-color: transparent; color: inherit; opacity: .7; }
   .statusbar .sb-term svg { width: 13px; height: 13px; }
   .statusbar kbd { font: 10px/1 var(--mono); padding: 2px 3px;
     border-radius: 3px; border: 1px solid var(--border-strong); color: var(--faint); }
@@ -1205,7 +1210,11 @@
   .usage-strip::-webkit-scrollbar { display: none; }
   .u-seg { display: inline-flex; align-items: center; gap: 6px; align-self: stretch;
     padding: 0 10px; border-left: 1px solid var(--border); white-space: nowrap; }
+  /* The number wears the same tone as its bar: on a phone the bars are dropped
+     and the percentage is all that is left to read. */
   .u-seg b { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+  .u-seg b.warn { color: var(--warn); }
+  .u-seg b.err { color: var(--err); }
   .u-bar { width: 38px; height: 4px; border-radius: 2px; background: var(--border-strong);
     overflow: hidden; flex: 0 0 auto; }
   .u-bar i { display: block; height: 100%; border-radius: 3px; background: var(--muted); }
