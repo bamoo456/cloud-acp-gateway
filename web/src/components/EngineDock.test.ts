@@ -43,6 +43,17 @@ describe("engineReadout", () => {
     };
 
     expect(engineReadout([APPROVAL], [], null).mode?.name).toBe("On request");
+    // Claude spells the same setting as an option simply named "Mode" — and
+    // "Model" contains those four letters, so a loose match would show the
+    // model as the permission mode and lose the real one entirely.
+    const MODE: ConfigOption = {
+      id: "mode", name: "Mode", category: "", type: "select",
+      currentValue: "auto", options: [{ value: "auto", name: "Auto" }],
+    };
+    const both = engineReadout([MODEL, MODE], [], null);
+    expect(both.mode?.name).toBe("Auto");
+    expect(both.model?.name).toBe("Opus 4.8");
+    expect(engineReadout([MODEL], [], null).mode).toBeNull();
     // Claude reports no such option — the mode is a session mode instead, and
     // the dock has to read it from there rather than showing nothing.
     const fromModes = engineReadout([], [], null, [{ id: "plan", name: "Plan Mode" }], "plan");
