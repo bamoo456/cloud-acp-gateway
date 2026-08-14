@@ -91,8 +91,12 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
         title="Agent, model and thinking level" onClick={() => setOpen((v) => !v)}>
         {running && <span className="spin" />}
         <span className="idot" />
-        <span className="wm">{s.agentName}</span>
-        {model && <><span className="sep">·</span><span className="am">{model.name}</span></>}
+        {/* The model, not the agent: the composer right below says "Reply to
+            <agent>", so the name was the same fact twice (§1.4) and it was
+            spending width the model name had nowhere else to get. The name is
+            still the fallback for an agent that reports no model at all —
+            without it that chip would be a lone chevron. */}
+        {model ? <span className="am">{model.name}</span> : <span className="wm">{s.agentName}</span>}
         {/* Not every agent has a thinking level — opencode reports none, so the
             whole segment disappears rather than leaving a placeholder. */}
         {effort && <><span className="sep">·</span><span className="eff">{effort.name}</span></>}
