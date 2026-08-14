@@ -107,11 +107,13 @@ describe("EngineDock", () => {
     return useStore;
   }
 
-  test("shows agent · model · thinking level, and no clock while idle", async () => {
+  test("shows model · thinking level, and no clock while idle", async () => {
     await mount([MODEL, EFFORT]);
     const chip = container.querySelector(".mchip")!;
 
-    expect(chip.querySelector(".wm")?.textContent).toBe("claude");
+    // Not the agent name — the composer's "Reply to <agent>" already carries it,
+    // and the width it cost was the width the model name needed on a phone.
+    expect(chip.querySelector(".wm")).toBeNull();
     expect(chip.querySelector(".am")?.textContent).toBe("Opus 4.8");
     expect(chip.querySelector(".eff")?.textContent).toBe("High");
     expect(chip.querySelector(".el")).toBeNull();
@@ -123,6 +125,13 @@ describe("EngineDock", () => {
 
     expect(container.querySelector(".mchip .eff")).toBeNull();
     expect(container.querySelector(".mchip")?.textContent).not.toContain("—");
+  });
+
+  test("an agent that reports no model falls back to its name, not a bare chevron", async () => {
+    await mount([]);
+
+    expect(container.querySelector(".mchip .am")).toBeNull();
+    expect(container.querySelector(".mchip .wm")?.textContent).toBe("claude");
   });
 
   test("a turn in flight adds the spinner and the clock", async () => {

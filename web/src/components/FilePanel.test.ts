@@ -197,7 +197,8 @@ describe("FilePanel", () => {
     const row = container.querySelector<HTMLButtonElement>("button.wf-row");
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
-    const modeLabels = () => [...container.querySelectorAll(".wf-modes button:not(.wf-dl)")].map((b) => b.textContent);
+    const modeLabels = () =>
+      [...container.querySelectorAll(".wf-modes button:not(.wf-dl):not(.wf-search-btn)")].map((b) => b.textContent);
     expect(modeLabels()).toEqual(["Diff", "File"]);
 
     getFilePreview.mockResolvedValue({
@@ -283,6 +284,48 @@ describe("FilePanel", () => {
 
     expect(getFilePreview).toHaveBeenCalledWith("/repo", "/repo/src/gateway.ts");
     expect(container.querySelector("pre.wf-text")?.textContent).toBe("line one\nline two\n");
+  });
+
+  test("find-in-file counts the matches and Enter steps through them", async () => {
+    // A phone has no browser find bar, so the viewer carries its own.
+    getFilePreview.mockResolvedValue({
+      path: "src/gateway.ts", abs: "/repo/src/gateway.ts", kind: "text",
+      size: 40, modifiedAt: new Date().toISOString(),
+      text: "const port = 1;\nconst host = 2;\nlet port2 = 3;\n", truncated: false,
+    } satisfies FilePreviewResult);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/gateway.ts", path: "src/gateway.ts", mode: "file" });
+    });
+    await act(async () => { await flush(); });
+
+    const open = container.querySelector<HTMLButtonElement>(".wf-search-btn")!;
+    await act(async () => { open.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    const input = container.querySelector<HTMLInputElement>(".wf-search input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "port");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-search .n")?.textContent).toBe("1/2");
+
+    const enter = () => act(async () => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await enter();
+    expect(container.querySelector(".wf-search .n")?.textContent).toBe("2/2");
+    // Wraps rather than stopping dead at the last match.
+    await enter();
+    expect(container.querySelector(".wf-search .n")?.textContent).toBe("1/2");
+
+    await act(async () => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(container.querySelector(".wf-search")).toBeNull();
   });
 
   test("a deleted file says so instead of bouncing into a 404", async () => {
