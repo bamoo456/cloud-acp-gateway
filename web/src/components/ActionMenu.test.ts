@@ -99,7 +99,7 @@ describe("ActionMenu config options", () => {
     // An agent that reports no config options at all still has its model and
     // its permission mode in the dock, which falls back to s.models / s.modes
     // for exactly this — so neither shows up here either.
-    expect(rowNames.slice(0, 3)).toEqual(["Auto-approve permissions", "Text size", "Agent identity"]);
+    expect(rowNames.slice(0, 3)).toEqual(["Auto-approve permissions", "Text size", "Theme"]);
     expect(rowNames).not.toContain("Model");
     expect(rowNames).not.toContain("Permission mode");
     expect(rowNames).not.toContain("Switch agent");

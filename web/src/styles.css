@@ -104,6 +104,52 @@
       --text: #ededea; --muted: #9a988f; --faint: #7b7a73; --border: #353430; --border-strong: #45443d;
     }
   }
+  /* ---- themes (lib/theme.ts) ----
+     The reader's own palette, and the ONLY other thing allowed to move the
+     neutral ramp. Deliberately after the skin blocks: an explicit choice
+     outranks the automatic per-agent shift, so switching agent can't repaint a
+     page whose colours someone picked. Each theme redefines the whole ramp for
+     both modes — a half-defined theme would inherit the other half from :root
+     and read as a third palette. "paper" is :root itself and needs no block.
+     Only "contrast" and "sepia" touch --ok/--warn/--err: pure white/black needs
+     them deeper to survive it, and the warmer paper needs them quieter to sit
+     on it. The four meanings (§1.1) are unchanged in all four. */
+  :root[data-theme="slate"] {
+    --bg: #f5f6f7; --surface: #ffffff; --surface-2: #eef0f2;
+    --text: #17191c; --muted: #6f757d; --faint: #9aa0a8;
+    --border: #e3e6e9; --border-strong: #d2d6db;
+  }
+  :root[data-theme="contrast"] {
+    --bg: #ffffff; --surface: #ffffff; --surface-2: #f2f2f2;
+    --text: #0a0a0a; --muted: #5c5c5c; --faint: #8a8a8a;
+    --border: #e2e2e2; --border-strong: #c9c9c9;
+    --ok: #1f7a44; --warn: #b3760f; --err: #c02a1b;
+  }
+  :root[data-theme="sepia"] {
+    --bg: #efece5; --surface: #faf8f4; --surface-2: #e9e5dc;
+    --text: #2a2723; --muted: #7d786e; --faint: #a09a8e;
+    --border: #e0dbd1; --border-strong: #cec8bb;
+    --ok: #4f8a5f; --warn: #b8823a; --err: #c1685c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-theme="slate"] {
+      --bg: #15171a; --surface: #1e2125; --surface-2: #191c1f;
+      --text: #e9eaec; --muted: #8f959d; --faint: #767c84;
+      --border: #2b2f34; --border-strong: #3a3f45;
+    }
+    :root[data-theme="contrast"] {
+      --bg: #000000; --surface: #111111; --surface-2: #0a0a0a;
+      --text: #fafafa; --muted: #a1a1a1; --faint: #7a7a7a;
+      --border: #262626; --border-strong: #3d3d3d;
+      --ok: #4ec27a; --warn: #e0a63a; --err: #f0705f;
+    }
+    :root[data-theme="sepia"] {
+      --bg: #22201d; --surface: #2c2925; --surface-2: #26231f;
+      --text: #ece8e0; --muted: #9c968a; --faint: #7c766a;
+      --border: #3a362f; --border-strong: #4a453c;
+      --ok: #67ab77; --warn: #d0a05c; --err: #d8837a;
+    }
+  }
   /* Identity mode (§1.2). Default — no attribute, or "mono"/"dot" — keeps every
      interactive surface ink and confines the agent's colour to the 7px .idot.
      "hue" restores the old behaviour for anyone who wants it: the brand colour
