@@ -50,6 +50,17 @@ export function folderKey(cwd: string | null | undefined, home = ""): string {
 
 // What the folder is called on screen. Derived from the ORIGINAL path, not the
 // key, so the case the user actually uses is what they read.
+// The home directory, inferred from any absolute path the gateway has given us.
+// There is no env to read in a browser, and ACPG_FS_ROOT is the gateway's
+// sandbox root ("/" on most installs), not the user's home.
+export function homeFrom(...paths: Array<string | null | undefined>): string {
+  for (const p of paths) {
+    const m = /^(\/(?:Users|home)\/[^/]+)(?:\/|$)/.exec(p ?? "");
+    if (m) return m[1];
+  }
+  return "";
+}
+
 export function folderLabel(cwd: string | null | undefined): string {
   const src = cwd ?? "";
   if (!src.trim()) return "";

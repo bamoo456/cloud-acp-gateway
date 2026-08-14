@@ -7,7 +7,7 @@
 export type SessionsView = "folder" | "latest";
 
 const VIEW_KEY = "acpg.sessionsView";
-const COLLAPSED_KEY = "acpg.foldersCollapsed";
+const OVERRIDES_KEY = "acpg.folderOverrides";
 
 function read(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -24,11 +24,16 @@ export function saveSessionsView(view: SessionsView): void {
   write(VIEW_KEY, view);
 }
 
-// Collapsed folders are stored by their NORMALISED key (see folderKey): the
-// same folder spelled two ways must not collapse twice, and must not re-expand
-// because the next poll spelled it differently.
-export function readCollapsedFolders(): Set<string> {
-  const raw = read(COLLAPSED_KEY);
+// A folder's default is open when it is the one you are working in or has
+// something running / waiting on you, and collapsed otherwise. This set records
+// the folders the reader has toggled AWAY from that default — so a folder that
+// starts running expands on its own, and one you deliberately shut stays shut.
+//
+// Stored by NORMALISED folder key (see folderKey): the same folder spelled two
+// ways must not collapse twice, and must not spring open because the next poll
+// spelled it differently (§4.3).
+export function readFolderOverrides(): Set<string> {
+  const raw = read(OVERRIDES_KEY);
   if (!raw) return new Set();
   try {
     const v = JSON.parse(raw);
@@ -38,6 +43,6 @@ export function readCollapsedFolders(): Set<string> {
   }
 }
 
-export function saveCollapsedFolders(keys: Set<string>): void {
-  write(COLLAPSED_KEY, JSON.stringify([...keys]));
+export function saveFolderOverrides(keys: Set<string>): void {
+  write(OVERRIDES_KEY, JSON.stringify([...keys]));
 }
