@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="zh-Hant" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B2 · Quiet Console — cloud-acp-gateway UI refactor</title>
+<style>
+/* =========================================================================
+   DIRECTION B2 — "Quiet Console"  (B, with the colour and the boxes removed)
+
+   Two changes from B:
+
+   1. COLOUR DISCIPLINE. In B the per-agent hue drove ~14 things, including
+      Allow / Send / Review. Those aren't agent-specific concepts, so the
+      primary action changing hue by agent was arbitrary. New rule:
+        ink    = interactive, active, running        (near-black / near-white)
+        amber  = needs you (permission, needs input)
+        red    = failed, diff −
+        green  = diff +   ← and nothing else
+        muted  = metadata, completed  (completed gets NO badge and NO colour)
+      Identity is a mono wordmark, not a hue. Toggle it above: mono / dot / hue.
+
+   2. FEWER BOXES. Only machine artefacts get a frame — tool calls, permission
+      prompts, panels. Messages are plain text on the page. Dropped: the user
+      panel, the agent panel, the thinking strip, the sidebar tabs, the files
+      summary row, three status segments, two crumb tags (they were duplicated
+      in the status bar).
+
+   Layout keys off .frame.desktop / .frame.phone — no media queries.
+   ========================================================================= */
+
+:root {
+  --bg:#eeeeec;            /* gutter between panels */
+  --panel:#fbfbfa;         /* panel fill */
+  --panel-2:#f2f2f0;       /* panel header / inset */
+  --text:#17181a; --muted:#6b6d70; --faint:#96979a;
+  --line:#dcdcd8; --line-strong:#c8c8c3;
+  --ink:#17181a; --on-ink:#fbfbfa;
+  --ok:#3f8f5f; --warn:#a8781f; --err:#c8544a;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang TC",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --r:6px;
+  --agent:#d97757;         /* used ONLY by the identity dot, unless mode=hue */
+}
+:root[data-theme="dark"] {
+  --bg:#0f1011; --panel:#17181a; --panel-2:#1e2023;
+  --text:#e7e8ea; --muted:#93959a; --faint:#6d6f74;
+  --line:#292b2f; --line-strong:#3a3d42;
+  --ink:#e7e8ea; --on-ink:#17181a;
+  --ok:#5cb37c; --warn:#d3a04a; --err:#e0736a;
+}
+[data-agent="claude"]   { --agent:#d97757; }
+[data-agent="codex"]    { --agent:#10a37f; }
+[data-agent="opencode"] { --agent:#8b8b86; }
+
+/* the accent is ink by default; only "hue" mode hands it to the agent colour */
+.frame { --accent:var(--ink); --on-accent:var(--on-ink); }
+.frame[data-identity="hue"] { --accent:var(--agent); --on-accent:#fff; }
+.frame[data-identity="mono"] .idot { display:none; }
+
+* { box-sizing:border-box; }
+html,body { margin:0; }
+body { background:#d6d6d2; font:13.5px/1.5 var(--sans); color:#17181a; padding:20px 18px 40px; }
+:root[data-theme="dark"] body { background:#08090a; color:#e7e8ea; }
+button,input { font:inherit; color:inherit; }
+button { border:0; background:none; cursor:pointer; }
+svg { width:17px; height:17px; display:block; }
+
+/* ---- mockup furniture ---- */
+.bar { width:min(1600px,100%); margin:0 auto 8px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.bar h1 { font-size:14px; margin:0 8px 0 0; }
+.bar h1 small { font-weight:400; color:#63656a; }
+:root[data-theme="dark"] .bar h1 small { color:#93959a; }
+.seg { display:inline-flex; border:1px solid #bfbfba; border-radius:6px; overflow:hidden; }
+:root[data-theme="dark"] .seg { border-color:#33363a; }
+.seg > b { align-self:stretch; display:flex; align-items:center; padding:0 8px; font:10.5px var(--mono); text-transform:uppercase; letter-spacing:.06em; background:#e6e6e2; color:#63656a; border-right:1px solid #cfcfca; }
+:root[data-theme="dark"] .seg > b { background:#101112; color:#93959a; border-right-color:#33363a; }
+.seg button { height:30px; padding:0 11px; font-size:12px; background:#f0f0ed; color:#5c5e62; }
+:root[data-theme="dark"] .seg button { background:#17181a; color:#93959a; }
+.seg button+button { border-left:1px solid #cfcfca; }
+:root[data-theme="dark"] .seg button+button { border-left-color:#33363a; }
+.seg button.on { background:#17181a; color:#fff; }
+:root[data-theme="dark"] .seg button.on { background:#e7e8ea; color:#17181a; }
+.note { width:min(1600px,100%); margin:0 auto 16px; font-size:12px; color:#63656a; line-height:1.6; }
+:root[data-theme="dark"] .note { color:#93959a; }
+.note code { font:11.5px var(--mono); }
+.stage { display:flex; gap:26px; align-items:flex-start; justify-content:center; flex-wrap:wrap; }
+.cap { text-align:center; font-size:12px; color:#63656a; margin-top:9px; }
+:root[data-theme="dark"] .cap { color:#93959a; }
+
+/* ---- frames ---- */
+.frame { background:var(--bg); color:var(--text); position:relative; overflow:hidden; border:1px solid var(--line-strong); }
+.frame.desktop { width:1200px; max-width:100%; height:860px; border-radius:10px; box-shadow:0 16px 40px rgba(0,0,0,.16); }
+.frame.phone   { width:392px; height:800px; border-radius:26px; box-shadow:0 16px 40px rgba(0,0,0,.2); }
+.shell { position:absolute; inset:0; display:flex; flex-direction:column; }
+.row { flex:1; min-height:0; display:flex; gap:1px; }
+.col { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; gap:1px; }
+
+/* identity: a mono wordmark. the dot is optional and is the ONLY hue. */
+.who { display:inline-flex; align-items:center; gap:5px; flex:0 0 auto; }
+.idot { width:7px; height:7px; border-radius:2px; background:var(--agent); flex:0 0 auto; }
+.wm { font:11.5px var(--mono); color:var(--text); }
+
+/* =======================  ICON RAIL (desktop)  ======================= */
+.rail { width:46px; flex:0 0 46px; background:var(--panel-2); border-right:1px solid var(--line); display:flex; flex-direction:column; align-items:center; padding:8px 0; gap:2px; }
+.frame.phone .rail { display:none; }
+.rail .rb { width:34px; height:34px; border-radius:var(--r); display:grid; place-items:center; color:var(--muted); position:relative; }
+.rail .rb:hover { background:var(--panel); color:var(--text); }
+.rail .rb.on { color:var(--text); background:var(--panel); }
+.rail .rb.on::before { content:""; position:absolute; left:-8px; top:7px; bottom:7px; width:2px; border-radius:1px; background:var(--ink); }
+.rail .rb .n { position:absolute; top:1px; right:0; min-width:14px; height:14px; padding:0 3px; border-radius:4px; background:var(--ink); color:var(--on-ink); font:9.5px/14px var(--mono); text-align:center; }
+.rail .sp { flex:1; }
+
+/* =======================  SESSIONS  ======================= */
+.side { width:250px; flex:0 0 250px; background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; }
+.ph { height:30px; flex:0 0 auto; display:flex; align-items:center; gap:8px; padding:0 9px; background:var(--panel-2); border-bottom:1px solid var(--line); font:10.5px/1 var(--sans); letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+.ph .sp { flex:1; }
+.ph .qty { font:10.5px var(--mono); letter-spacing:0; text-transform:none; color:var(--faint); }
+.ph button { color:var(--faint); }
+.ph button:hover { color:var(--text); }
+.ph svg { width:14px; height:14px; }
+.find { padding:7px 8px; border-bottom:1px solid var(--line); }
+.find span { display:flex; align-items:center; gap:6px; height:27px; padding:0 8px; border:1px solid var(--line); border-radius:4px; background:var(--panel-2); font:11.5px var(--mono); color:var(--faint); }
+.find svg { width:13px; height:13px; }
+.list { flex:1; min-height:0; overflow:auto; }
+.grp { padding:10px 9px 3px; font:10px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase; color:var(--faint); }
+.srow { display:flex; align-items:center; gap:8px; width:100%; padding:6px 9px; text-align:left; color:var(--text); position:relative; }
+.srow:hover { background:var(--panel-2); }
+.srow.on { background:var(--panel-2); box-shadow:inset 2px 0 0 var(--ink); }
+.srow .stk { flex:1; min-width:0; line-height:1.3; }
+.srow .nm { display:block; font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.srow .mt { display:flex; align-items:center; gap:5px; font:10.5px var(--mono); color:var(--faint); white-space:nowrap; overflow:hidden; }
+.srow .mt .idot { width:6px; height:6px; }
+.srow .when { font:10.5px var(--mono); color:var(--faint); flex:0 0 auto; }
+/* state, not identity: ring = idle, filled ink = running, amber = needs you */
+.st8 { width:8px; height:8px; border-radius:50%; border:1.5px solid var(--line-strong); flex:0 0 auto; }
+.st8.run { border-color:var(--ink); background:var(--ink); animation:bl 1.6s infinite; }
+.st8.wait { border-color:var(--warn); background:var(--warn); }
+@keyframes bl { 50% { opacity:.3; } }
+.more { display:block; width:100%; padding:9px; text-align:left; font-size:11.5px; color:var(--muted); }
+
+/* ---- SESSIONS GROUPED BY FOLDER ------------------------------------------
+   The list already carries a folder per row (session.cwd), so grouping is a
+   view over the same data, not new state. Grouped by folder the row's second
+   line drops the folder name — the header is the folder now — and rows get
+   shorter. Folders with something running stay expanded; the rest collapse.
+   -------------------------------------------------------------------------- */
+.fgrp { display:flex; align-items:center; gap:7px; width:100%; padding:9px 9px 4px; text-align:left; color:var(--text); }
+.fgrp:hover { background:var(--panel-2); }
+.fgrp .tw { color:var(--faint); display:grid; place-items:center; transition:transform .12s; }
+.fgrp .tw svg { width:11px; height:11px; }
+.fgrp.closed .tw { transform:rotate(-90deg); }
+.fgrp .fi { color:var(--faint); display:grid; place-items:center; }
+.fgrp .fi svg { width:13px; height:13px; }
+.fgrp .nm { flex:1; min-width:0; font:11.5px var(--mono); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.fgrp .n { font:10.5px var(--mono); color:var(--faint); }
+.fgrp .st8 { width:7px; height:7px; }
+/* children hang off the folder on a hairline spine */
+.fkids { position:relative; }
+.fkids::before { content:""; position:absolute; left:15px; top:0; bottom:4px; width:1px; background:var(--line); }
+.fkids .srow { padding-left:24px; }
+.fkids .srow .mt { color:var(--faint); }
+/* inside the tree the active marker sits on the spine, not at the panel edge */
+.fkids .srow.on { box-shadow:none; }
+.fkids .srow.on::before { content:""; position:absolute; left:15px; top:2px; bottom:2px; width:2px; background:var(--ink); }
+.pindiv { height:1px; margin:6px 9px; background:var(--line); }
+/* Ordering rules, both views:
+     folder view — current folder first (you are working in it), then folders
+       with something needing you, then running, then by recency;
+     latest view — needs-you and running pinned, the rest strictly by
+       updatedAt. Sort keys the store already has: session.working,
+       the pending-permission set, and updatedAt. */
+/* view switcher: names the current view, one click to change it */
+.vwrap { position:relative; flex:0 0 auto; }
+.vbtn { display:inline-flex; align-items:center; gap:4px; height:20px; padding:0 5px; border-radius:3px;
+  font:10.5px var(--mono); letter-spacing:0; text-transform:none; color:var(--muted); }
+.vbtn:hover { background:var(--panel); color:var(--text); }
+.vch svg { width:10px; height:10px; }
+.vmenu { display:none; position:absolute; right:0; top:24px; z-index:20; min-width:150px; padding:4px;
+  background:var(--panel); border:1px solid var(--line-strong); border-radius:var(--r);
+  box-shadow:0 2px 4px rgba(0,0,0,.06), 0 10px 24px rgba(0,0,0,.1); }
+.frame[data-vmenu="open"] .vmenu { display:block; }
+.vitem { display:flex; align-items:center; gap:7px; width:100%; padding:5px 7px; border-radius:4px;
+  text-align:left; font:12px var(--sans); letter-spacing:0; text-transform:none; color:var(--text); }
+.vitem:hover { background:var(--panel-2); }
+.vitem .tick { width:13px; display:grid; place-items:center; color:var(--text); }
+.vitem .tick svg { width:13px; height:13px; }
+/* the two views over the same list */
+.frame:not([data-group="folder"]) .by-folder { display:none; }
+.frame[data-group="folder"] .by-time { display:none; }
+.more:hover { background:var(--panel-2); color:var(--text); }
+
+/* =======================  CRUMB (current turn only)  ======================= */
+.crumb { height:32px; flex:0 0 auto; display:flex; align-items:center; gap:9px; padding:0 10px; background:var(--panel-2); border-bottom:1px solid var(--line); }
+.crumb .path { font:11.5px var(--mono); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.crumb .path b { color:var(--text); font-weight:600; }
+.crumb .sp { flex:1; }
+/* the engine chip: who is answering, on what model, at what thinking level —
+   and it is the control that changes them, so nothing new is added to the bar.
+   Data already exists: models.availableModels / currentModelId (types.ts:101,
+   session.modelId :200) and the reasoning/thought ConfigOption that
+   ActionMenu.tsx:12 already ranks. Segments render only when the agent reports
+   them: opencode exposes no effort option, so :not([data-effort]) hides it. */
+.mchip { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 6px;
+  border:1px solid var(--line-strong); border-radius:4px; background:var(--panel);
+  font:11px var(--mono); color:var(--muted); flex:0 0 auto; max-width:100%; }
+.mchip:hover { border-color:var(--muted); color:var(--text); }
+.mchip .wm { font-size:11px; }
+.mchip .eff { color:var(--text); }
+.mchip .sep { color:var(--faint); }
+.mchip .chev { color:var(--faint); }
+.mchip .chev svg { width:10px; height:10px; }
+/* the spinner and the elapsed clock exist only while a turn is in flight */
+.mchip .spin, .mchip .el { display:none; }
+.frame[data-run="working"] .mchip { border-color:var(--muted); }
+.frame[data-run="working"] .mchip .spin, .frame[data-run="working"] .mchip .el { display:inline-flex; }
+.mchip .el { color:var(--text); font-variant-numeric:tabular-nums; }
+.frame[data-effort="none"] .effseg { display:none; }
+.sep { color:var(--faint); }
+.effseg { display:inline-flex; align-items:center; gap:5px; }
+
+/* ---- THE ENGINE READOUT ---------------------------------------------------
+   Chosen placement: bottom-right of the message pane, outside the input box.
+   It is a right-aligned row of its own between the thread and the composer, so
+   it never competes with the session title (crumb), never crowds the phone
+   status bar, and never moves as the textarea grows. Costs 28px.
+   It is also the control that changes model / thinking level.
+   -------------------------------------------------------------------------- */
+.eng .spin, .eng .el { display:none; }
+.frame[data-run="working"] .eng .spin, .frame[data-run="working"] .eng .el { display:inline-flex; }
+.dock { flex:0 0 auto; display:flex; align-items:center; padding:0 14px 8px; background:var(--panel); }
+.dock .sp { flex:1; }
+/* idle = the turn finished: no spinners, no trailing "working" line */
+.frame:not([data-run="working"]) .working { display:none; }
+.frame:not([data-run="working"]) details.tool .spin { display:none; }
+.frame:not([data-run="working"]) details.tool .meta.run { color:var(--faint); }
+/* phone: two-row crumb (where you are / what is running) */
+.frame.phone .crumb .r1 { flex:1; min-width:0; display:flex; align-items:center; gap:8px; }
+.ic { width:26px; height:26px; border-radius:4px; display:grid; place-items:center; color:var(--muted); flex:0 0 auto; }
+.ic:hover { background:var(--panel); color:var(--text); }
+.ic svg { width:15px; height:15px; }
+
+/* =======================  THREAD  ======================= */
+.main { flex:1; min-height:0; overflow:auto; background:var(--panel); padding:12px 14px 18px; }
+.thread { max-width:800px; margin:0 auto; }
+.earlier { display:flex; align-items:center; gap:9px; font:10.5px var(--mono); color:var(--faint); padding:0 0 14px; }
+.earlier::before, .earlier::after { content:""; flex:1; height:1px; background:var(--line); }
+
+/* a turn is plain text with a mono label — no panel, no timestamp chrome */
+.turn { margin:0 0 22px; }
+/* lowercase by default — only "you" is shouted, so the engine record next to
+   it (model, thinking level) stays quiet */
+.lbl { display:flex; align-items:center; gap:6px; font:10.5px var(--mono); color:var(--faint); margin-bottom:6px; }
+.lbl .sp { flex:1; }
+.lbl .you { letter-spacing:.09em; text-transform:uppercase; }
+.lbl .wm { font-size:10.5px; color:var(--muted); }
+.lbl .eff { color:var(--muted); }
+.turn.user .body { font-size:13.5px; }
+.turn.agent .body { font-size:14.5px; line-height:1.6; }
+.body p { margin:0 0 .6em; } .body p:last-child { margin-bottom:0; }
+.body ul { margin:.2em 0 .55em; padding-left:1.1em; } .body li { margin:.24em 0; }
+.body code { font:12px var(--mono); background:var(--panel-2); padding:1px 4px; border-radius:3px; }
+.chips { display:flex; gap:5px; flex-wrap:wrap; margin-bottom:7px; }
+.chip { display:inline-flex; align-items:center; height:20px; padding:0 6px; border:1px solid var(--line); border-radius:3px; background:var(--panel-2); font:10.5px var(--mono); color:var(--muted); }
+
+/* thinking folds into the label line — it is not its own box */
+details.think { display:inline; }
+details.think > summary { list-style:none; display:inline-flex; align-items:center; gap:4px; cursor:pointer; color:var(--faint); }
+details.think > summary::-webkit-details-marker { display:none; }
+details.think > summary:hover { color:var(--text); }
+details.think .in { display:block; margin:8px 0 0; padding-left:11px; border-left:1px solid var(--line);
+  font:12.5px/1.6 var(--sans); text-transform:none; letter-spacing:0; color:var(--muted); }
+
+/* tool call: the frame means "the agent did this". completed states are silent. */
+details.tool { border:1px solid var(--line); border-radius:var(--r); margin:10px 0; overflow:hidden; background:var(--panel); }
+details.tool > summary { list-style:none; display:flex; align-items:center; gap:8px; min-height:28px; padding:0 9px; cursor:pointer; background:var(--panel-2); font:11.5px var(--mono); }
+details.tool > summary::-webkit-details-marker { display:none; }
+details.tool[open] > summary { border-bottom:1px solid var(--line); }
+details.tool .kind { color:var(--faint); text-transform:uppercase; letter-spacing:.05em; font-size:10px; }
+details.tool .tn { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+details.tool .meta { color:var(--faint); font-size:10.5px; flex:0 0 auto; }
+details.tool .meta.run { color:var(--text); }
+details.tool .meta.fail { color:var(--err); }
+.spin { width:10px; height:10px; border-radius:50%; border:1.5px solid var(--line-strong); border-top-color:var(--ink); animation:sp .8s linear infinite; flex:0 0 auto; }
+@keyframes sp { to { transform:rotate(360deg); } }
+.code { font:12px/1.62 var(--mono); overflow:hidden; }
+.code .ln { display:flex; }
+.code .g { flex:0 0 34px; text-align:right; padding-right:9px; color:var(--faint); background:var(--panel-2); border-right:1px solid var(--line); user-select:none; }
+.code .c { flex:1; min-width:0; padding:0 9px; white-space:pre; overflow:hidden; text-overflow:ellipsis; }
+.code .ln.add { background:color-mix(in srgb, var(--ok) 11%, transparent); }
+.code .ln.add .c { color:var(--ok); }
+.code .ln.del { background:color-mix(in srgb, var(--err) 10%, transparent); }
+.code .ln.del .c { color:var(--err); }
+
+/* permission: amber is reserved for "needs you", so it needs no header strip */
+.perm { border:1px solid var(--line); border-left:2px solid var(--warn); border-radius:var(--r); background:var(--panel); margin:12px 0; padding:11px 12px; }
+.perm .q { font-size:13.5px; margin-bottom:3px; }
+.perm .sub { font:11px var(--mono); color:var(--warn); margin-bottom:8px; }
+.perm .cmd { font:12px var(--mono); background:var(--panel-2); border:1px solid var(--line); border-radius:4px; padding:6px 8px; color:var(--muted); margin-bottom:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.perm .btns { display:flex; gap:6px; flex-wrap:wrap; }
+.btn { height:28px; padding:0 12px; border:1px solid var(--line-strong); border-radius:4px; font-size:12.5px; font-weight:600; background:var(--panel); }
+.btn.pri { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+.btn.ghost { border-color:transparent; color:var(--muted); }
+.working { display:flex; align-items:center; gap:8px; font:11.5px var(--mono); color:var(--muted); }
+
+/* =======================  CHANGES  ======================= */
+.files { width:300px; flex:0 0 300px; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; }
+.frame.phone .files { display:none; }
+.fl { flex:1; min-height:0; overflow:auto; }
+.frow { display:flex; align-items:center; gap:8px; width:100%; padding:5px 9px; text-align:left; font:11.5px var(--mono); color:var(--text); }
+.frow:hover { background:var(--panel-2); }
+.frow .m { width:11px; text-align:center; color:var(--faint); }
+.frow .m.a { color:var(--ok); } .frow .m.d { color:var(--err); }
+.frow .p { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.frow .st { color:var(--faint); font-size:10.5px; }
+.fact { padding:8px 9px; border-top:1px solid var(--line); display:flex; gap:6px; }
+.fact .btn { flex:1; }
+
+/* =======================  STATUS BAR (4 facts, not 7)  ======================= */
+.status { height:26px; flex:0 0 auto; display:flex; align-items:center; background:var(--panel-2); border-top:1px solid var(--line); font:11px var(--mono); color:var(--muted); }
+.status .s { display:inline-flex; align-items:center; gap:6px; height:100%; padding:0 10px; border-right:1px solid var(--line); white-space:nowrap; }
+.status .s:hover { background:var(--panel); color:var(--text); }
+.status .s.first { border-left:1px solid var(--line); }
+.status .sp { flex:1; }
+.status svg { width:13px; height:13px; }
+.status b { color:var(--text); font-weight:500; font-variant-numeric:tabular-nums; }
+/* Connection is silent when healthy — same discipline as a completed tool
+   call. No green dot (green is diff-only, and next to a codex-green identity
+   dot it would read as the same thing); it only speaks up when broken:
+   .conn.off { color:var(--err) } → "offline". */
+.conn { color:var(--muted); }
+.conn.off { color:var(--err); }
+.ubar { width:38px; height:4px; border-radius:1px; background:var(--line-strong); overflow:hidden; }
+.ubar i { display:block; height:100%; background:var(--muted); }
+.ubar i.warn { background:var(--warn); }
+kbd { font:10px var(--mono); border:1px solid var(--line-strong); border-radius:3px; padding:0 3px; }
+
+/* =======================  MOBILE  ======================= */
+.tabbar { display:none; }
+.frame.phone .tabbar { display:flex; flex:0 0 auto; height:56px; padding-bottom:6px; background:var(--panel-2); border-top:1px solid var(--line); }
+.tabbar button { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; color:var(--muted); font:10px var(--mono); position:relative; }
+.tabbar button.on { color:var(--text); }
+.tabbar button.on::before { content:""; position:absolute; top:0; left:24%; right:24%; height:2px; background:var(--ink); }
+.tabbar button svg { width:19px; height:19px; }
+.tabbar .n { position:absolute; top:6px; right:calc(50% - 19px); min-width:15px; height:15px; padding:0 3px; border-radius:4px; background:var(--ink); color:var(--on-ink); font:9.5px/15px var(--mono); text-align:center; }
+.frame.phone .side, .frame.phone .pane-files { display:none; }
+.frame.phone[data-tab="files"] .pane-chat { display:none; }
+.frame.phone[data-tab="files"] .pane-files { display:flex; flex-direction:column; flex:1; min-height:0; }
+
+/* =======================  COMPOSER  ======================= */
+.composer { flex:0 0 auto; background:var(--panel); border-top:1px solid var(--line); padding:8px 10px 9px; }
+.cwrap { max-width:800px; margin:0 auto; border:1px solid var(--line-strong); border-radius:var(--r); background:var(--panel-2); }
+.cwrap:focus-within { border-color:var(--muted); }
+.cw-top { padding:8px 9px 6px; font-size:14.5px; color:var(--faint); }
+.crow { display:flex; align-items:center; gap:2px; padding:0 6px 6px; }
+.cbtn { width:27px; height:27px; border-radius:4px; display:grid; place-items:center; color:var(--muted); }
+.cbtn:hover { background:var(--panel); color:var(--text); }
+.cbtn svg { width:15px; height:15px; }
+.crow .sp { flex:1; }
+.send { height:27px; padding:0 11px; border-radius:4px; background:var(--accent); color:var(--on-accent); display:inline-flex; align-items:center; gap:5px; font:11.5px var(--mono); font-weight:600; }
+.send svg { width:13px; height:13px; }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <h1>B2 · Quiet Console <small>— B 去掉品牌色與多餘框線</small></h1>
+  <div class="seg" id="theme"><button data-v="light" class="on">Light</button><button data-v="dark">Dark</button></div>
+  <div class="seg" id="agent"><button data-v="claude" class="on">claude</button><button data-v="codex">codex</button><button data-v="opencode">opencode</button></div>
+  <div class="seg" id="ident"><b>identity</b><button data-v="mono" class="on">mono</button><button data-v="dot">dot</button><button data-v="hue">hue</button></div>
+  <div class="seg" id="group"><b>sessions</b><button data-v="folder" class="on">by folder</button><button data-v="time">latest updated</button></div>
+  <div class="seg" id="vmenu"><button data-v="open">show view menu</button></div>
+  <div class="seg" id="run"><b>turn</b><button data-v="working" class="on">working</button><button data-v="idle">idle</button></div>
+  <div class="seg" id="tab"><b>mobile</b><button data-v="chat" class="on">Chat</button><button data-v="files">Changes</button></div>
+</div>
+<p class="note">
+  <b>identity 三種：</b><code>mono</code> 只有 mono 字樣，畫面零品牌色（建議）· <code>dot</code> 字樣前加一顆小色塊，色彩只出現在那 7px，方便在混合列表裡預先注意 · <code>hue</code> 是原本 B 的做法，品牌色接管 accent，連 Allow / Send / Review 都跟著變色。
+  <br><b>引擎資訊：</b>crumb 右側那顆 chip 就是「誰在跑、用什麼 model、什麼 thinking level」，同時也是切換它們的入口——沒有新增任何列。跑動中會多出 spinner 與計時；閒置時只剩設定。每則回覆的標籤另外保留自己的 <code>model · level</code>，所以中途換 model，捲上去仍看得到當時是什麼產生的。切上面 <code>turn</code> 看兩種狀態；切 <code>opencode</code> 看沒有 thinking level 的 agent（整段消失，不留佔位）。
+  <br><b>色彩規則：</b>ink = 可互動／進行中 · amber = 需要你處理 · red = 失敗與 diff − · green = 只有 diff + · 完成狀態不給顏色也不給 badge，只留耗時。
+</p>
+
+<div class="stage">
+
+  <!-- ===================== DESKTOP ===================== -->
+  <div>
+  <div class="frame desktop" data-agent="claude" data-identity="mono" data-run="working" data-effort="on" data-group="folder">
+    <div class="shell">
+      <div class="row">
+        <nav class="rail">
+          <button class="rb on" title="Chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H9l-5 4Z"/></svg></button>
+          <button class="rb" title="Changes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3v12a3 3 0 0 0 3 3h6"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/></svg><span class="n">7</span></button>
+          <button class="rb" title="Sessions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5l3 1.7"/></svg></button>
+          <button class="rb" title="Search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
+          <button class="rb" title="Terminal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/></svg></button>
+          <span class="sp"></span>
+          <button class="rb" title="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.6 5.6l1.8 1.8M16.6 16.6l1.8 1.8M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8"/></svg></button>
+        </nav>
+
+        <!-- sessions: no tabs. groups + "show all" carry the same navigation. -->
+        <aside class="side">
+          <div class="ph"><span>Sessions</span><span class="qty">6</span><span class="sp"></span>
+            <!-- the view is the user's choice and it says which one it is in
+                 words, so nothing has to be learned from an icon -->
+            <div class="vwrap">
+              <button class="vbtn"><span class="vlabel">folder</span><span class="vch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 9 6 6 6-6"/></svg></span></button>
+              <div class="vmenu" role="menu">
+                <button class="vitem on" role="menuitem"><span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m5 13 4 4 10-10"/></svg></span>By folder</button>
+                <button class="vitem" role="menuitem"><span class="tick"></span>Latest updated</button>
+              </div>
+            </div>
+            <button title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
+            <button title="New"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></button>
+          </div>
+          <div class="find"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>filter…</span></div>
+          <div class="list">
+            <!-- Latest updated, except that anything running or waiting on
+                 you is pinned above the fold. A session that needs an Allow
+                 must not sink out of sight just because it has been quiet —
+                 that is exactly the case you opened the phone for. -->
+            <div class="by-time">
+              <div class="grp">needs you · running</div>
+              <button class="srow"><span class="st8 wait"></span><span class="stk"><span class="nm">SSE reconnect on iOS</span><span class="mt"><span class="idot" style="background:#10a37f"></span>codex · acp-bridge</span></span><span class="when">3h</span></button>
+              <button class="srow on"><span class="st8 run"></span><span class="stk"><span class="nm">Usage gauge caching</span><span class="mt"><span class="idot" style="background:#d97757"></span>claude · cloud-acp-gateway</span></span><span class="when">now</span></button>
+              <div class="pindiv"></div>
+              <button class="srow"><span class="st8"></span><span class="stk"><span class="nm">Sidebar rename affordance</span><span class="mt"><span class="idot" style="background:#d97757"></span>claude · cloud-acp-gateway</span></span><span class="when">1h</span></button>
+              <button class="srow"><span class="st8"></span><span class="stk"><span class="nm">Terminal height memory</span><span class="mt"><span class="idot" style="background:#8b8b86"></span>opencode · cloud-acp-gateway</span></span><span class="when">4h</span></button>
+              <button class="srow"><span class="st8"></span><span class="stk"><span class="nm">Ledger dir migration</span><span class="mt"><span class="idot" style="background:#d97757"></span>claude · deploy-tools</span></span><span class="when">1d</span></button>
+              <button class="srow"><span class="st8"></span><span class="stk"><span class="nm">Review panel gutters</span><span class="mt"><span class="idot" style="background:#10a37f"></span>codex · cloud-acp-gateway</span></span><span class="when">1d</span></button>
+            </div>
+
+            <!-- by folder -->
+            <div class="by-folder">
+              <button class="fgrp"><span class="tw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 9 6 6 6-6"/></svg></span><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span class="nm">cloud-acp-gateway</span><span class="n">4</span><span class="st8 run"></span></button>
+              <div class="fkids">
+                <button class="srow on"><span class="st8 run"></span><span class="stk"><span class="nm">Usage gauge caching</span><span class="mt"><span class="idot" style="background:#d97757"></span>claude</span></span><span class="when">now</span></button>
+                <button class="srow"><span class="st8"></span><span class="stk"><span class="nm">Sidebar rename affordance</span><span class="mt"><span class="idot" style="background:#d97757"></span>claude</span></span><span class="when">1h</span></button>
+                <button class="srow"><span class="st8"></span><span class="stk"><span class="nm">Terminal height memory</span><span class="mt"><span class="idot" style="background:#8b8b86"></span>opencode</span></span><span class="when">4h</span></button>
+                <button class="srow"><span class="st8"></span><span class="stk"><span class="nm">Review panel gutters</span><span class="mt"><span class="idot" style="background:#10a37f"></span>codex</span></span><span class="when">1d</span></button>
+              </div>
+              <button class="fgrp"><span class="tw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 9 6 6 6-6"/></svg></span><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span class="nm">acp-bridge</span><span class="n">1</span><span class="st8 wait"></span></button>
+              <div class="fkids">
+                <button class="srow"><span class="st8 wait"></span><span class="stk"><span class="nm">SSE reconnect on iOS</span><span class="mt"><span class="idot" style="background:#10a37f"></span>codex</span></span><span class="when">3h</span></button>
+              </div>
+              <button class="fgrp"><span class="tw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 9 6 6 6-6"/></svg></span><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span class="nm">deploy-tools</span><span class="n">1</span></button>
+              <div class="fkids">
+                <button class="srow"><span class="st8"></span><span class="stk"><span class="nm">Ledger dir migration</span><span class="mt"><span class="idot" style="background:#d97757"></span>claude</span></span><span class="when">1d</span></button>
+              </div>
+              <button class="fgrp closed"><span class="tw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 9 6 6 6-6"/></svg></span><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span class="nm">taboola-wiki</span><span class="n">3</span></button>
+              <button class="fgrp closed"><span class="tw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 9 6 6 6-6"/></svg></span><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span class="nm">trs-llm-gateway</span><span class="n">7</span></button>
+            </div>
+            <button class="more">Show all conversations →</button>
+          </div>
+        </aside>
+
+        <div class="col">
+          <!-- crumb carries only what belongs to THIS turn; branch/connection
+               live in the status bar and are no longer duplicated here -->
+          <div class="crumb">
+            <span class="path">~/git/my-apps/<b>cloud-acp-gateway</b> › Usage gauge caching</span>
+            <span class="sp"></span>
+            <button class="ic" title="Menu"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></button>
+          </div>
+
+          <div class="main">
+            <div class="thread">
+              <div class="earlier">12 earlier messages</div>
+
+              <div class="turn user">
+                <div class="lbl"><span class="you">you</span><span class="sp"></span>14:02</div>
+                <div class="chips"><span class="chip">web/src/components/UsageStrip.tsx</span><span class="chip">store.ts:1420-1468</span></div>
+                <div class="body">usage gauge 只在有資料時顯示，並讓 quota 查詢走 5 分鐘 cache。順便確認背景 tab 不要繼續 poll。</div>
+              </div>
+
+              <div class="turn agent">
+                <!-- the turn keeps its own record of what produced it, so a
+                     scrollback still shows the model/level in effect back then
+                     even after you switch mid-conversation -->
+                <div class="lbl">
+                  <span class="who"><span class="idot"></span><span class="wm an">claude</span></span>
+                  <span class="sep">·</span><span class="am">opus-5</span>
+                  <span class="effseg"><span class="sep">·</span><span class="eff ae">think:high</span></span>
+                  <details class="think"><summary>· thought 6s<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:11px;height:11px"><path d="m6 9 6 6 6-6"/></svg></summary>
+                    <span class="in">rateLimits 只在 poll 回來後才有值 → 首次載入會閃一下空白。cache 應該放在 gateway 端，client 的 60s interval 只是打同一份快取。</span>
+                  </details>
+                  <span class="sp"></span>18s
+                </div>
+                <div class="body">
+                  <p>兩個問題其實是同一個：<strong>可見性由資料驅動，而資料到得太晚</strong>。</p>
+                  <ul>
+                    <li>gateway 對 <code>/usage/limits</code> 加 5 分鐘 TTL，client 輪詢不再放大成後端請求</li>
+                    <li><code>hasUsage</code> 改成「有 contextSize <em>或</em> 有 rateLimits」，首次 render 不閃</li>
+                  </ul>
+                </div>
+              </div>
+
+              <!-- completed: no badge, no colour, just the cost -->
+              <details class="tool">
+                <summary><span class="kind">read</span><span class="tn">web/src/components/UsageStrip.tsx</span><span class="meta">92 lines · 42ms</span></summary>
+                <div class="code">
+                  <div class="ln"><span class="g">24</span><span class="c">export function UsageStrip() {</span></div>
+                  <div class="ln"><span class="g">25</span><span class="c">  const limits = useStore((s) =&gt; s.rateLimits);</span></div>
+                </div>
+              </details>
+
+              <details class="tool" open>
+                <summary><span class="spin"></span><span class="kind">edit</span><span class="tn">src/gateway.ts</span><span class="meta run">3.1s</span></summary>
+                <div class="code">
+                  <div class="ln"><span class="g">612</span><span class="c">async function usageLimits(req: Req) {</span></div>
+                  <div class="ln del"><span class="g">613</span><span class="c">-  const w = await fetchUsageWindows();</span></div>
+                  <div class="ln add"><span class="g">613</span><span class="c">+  const w = usageCache.get() ?? await fetchUsageWindows();</span></div>
+                  <div class="ln add"><span class="g">614</span><span class="c">+  usageCache.set(w, 5 * 60_000);</span></div>
+                  <div class="ln"><span class="g">615</span><span class="c">  return json(w);</span></div>
+                </div>
+              </details>
+
+              <div class="perm">
+                <div class="q">Run a build to verify?</div>
+                <div class="sub">needs you</div>
+                <div class="cmd">$ npm --prefix web run build</div>
+                <div class="btns">
+                  <button class="btn pri">Allow</button>
+                  <button class="btn">Allow always</button>
+                  <button class="btn ghost">Deny</button>
+                </div>
+              </div>
+
+              <div class="working"><span class="spin"></span>working · 3 tools</div>
+            </div>
+          </div>
+
+          <div class="dock"><span class="sp"></span><button class="mchip eng at-thread" title="Model and thinking level"><span class="spin"></span><span class="idot"></span><span class="wm an">claude</span><span class="sep s1">·</span><span class="am">opus-5</span><span class="effseg"><span class="sep">·</span><span class="eff ae">think:high</span></span><span class="el">18s</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m6 9 6 6 6-6"/></svg></span></button></div>
+
+          <div class="composer">
+            <div class="cwrap">
+              <div class="cw-top">Reply to <span class="an">claude</span>…</div>
+              <div class="crow">
+                <button class="cbtn" title="Slash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 4 9 20"/></svg></button>
+                <button class="cbtn" title="File"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 2 9 9 0 1 0-3.6 4.6"/></svg></button>
+                <button class="cbtn" title="Attach"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.6 21a4.6 4.6 0 0 1-6.5-6.5l8-8a3.1 3.1 0 0 1 4.4 4.4l-8 8a1.6 1.6 0 0 1-2.2-2.2l7.2-7.2"/></svg></button>
+                <span class="sp"></span>
+                <button class="send">send<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- changes: the summary folds into the header, so one less row -->
+        <aside class="files">
+          <div class="ph"><span>Changes</span><span class="qty">7 files · +128 −35</span><span class="sp"></span>
+            <button title="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg></button>
+          </div>
+          <div class="fl">
+            <button class="frow"><span class="m">M</span><span class="p">src/gateway.ts</span><span class="st">+12 −4</span></button>
+            <button class="frow"><span class="m">M</span><span class="p">web/src/components/UsageStrip.tsx</span><span class="st">+8 −2</span></button>
+            <button class="frow"><span class="m">M</span><span class="p">web/src/App.tsx</span><span class="st">+3 −1</span></button>
+            <button class="frow"><span class="m a">A</span><span class="p">src/usageCache.ts</span><span class="st">+41</span></button>
+            <button class="frow"><span class="m a">A</span><span class="p">src/usageCache.test.ts</span><span class="st">+58</span></button>
+            <button class="frow"><span class="m">M</span><span class="p">web/src/store/store.ts</span><span class="st">+6 −6</span></button>
+            <button class="frow"><span class="m d">D</span><span class="p">web/src/lib/usagePoll.ts</span><span class="st">−22</span></button>
+          </div>
+          <div class="fact"><button class="btn">Discard</button><button class="btn pri">Review</button></div>
+        </aside>
+      </div>
+
+      <div class="status">
+        <!-- the agent already names itself in the crumb; repeating it here was
+             the same fact twice, so the status bar keeps only the transport -->
+        
+        <span class="s first"><span class="conn">connected</span></span>
+        <span class="s"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><path d="M6 8.4v7.2M18 8.4v5a3 3 0 0 1-3 3H8"/><circle cx="18" cy="6" r="2.4"/></svg>feat/usage-cache <b>+128 −35</b></span>
+        <span class="sp"></span>
+        <span class="s">ctx <b>34k</b>/200k <span class="ubar"><i style="width:17%"></i></span></span>
+        <span class="s">5h <b>62%</b> <span class="ubar"><i class="warn" style="width:62%"></i></span> · 21:00</span>
+        <span class="s"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/></svg>term <kbd>⌃`</kbd></span>
+      </div>
+    </div>
+  </div>
+  <div class="cap">Desktop · 1200×860 — thread 裡只有 tool call 與 permission 有框</div>
+  </div>
+
+  <!-- ===================== PHONE ===================== -->
+  <div>
+  <div class="frame phone" data-agent="claude" data-identity="mono" data-run="working" data-effort="on" data-tab="chat" id="ph">
+    <div class="shell">
+      <!-- 392px can't hold folder + agent + model + level on one line without
+           truncating one of them, so the phone crumb is two rows: where you are,
+           then what is running. The second row is 28px. -->
+      <div class="crumb">
+        <div class="r1">
+          <span class="path"><b>cloud-acp-gateway</b> › Usage gauge caching</span>
+          <span class="sp"></span>
+          <button class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button class="ic"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></button>
+        </div>
+      </div>
+
+      <div class="col pane-chat">
+        <div class="main">
+          <div class="thread">
+            <div class="earlier">12 earlier messages</div>
+            <div class="turn user">
+              <div class="lbl"><span class="you">you</span><span class="sp"></span>14:02</div>
+              <div class="chips"><span class="chip">UsageStrip.tsx</span></div>
+              <div class="body">usage gauge 只在有資料時顯示，並讓 quota 查詢走 5 分鐘 cache。</div>
+            </div>
+            <div class="turn agent">
+              <div class="lbl">
+                <span class="who"><span class="idot"></span><span class="wm an">claude</span></span>
+                <span class="sep">·</span><span class="am">opus-5</span>
+                <span class="effseg"><span class="sep">·</span><span class="eff ae">think:high</span></span>
+                <details class="think"><summary>· thought 6s<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:11px;height:11px"><path d="m6 9 6 6 6-6"/></svg></summary>
+                  <span class="in">rateLimits 只在 poll 回來後才有值 → 首次載入會閃一下空白。</span>
+                </details>
+                <span class="sp"></span>18s
+              </div>
+              <div class="body">
+                <p>兩個問題其實是同一個：<strong>可見性由資料驅動，而資料到得太晚</strong>。</p>
+                <ul><li>gateway 端加 5 分鐘 TTL</li><li><code>hasUsage</code> 納入 contextSize</li></ul>
+              </div>
+            </div>
+            <details class="tool">
+              <summary><span class="kind">read</span><span class="tn">UsageStrip.tsx</span><span class="meta">42ms</span></summary>
+              <div class="code"><div class="ln"><span class="g">24</span><span class="c">export function UsageStrip() {</span></div></div>
+            </details>
+            <details class="tool" open>
+              <summary><span class="spin"></span><span class="kind">edit</span><span class="tn">src/gateway.ts</span><span class="meta run">3.1s</span></summary>
+              <div class="code">
+                <div class="ln del"><span class="g">613</span><span class="c">-  const w = await fetchUsage…</span></div>
+                <div class="ln add"><span class="g">613</span><span class="c">+  const w = usageCache.get()…</span></div>
+                <div class="ln add"><span class="g">614</span><span class="c">+  usageCache.set(w, 5 * 60_0…</span></div>
+              </div>
+            </details>
+            <div class="perm">
+              <div class="q">Run a build to verify?</div>
+              <div class="sub">needs you</div>
+              <div class="cmd">$ npm --prefix web run build</div>
+              <div class="btns"><button class="btn pri">Allow</button><button class="btn">Always</button><button class="btn ghost">Deny</button></div>
+            </div>
+            <div class="working"><span class="spin"></span>working · 3 tools</div>
+          </div>
+        </div>
+        <div class="dock"><span class="sp"></span><button class="mchip eng at-thread" title="Model and thinking level"><span class="spin"></span><span class="idot"></span><span class="wm an">claude</span><span class="sep s1">·</span><span class="am">opus-5</span><span class="effseg"><span class="sep">·</span><span class="eff ae">think:high</span></span><span class="el">18s</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m6 9 6 6 6-6"/></svg></span></button></div>
+        <div class="composer">
+          <div class="cwrap">
+            <div class="cw-top">Reply to <span class="an">claude</span>…</div>
+            <div class="crow">
+              <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 4 9 20"/></svg></button>
+              <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 2 9 9 0 1 0-3.6 4.6"/></svg></button>
+              <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.6 21a4.6 4.6 0 0 1-6.5-6.5l8-8a3.1 3.1 0 0 1 4.4 4.4l-8 8a1.6 1.6 0 0 1-2.2-2.2l7.2-7.2"/></svg></button>
+              <span class="sp"></span>
+              <button class="send">send<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pane-files">
+        <div class="ph"><span>Changes</span><span class="qty">7 files · +128 −35</span><span class="sp"></span>
+          <button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg></button>
+        </div>
+        <div class="fl" style="flex:1">
+          <button class="frow"><span class="m">M</span><span class="p">src/gateway.ts</span><span class="st">+12 −4</span></button>
+          <button class="frow"><span class="m">M</span><span class="p">web/src/components/UsageStrip.tsx</span><span class="st">+8 −2</span></button>
+          <button class="frow"><span class="m">M</span><span class="p">web/src/App.tsx</span><span class="st">+3 −1</span></button>
+          <button class="frow"><span class="m a">A</span><span class="p">src/usageCache.ts</span><span class="st">+41</span></button>
+          <button class="frow"><span class="m a">A</span><span class="p">src/usageCache.test.ts</span><span class="st">+58</span></button>
+          <button class="frow"><span class="m">M</span><span class="p">web/src/store/store.ts</span><span class="st">+6 −6</span></button>
+          <button class="frow"><span class="m d">D</span><span class="p">web/src/lib/usagePoll.ts</span><span class="st">−22</span></button>
+        </div>
+        <div class="fact"><button class="btn">Discard</button><button class="btn pri">Review</button></div>
+      </div>
+
+      <div class="status">
+        
+        <span class="s first"><span class="conn">connected</span></span>
+        <span class="s">ctx <b>34k</b></span>
+        <span class="s">5h <b>62%</b> <span class="ubar"><i class="warn" style="width:62%"></i></span></span>
+        <span class="sp"></span>
+      </div>
+
+      <nav class="tabbar">
+        <button class="on" data-t="chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H9l-5 4Z"/></svg>Chat</button>
+        <button data-t="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3v12a3 3 0 0 0 3 3h6"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/></svg>Changes<span class="n">7</span></button>
+        <button data-t="sessions"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5l3 1.7"/></svg>Sessions</button>
+        <button data-t="term"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3"/></svg>Term</button>
+      </nav>
+    </div>
+  </div>
+  <div class="cap">Mobile · 392×800 — bottom tab bar 取代 icon rail</div>
+  </div>
+</div>
+
+<script>
+const frames = document.querySelectorAll('.frame');
+const MODEL  = { claude:'opus-5', codex:'gpt-5-codex', opencode:'sonnet-5' };
+// the thinking level comes from the agent's reasoning/thought ConfigOption, and
+// not every agent has one — opencode reports none, so the segment disappears
+// rather than rendering a placeholder
+const EFFORT = { claude:'think:high', codex:'reason:medium', opencode:null };
+function setAgentName(v) {
+  document.querySelectorAll('.an').forEach(e => e.textContent = v);
+  document.querySelectorAll('.am').forEach(e => e.textContent = MODEL[v]);
+  const eff = EFFORT[v];
+  document.querySelectorAll('.ae').forEach(e => e.textContent = eff || '');
+  frames.forEach(f => f.dataset.effort = eff ? 'on' : 'none');
+}
+function seg(id, fn) {
+  const box = document.getElementById(id);
+  box.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    box.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    fn(b.dataset.v);
+  });
+}
+const ph = document.getElementById('ph');
+const tabbar = document.querySelector('.tabbar');
+function setTab(t) {
+  ph.dataset.tab = t;
+  tabbar.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+  document.querySelectorAll('#tab button').forEach(b => b.classList.toggle('on', b.dataset.v === t));
+}
+seg('theme', v => document.documentElement.dataset.theme = v);
+seg('agent', v => { frames.forEach(f => f.dataset.agent = v); setAgentName(v); });
+seg('ident', v => frames.forEach(f => f.dataset.identity = v));
+seg('run', v => frames.forEach(f => f.dataset.run = v));
+seg('group', v => frames.forEach(f => {
+  f.dataset.group = v;
+  f.querySelectorAll('.vlabel').forEach(e => e.textContent = v === 'folder' ? 'folder' : 'latest');
+  f.querySelectorAll('.vitem').forEach((e, k) => e.classList.toggle('on', k === (v === 'folder' ? 0 : 1)));
+  f.querySelectorAll('.vitem .tick').forEach((e, k) => e.innerHTML = k === (v === 'folder' ? 0 : 1) ? TICK : '');
+}));
+const TICK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m5 13 4 4 10-10"/></svg>';
+document.getElementById('vmenu').addEventListener('click', () => {
+  const on = document.querySelector('.frame').dataset.vmenu === 'open';
+  frames.forEach(f => f.dataset.vmenu = on ? 'closed' : 'open');
+  document.querySelector('#vmenu button').classList.toggle('on', !on);
+});
+document.querySelectorAll('.vbtn').forEach(b => b.addEventListener('click', () => {
+  const on = b.closest('.frame').dataset.vmenu === 'open';
+  b.closest('.frame').dataset.vmenu = on ? 'closed' : 'open';
+}));
+document.getElementById('tab').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setTab(b.dataset.v); });
+tabbar.addEventListener('click', e => { const b = e.target.closest('button'); if (b && (b.dataset.t === 'chat' || b.dataset.t === 'files')) setTab(b.dataset.t); });
+document.querySelectorAll('.frame.phone .main').forEach(m => { m.scrollTop = m.scrollHeight; });
+</script>
+</body>
+</html>

@@ -35,9 +35,9 @@ describe("formatUntil", () => {
     expect(formatUntil(inMinutes(12), now)).toBe("12m");
   });
 
-  test("the two coarsest units only: hours drop the seconds, days drop the minutes", () => {
-    expect(formatUntil(inMinutes(92), now)).toBe("1h 32m");
-    expect(formatUntil(inMinutes(33 * 60), now)).toBe("1d 9h");
+  test("the two coarsest units only, unspaced — a countdown is one token", () => {
+    expect(formatUntil(inMinutes(92), now)).toBe("1h32m");
+    expect(formatUntil(inMinutes(33 * 60), now)).toBe("1d9h");
   });
 
   test("a whole unit doesn't trail an empty one", () => {

@@ -4,25 +4,39 @@
     --surface-2: #f0efec;
     --text: #1f1e1d;
     --muted: #84827d;
+    --faint: #a3a19b;
     --border: #e7e5e0;
     --border-strong: #d9d6d0;
-    --accent: #d97757;
-    --accent-press: #c4663f;
+    /* Colour carries exactly four meanings (docs/ui-refactor-plan.md §1.1):
+       ink = interactive / active / running, amber = needs you, red = failed
+       and diff −, green = diff + AND NOTHING ELSE. Identity is a mono
+       wordmark, not a hue — --agent-color is for the 7px .idot alone, unless
+       the reader opts back into the old behaviour with data-identity="hue".
+       ink/on-ink derive from text/bg so every skin and both themes get them
+       for free; the press state is the same ink walked one step toward the
+       page, which lightens in light mode and darkens in dark. */
+    --ink: var(--text);
+    --on-ink: var(--bg);
+    --accent: var(--ink);
+    --accent-press: color-mix(in srgb, var(--ink) 82%, var(--bg));
     --agent-claude: #d97757;
     --agent-codex: #10a37f;
     --agent-opencode: #5A5858;
-    --permission-allow-bg: var(--agent-color, var(--accent));
+    /* Allow is a primary action, not an agent-specific concept, so it does not
+       take the agent's hue — it is the same ink as Send and Review. */
+    --permission-allow-bg: var(--accent);
     --permission-allow-active-bg: var(--accent-press);
-    --permission-allow-text: #fff;
+    --permission-allow-text: var(--accent-text);
     /* glyph colour for filled accent surfaces (e.g. the send button). Must
-       contrast with --accent, which can be a near-white neutral in some skins. */
-    --accent-text: #fff;
-    --user-bubble: #ebeae7;
+       contrast with --accent, which is near-white in dark mode. */
+    --accent-text: var(--on-ink);
     --ok: #3a9b5c;
     --warn: #c98a23;
     --err: #cf5b4e;
     --shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 24px rgba(0,0,0,.06);
     --radius: 16px;
+    /* The crumb's height, read back by every sheet that hangs below it. */
+    --crumb-h: 38px;
     /* The fenced code block in the composer is *inverted* from the page so it
        stands out in both themes (dark on light, light on dark — the Claude
        composer look). It reuses --text/--bg so it follows every theme/skin
@@ -35,10 +49,12 @@
     --chat-code-size: 13.5px;
     --chat-table-size: 14px;
     --chat-plan-size: 15px;
-    --composer-text-size: 16px;
-    /* Claude's responses read as editorial serif. ui-serif is New York on Apple
-       devices (the iOS system serif) — authentic look, zero network. */
-    --serif: ui-serif, "New York", Georgia, "Songti TC", "Noto Serif CJK TC", serif;
+    /* Two faces, and only two: the page's own sans, and one mono for machine
+       text (paths, diffs, counts, labels). Tokens rather than 45 copies of the
+       same stack — that is how three of them had already drifted, one of them
+       dropping the CJK fallbacks so Chinese rendered in a different face. */
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang TC", "Microsoft JhengHei", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 16px;
   }
   :root[data-text-size="small"] {
@@ -48,7 +64,6 @@
     --chat-code-size: 12.5px;
     --chat-table-size: 13px;
     --chat-plan-size: 14px;
-    --composer-text-size: 15px;
   }
   :root[data-text-size="large"] {
     --chat-user-size: 17px;
@@ -57,7 +72,6 @@
     --chat-code-size: 14.5px;
     --chat-table-size: 15.5px;
     --chat-plan-size: 16.5px;
-    --composer-text-size: 17.5px;
   }
   :root[data-text-size="xl"] {
     --chat-user-size: 18.5px;
@@ -66,51 +80,89 @@
     --chat-code-size: 15.5px;
     --chat-table-size: 16.5px;
     --chat-plan-size: 18px;
-    --composer-text-size: 19px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #1f1e1d; --surface: #292826; --surface-2: #211f1e; --text: #eeede9;
-      --muted: #9a978f; --border: #38362f; --border-strong: #46443c;
-      --user-bubble: #34322e; --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+      --muted: #9a978f; --faint: #7d7a72; --border: #38362f; --border-strong: #46443c;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
     }
   }
+  /* The skins are a palette shift, not a brand hue: they move the paper and the
+     type, and --ink/--accent follow --text on their own. Nothing here may
+     reintroduce a per-agent accent — that is what data-identity="hue" is for. */
   :root[data-agent-skin="codex"] {
     --bg: #f7f7f4; --surface: #ffffff; --surface-2: #f1f1ee;
-    --text: #20201d; --muted: #73736b; --border: #e3e3de; --border-strong: #d3d3cc;
-    --accent: #20201d; --accent-press: #3a3a35; --user-bubble: #ecece8;
-    --permission-allow-bg: var(--agent-codex);
-    --permission-allow-active-bg: #0b8f70;
-    --serif: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang TC", sans-serif;
+    --text: #20201d; --muted: #73736b; --faint: #9d9d94; --border: #e3e3de; --border-strong: #d3d3cc;
     --radius: 12px;
   }
   @media (prefers-color-scheme: dark) {
     :root[data-agent-skin="codex"] {
       --bg: #1c1c1a; --surface: #262624; --surface-2: #201f1d;
-      --text: #ededea; --muted: #9a988f; --border: #353430; --border-strong: #45443d;
-      --accent: #ededea; --accent-press: #cfceca; --user-bubble: #2f2e2b;
-      /* the codex-dark accent is near-white, so a white send glyph vanishes;
-         flip the glyph to the dark background colour for a visible button. */
-      --accent-text: var(--bg);
+      --text: #ededea; --muted: #9a988f; --faint: #7b7a73; --border: #353430; --border-strong: #45443d;
     }
   }
-  :root[data-agent-skin="opencode"] {
-    --accent: #1f1e1d;
-    --accent-press: #3a3a35;
-    --permission-allow-bg: var(--agent-opencode);
-    --permission-allow-active-bg: #3a3a35;
+  /* ---- themes (lib/theme.ts) ----
+     The reader's own palette, and the ONLY other thing allowed to move the
+     neutral ramp. Deliberately after the skin blocks: an explicit choice
+     outranks the automatic per-agent shift, so switching agent can't repaint a
+     page whose colours someone picked. Each theme redefines the whole ramp for
+     both modes — a half-defined theme would inherit the other half from :root
+     and read as a third palette. "paper" is :root itself and needs no block.
+     Only "contrast" and "sepia" touch --ok/--warn/--err: pure white/black needs
+     them deeper to survive it, and the warmer paper needs them quieter to sit
+     on it. The four meanings (§1.1) are unchanged in all four. */
+  :root[data-theme="slate"] {
+    --bg: #f5f6f7; --surface: #ffffff; --surface-2: #eef0f2;
+    --text: #17191c; --muted: #6f757d; --faint: #9aa0a8;
+    --border: #e3e6e9; --border-strong: #d2d6db;
+  }
+  :root[data-theme="contrast"] {
+    --bg: #ffffff; --surface: #ffffff; --surface-2: #f2f2f2;
+    --text: #0a0a0a; --muted: #5c5c5c; --faint: #8a8a8a;
+    --border: #e2e2e2; --border-strong: #c9c9c9;
+    --ok: #1f7a44; --warn: #b3760f; --err: #c02a1b;
+  }
+  :root[data-theme="sepia"] {
+    --bg: #efece5; --surface: #faf8f4; --surface-2: #e9e5dc;
+    --text: #2a2723; --muted: #7d786e; --faint: #a09a8e;
+    --border: #e0dbd1; --border-strong: #cec8bb;
+    --ok: #4f8a5f; --warn: #b8823a; --err: #c1685c;
   }
   @media (prefers-color-scheme: dark) {
-    :root[data-agent-skin="opencode"] {
-      --accent: #eeede9;
-      --accent-press: #cfceca;
+    :root[data-theme="slate"] {
+      --bg: #15171a; --surface: #1e2125; --surface-2: #191c1f;
+      --text: #e9eaec; --muted: #8f959d; --faint: #767c84;
+      --border: #2b2f34; --border-strong: #3a3f45;
     }
+    :root[data-theme="contrast"] {
+      --bg: #000000; --surface: #111111; --surface-2: #0a0a0a;
+      --text: #fafafa; --muted: #a1a1a1; --faint: #7a7a7a;
+      --border: #262626; --border-strong: #3d3d3d;
+      --ok: #4ec27a; --warn: #e0a63a; --err: #f0705f;
+    }
+    :root[data-theme="sepia"] {
+      --bg: #22201d; --surface: #2c2925; --surface-2: #26231f;
+      --text: #ece8e0; --muted: #9c968a; --faint: #7c766a;
+      --border: #3a362f; --border-strong: #4a453c;
+      --ok: #67ab77; --warn: #d0a05c; --err: #d8837a;
+    }
+  }
+  /* Identity mode (§1.2). Default — no attribute, or "mono"/"dot" — keeps every
+     interactive surface ink and confines the agent's colour to the 7px .idot.
+     "hue" restores the old behaviour for anyone who wants it: the brand colour
+     takes over Allow / Send / Review again. --agent-color is set on <html> by
+     applyAgentColor() (store.ts). */
+  :root[data-identity="hue"] {
+    --accent: var(--agent-color, var(--ink));
+    --accent-press: color-mix(in srgb, var(--agent-color, var(--ink)) 82%, #000);
+    --accent-text: #fff;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang TC", "Microsoft JhengHei", sans-serif;
+    font: 16px/1.55 var(--sans);
     overflow: hidden;
   }
   /* React mounts into #root, so the header/main/footer flex column lives here —
@@ -124,12 +176,6 @@
   .app-row { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
   /* the header/main/composer column; sits right of the desktop sidebar */
   .content { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
-  /* S4 edge accent: a thin identity-coloured rail down the chat column's left edge
-     (sits just inside the desktop sidebar border; at the screen edge on mobile). */
-  .content::before {
-    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; z-index: 35;
-    background: var(--agent-color, var(--accent)); pointer-events: none;
-  }
   /* appearance:none is required so iOS Safari drops the native push-button
      rendering — otherwise it adds internal content insets and ignores
      grid/flex centering, knocking icons (e.g. the send arrow) off center
@@ -140,50 +186,30 @@
 
   /* ---- top bar ---- */
   header {
-    flex: 0 0 auto; height: 52px; display: flex; align-items: center; gap: 10px;
-    padding: 0 12px; padding-top: env(safe-area-inset-top);
-    background: var(--bg); border-bottom: 1px solid var(--border); position: relative; z-index: 30;
+    flex: 0 0 auto; height: calc(var(--crumb-h) + env(safe-area-inset-top)); display: flex; align-items: center; gap: 1px;
+    padding: 0 6px; padding-top: env(safe-area-inset-top);
+    background: var(--surface-2); border-bottom: 1px solid var(--border); position: relative; z-index: 30;
   }
-  header .title { font-size: 17px; font-weight: 600; flex: 1; min-width: 0;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  header .folder-chip {
-    display: none; flex: 1; min-width: 0; height: 40px; border-radius: 10px;
-    align-items: center; justify-content: center; gap: 7px; padding: 0 10px;
-    font-size: 16px; font-weight: 700;
+  header .sp { flex: 1; min-width: 0; }
+  /* The crumb answers one question — where are you (§1.4). The connection, the
+     diffstat and the quota moved to the status bar; the agent moves to the
+     engine dock. What is left is path › session title. */
+  .crumb-path {
+    flex: 0 1 auto; min-width: 0; display: flex; align-items: baseline;
+    padding: 4px 6px; border-radius: 6px; text-align: left;
+    font-family: var(--mono); font-size: 12px;
+    color: var(--muted); white-space: nowrap; overflow: hidden;
   }
-  header .folder-chip:hover, header .folder-chip:active { background: var(--surface-2); }
-  header .folder-chip > svg { width: 17px; height: 17px; color: var(--muted); flex: 0 0 auto; }
-  header .folder-chip .nm { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  header .folder-chip .chev { display: grid; place-items: center; color: var(--muted); }
-  header .folder-chip .chev svg { width: 14px; height: 14px; }
-  /* below the desktop-sidebar breakpoint the folder switcher replaces the title */
-  @media (max-width: 859px) {
-    header .title { display: none; }
-    header .folder-chip { display: flex; }
-  }
-  header .conn { font-size: 12px; font-weight: 500; color: var(--muted);
-    display: inline-flex; align-items: center; gap: 5px; margin-right: 4px; }
-  header .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  header .conn.on .dot { background: var(--ok); }
-  header .conn.off .dot { background: var(--err); }
-  /* ---- active-agent pill (identity + running cue + switcher) ---- */
-  .agent-pill-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
-  .agent-pill {
-    display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 9px 0 7px;
-    border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface);
-    color: var(--text); font-size: 13px; font-weight: 650; cursor: pointer;
-    transition: background .12s, box-shadow .12s; flex: 0 0 auto;
-  }
-  .agent-pill:hover:not(:disabled) { background: var(--surface-2); }
-  .agent-pill:disabled { opacity: .55; cursor: default; }
-  .agent-pill.label { cursor: default; }
-  .agent-pill.running { border-color: transparent; box-shadow: 0 0 0 1.5px var(--an); }
-  .agent-pill .nm { white-space: nowrap; }
-  .agent-pill .chev { display: grid; place-items: center; color: var(--muted); }
-  .agent-pill .chev svg { width: 14px; height: 14px; }
+  .crumb-path:hover { background: var(--surface); color: var(--text); }
+  /* The parents are context, the folder itself is the answer — so only the
+     folder gets ink, and the parents are the first thing cut when it is tight. */
+  .crumb-path .up { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .crumb-path b { flex: 0 0 auto; color: var(--text); font-weight: 600; }
+  .crumb-path .sep { flex: 0 0 auto; color: var(--faint); white-space: pre; }
+  .crumb-path .ttl { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 640px) { .crumb-path .up { display: none; } }
   /* Universal "working" indicator: three dots fading in sequence (typing-style).
-     Same shape for every agent; colour tracks the host so you can still tell who's
-     running at a glance. */
+     Same shape for every agent — state, not identity. */
   .working-dots { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
   .working-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor;
     animation: working-bounce 1.2s infinite; }
@@ -191,30 +217,14 @@
   .working-dots i:nth-child(3) { animation-delay: .4s; }
   @keyframes working-bounce { 0%, 60%, 100% { opacity: .25; transform: translateY(0); }
     30% { opacity: 1; transform: translateY(-2px); } }
-  .agent-pill .working-dots { color: var(--an); }
   @keyframes agent-pulse { 0%, 100% { opacity: .35; transform: scale(.8); } 50% { opacity: 1; transform: scale(1.15); } }
-  .mark { width: 20px; height: 20px; flex: 0 0 auto; display: grid; place-items: center; }
-  .mark svg { width: 20px; height: 20px; }
-  .mark.codex { color: var(--agent-codex); }
-  .mark.opencode { color: var(--agent-opencode); }
-  .mark.mono { border-radius: 6px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 800; }
-  .agent-scrim { position: fixed; inset: 0; z-index: 40; }
-  .agent-menu {
-    position: absolute; z-index: 50; top: calc(100% + 6px); right: 0; min-width: 220px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    box-shadow: var(--shadow); padding: 6px; display: flex; flex-direction: column; gap: 2px;
-  }
-  .agent-menu .agent-opt-row { display: flex; align-items: center; gap: 4px; }
-  .agent-menu .agent-opt { display: flex; align-items: center; gap: 10px; flex: 1;
-    text-align: left; padding: 8px 10px; border-radius: 8px; }
-  .agent-menu .agent-opt:hover { background: var(--surface-2); }
-  .agent-menu .agent-opt .col { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
-  .agent-menu .agent-opt .col .sub { font-size: 12px; color: var(--muted);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .agent-menu .agent-opt .gt { margin-left: auto; color: var(--ok); font-weight: 700; flex: 0 0 auto; }
-  /* Re-login lock button: used both inside the agent switcher (one per agent)
-     and inline next to the single-agent pill (.agent-solo), so keep it unscoped. */
-  .agent-solo { display: inline-flex; align-items: center; gap: 4px; }
+  /* The empty state's oversized identity glyph is muted like every other
+     identity mark — the brand colour only comes back under "hue" (§1.2). */
+  /* The agent glyph, in the agent's own colour — codex and opencode carry
+     theirs inside the SVG, claude's is drawn in currentColor, so without this
+     the three of them disagree (the same fix .sess-item .mark.who.claude needs). */
+  .empty .robot { color: var(--agent-claude); }
+  /* Re-login button — one per agent inside the engine dock's menu. */
   .agent-login-btn { width: 34px; height: 34px; border-radius: 8px;
     display: grid; place-items: center; color: var(--muted); flex: 0 0 auto;
     border: 1px solid transparent; background: transparent; cursor: pointer; }
@@ -227,15 +237,22 @@
   }
   .icon-btn:hover { background: var(--surface-2); }
   .icon-btn svg { width: 22px; height: 22px; }
-  .pending-btn { position: relative; color: var(--accent); }
+  /* In the crumb the controls are chrome, not content — one size down, and the
+     hover wash is the panel colour so it reads against the crumb's own fill. */
+  header .icon-btn { width: 30px; height: 30px; border-radius: 7px; color: var(--muted); }
+  header .icon-btn:hover { background: var(--surface); color: var(--text); }
+  header .icon-btn svg { width: 17px; height: 17px; }
+  /* A prompt waiting on an answer is "needs you", which is amber — not red;
+     red is failure (§1.1). */
+  .pending-btn { position: relative; color: var(--warn); }
   .pending-btn .badge {
     position: absolute; top: 2px; right: 2px; min-width: 18px; height: 18px; padding: 0 5px;
-    border-radius: 999px; display: grid; place-items: center; background: var(--err); color: #fff;
+    border-radius: 999px; display: grid; place-items: center; background: var(--warn); color: #fff;
     font-size: 11px; font-weight: 800; line-height: 1; border: 2px solid var(--bg);
   }
   .pending-scrim { position: fixed; inset: 0; z-index: 40; }
   .pending-menu {
-    position: fixed; z-index: 50; top: calc(52px + env(safe-area-inset-top) + 6px); right: 58px;
+    position: fixed; z-index: 50; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); right: 58px;
     width: min(360px, calc(100vw - 20px)); background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: 16px; box-shadow: var(--shadow); overflow: hidden; transform-origin: top right; animation: pop .14s ease-out;
   }
@@ -257,32 +274,8 @@
     background: var(--permission-allow-bg); color: var(--permission-allow-text); border-color: var(--permission-allow-bg);
   }
   .pending-actions button.allow:active { background: var(--permission-allow-active-bg); }
-  /* ---- running tasks ---- */
-  .running-btn { position: relative; color: var(--accent); }
-  .running-btn .badge {
-    position: absolute; top: 2px; right: 2px; min-width: 18px; height: 18px; padding: 0 5px;
-    border-radius: 999px; display: grid; place-items: center; background: var(--accent); color: #fff;
-    font-size: 11px; font-weight: 800; line-height: 1; border: 2px solid var(--bg);
-  }
-  .running-item {
-    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-    padding: 12px 14px; background: none; border: none; cursor: pointer;
-  }
-  .running-item + .running-item { border-top: 1px solid var(--border); }
-  .running-item:hover { background: var(--surface-2); }
-  .running-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
-  .running-main .name { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .running-main .sub { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-  .running-main .folder-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .running-state {
-    flex: none; font-size: 11px; font-weight: 800; padding: 3px 8px; border-radius: 999px;
-    background: var(--surface-2); color: var(--muted);
-  }
-  .running-state.active { color: var(--accent); }
-  .running-state.awaiting-input { color: var(--err); }
   @media (max-width: 640px) {
     header { gap: 6px; padding-left: 8px; padding-right: 8px; }
-    header .conn { display: none; }
     .pending-scrim { background: #00000070; backdrop-filter: blur(2px); }
     .pending-menu {
       top: auto; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom));
@@ -292,14 +285,14 @@
 
   /* ---- sessions panel ---- */
   #panel {
-    position: absolute; top: calc(52px + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
+    position: absolute; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
     max-width: 460px; background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--radius); box-shadow: var(--shadow); z-index: 25; overflow: hidden;
     transform-origin: top center; display: none; flex-direction: column;
-    max-height: calc(100vh - 52px - env(safe-area-inset-top) - 14px);
+    max-height: calc(100vh - var(--crumb-h) - env(safe-area-inset-top) - 14px);
   }
   @supports (height: 100dvh) {
-    #panel { max-height: calc(100dvh - 52px - env(safe-area-inset-top) - 14px); }
+    #panel { max-height: calc(100dvh - var(--crumb-h) - env(safe-area-inset-top) - 14px); }
   }
   #panel.open { display: flex; animation: pop .14s ease-out; }
   @keyframes pop { from { opacity: 0; transform: translateY(-6px) scale(.99); } }
@@ -352,7 +345,7 @@
   .dir:hover { background: var(--surface-2); }
   .dir .fi { color: var(--accent); display: grid; place-items: center; flex: 0 0 auto; }
   .dir .nm { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .dir .git { margin-left: auto; flex: 0 0 auto; font-size: 11px; color: var(--ok); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
+  .dir .git { margin-left: auto; flex: 0 0 auto; font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
   .fb-foot {
     flex: 0 0 auto; padding: 10px 12px; padding-bottom: calc(10px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; background: var(--bg);
@@ -370,15 +363,68 @@
     width: 100%; padding: 11px 12px; border-radius: 11px; border: 1px solid var(--border);
     background: var(--surface-2); color: var(--text); outline: none; font-size: 15px;
   }
-  /* sidebar Recent/Conversations tabs */
-  .sidebar-tabs { display: flex; gap: 4px; padding: 4px 10px 8px; }
-  .sidebar-tab {
-    flex: 1 1 0; min-height: 34px; padding: 7px 10px; border-radius: 9px;
-    font-size: 13px; font-weight: 700; color: var(--muted); background: transparent;
+  /* ---- sessions panel header ----
+     No tabs (§1.3): one list, two views, and the control says in words which
+     view you are in rather than leaving it to be read off an icon. */
+  .sb-head {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 10px;
+    height: 30px; background: var(--surface-2); border-bottom: 1px solid var(--border);
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
   }
-  .sidebar-tab.active { color: var(--accent); background: var(--surface-2); }
-  .sidebar-tab:hover:not(.active) { background: var(--surface-2); color: var(--text); }
+  .sb-head .qty { font-family: var(--mono);
+    font-size: 10.5px; letter-spacing: 0; text-transform: none; color: var(--faint); }
+  .sb-head .sp { flex: 1; min-width: 0; }
+  .view-wrap { position: relative; flex: 0 0 auto; }
+  .view-btn {
+    display: inline-flex; align-items: center; gap: 3px; height: 21px; padding: 0 5px; border-radius: 4px;
+    font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0; text-transform: none; color: var(--muted);
+  }
+  .view-btn:hover { background: var(--surface); color: var(--text); }
+  .view-btn svg { width: 11px; height: 11px; }
+  /* Above .amenu-scrim (40), like .amenu is: the scrim is transparent here, so
+     a menu underneath it stays visible while the scrim eats every click on it. */
+  .view-menu {
+    position: absolute; right: 0; top: 24px; z-index: 50; min-width: 158px; padding: 4px;
+    background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px;
+    box-shadow: var(--shadow);
+  }
+  .view-item {
+    display: flex; align-items: center; gap: 7px; width: 100%; padding: 6px 7px; border-radius: 5px;
+    text-align: left; font-size: 13px; letter-spacing: 0; text-transform: none; color: var(--text);
+  }
+  .view-item:hover { background: var(--surface-2); }
+  .view-item .tick { flex: 0 0 auto; display: grid; place-items: center; width: 13px; color: var(--text); }
+  .view-item .tick svg { width: 13px; height: 13px; }
   #panel .recent-tab { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  /* ---- by folder ----
+     The folder is the header, so its rows stop repeating the folder name and
+     get shorter; they hang off it on a hairline spine. */
+  .fgroup {
+    display: flex; align-items: center; gap: 7px; width: 100%; padding: 8px 9px 4px;
+    text-align: left; color: var(--text);
+  }
+  .fgroup:hover { background: var(--surface-2); }
+  .fgroup .tw { flex: 0 0 auto; display: grid; place-items: center; color: var(--faint); transition: transform .12s; }
+  .fgroup .tw svg { width: 12px; height: 12px; }
+  .fgroup.closed .tw { transform: rotate(-90deg); }
+  .fgroup .fi { flex: 0 0 auto; display: grid; place-items: center; color: var(--faint); }
+  .fgroup .fi svg { width: 14px; height: 14px; }
+  .fgroup .fname {
+    flex: 1; min-width: 0; font-family: var(--mono);
+    font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .fgroup .fcount { flex: 0 0 auto; font-family: var(--mono);
+    font-size: 10.5px; color: var(--faint); }
+  .fkids { position: relative; padding-bottom: 4px; }
+  .fkids::before { content: ""; position: absolute; left: 16px; top: 0; bottom: 6px; width: 1px; background: var(--border); }
+  .fkids .sess-item { padding-left: 26px; }
+  /* Inside the tree the active marker sits on the spine, not at the panel edge. */
+  .fkids .sess-item.active { box-shadow: none; }
+  .fkids .sess-row:has(.sess-item.active)::before {
+    content: ""; position: absolute; left: 16px; top: 3px; bottom: 3px; width: 2px; background: var(--ink);
+  }
+  /* the hairline under the pinned needs-you / running rows in the latest view */
   /* lone Recent section shouldn't trail a divider; the divider only separates it from Current */
   .recent-tab .recent-section:last-child { border-bottom: none; margin-bottom: 0; }
   .recent-section {
@@ -389,8 +435,8 @@
   #panel .all-section { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
   .sess-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 6px 8px; }
   .sess-item {
-    display: flex; align-items: baseline; gap: 10px; width: 100%;
-    padding: 12px 12px; border-radius: 11px; text-align: left;
+    display: flex; align-items: baseline; gap: 8px; width: 100%;
+    padding: 7px 10px; border-radius: 8px; text-align: left;
   }
   .sess-item:hover { background: var(--surface-2); }
   /* The conversation the main view is showing. A background wash alone was the
@@ -403,21 +449,27 @@
     box-shadow: inset 3px 0 0 var(--accent);
   }
   .sess-item.active .name { color: var(--accent); }
-  .sess-item.recent { padding-block: 10px; }
+  .sess-item.recent { padding-block: 6px; }
   .sess-item.with-folder { align-items: center; }
   /* Same tint the default skin hardcoded, but derived — so it agrees with the
      rail and the title in the skins where --accent is a near-white or near-black
      neutral instead of the warm default. */
   .sess-item.recent.active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .sess-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .sess-item .name { flex: 1; min-width: 0; font-size: 16px; font-weight: 600;
+  .sess-item .name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sess-main .name { flex: 0 1 auto; }
   .folder-name {
-    min-width: 0; color: var(--muted); font-size: 12px; font-weight: 600;
+    min-width: 0; color: var(--faint); font-size: 10.5px; font-weight: 400;
+    font-family: var(--mono);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .sess-item .when { font-size: 13px; color: var(--muted); flex: 0 0 auto; }
+  .sess-item .when { flex: 0 0 auto; color: var(--faint);
+    font-family: var(--mono); font-size: 10.5px; }
+  /* Under a folder header the folder name is the header — repeating it on every
+     child is the same fact twice (§1.4), and dropping it shortens the row. */
+  .fkids .folder-name { display: none; }
+  .fkids .sess-item { padding-block: 5px; }
   /* Row wrapper: the session button and its delete control are siblings (a
      <button> can't nest another). The trash overlays the row's right edge and
      is revealed on hover — or on focus, so it stays keyboard-reachable
@@ -453,18 +505,32 @@
   .sess-confirm .rename-input:focus { border-color: var(--accent); }
   .sess-confirm .actions { display: flex; gap: 8px; padding: 10px 14px 0; }
   .sess-confirm .actions .btn { flex: 1; }
-  /* Per-row agent mark in the unified (cross-agent) list — a touch smaller than
-     the AgentPill's, vertically centered against the title row. */
-  .sess-item .mark { width: 16px; height: 16px; flex: 0 0 auto; align-self: center; }
-  .sess-item .mark svg { width: 16px; height: 16px; }
-  .sess-item .mark.mono { font-size: 10px; border-radius: 5px; }
-  /* Running indicator on a sidebar conversation — same pulsing dot as the AgentPill. */
-  .sess-item .run-working { flex: 0 0 auto; align-self: center; display: inline-flex; color: var(--accent); }
-  .sess-item .run-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
-    align-self: center; background: var(--accent); animation: agent-pulse 1.1s ease-in-out infinite; }
-  .sess-item .run-dot.awaiting { background: var(--err); }
+  /* Per-row identity in the unified (cross-agent) list: the agent's own glyph,
+     centred against the title row. A list this dense is scanned by shape, not
+     read word by word — an agent with no glyph falls back to its name. */
+  .sess-item .mark.who {
+    flex: 0 0 auto; align-self: center;
+    display: inline-flex; align-items: center; gap: 4px; overflow: hidden;
+    font-family: var(--mono); font-size: 10.5px; color: var(--muted);
+  }
+  .sess-item .mark.who svg { width: 15px; height: 15px; flex: 0 0 auto; }
+  /* Codex and opencode carry their own brand colours inside the SVG; claude's
+     glyph is drawn in currentColor, so without this one line it is the only
+     mark in the column rendered in grey. */
+  .sess-item .mark.who.claude { color: var(--agent-claude); }
+  .sess-item .mark.who .wm {
+    max-width: 68px; color: var(--faint); font-size: 10.5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Row state, and only state — identity is the wordmark beside it (§1.2).
+     A hollow ring is idle, filled ink is running, amber is waiting on you. */
+  .sess-item .run-working { flex: 0 0 auto; align-self: center; display: inline-flex; color: var(--text); }
+  .sess-item .run-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto;
+    align-self: center; background: var(--ink); border: 1.5px solid var(--ink);
+    animation: agent-pulse 1.1s ease-in-out infinite; }
+  .sess-item .run-dot.awaiting { background: var(--warn); border-color: var(--warn); animation: none; }
   /* Cooling-down: recently finished, lingering in Running — a muted hollow ring, no pulse. */
-  .sess-item .run-dot.cooling { background: transparent; border: 1.5px solid var(--muted); animation: none; }
+  .sess-item .run-dot.cooling { background: transparent; border-color: var(--muted); animation: none; }
   /* .search-more (搜尋全部 / 繼續搜更早) plays the same role in Conversations that
      .see-more plays in Recent — the one way out of a bounded list — so it wears the
      same style instead of falling through the bare `button` reset as plain text. */
@@ -521,6 +587,47 @@
   .search-hit-snippet mark { background: var(--hit-bg, rgba(255, 214, 0, 0.35)); color: inherit; }
   .panel-note { font-size: 0.8em; opacity: 0.6; padding: 4px 12px; }
 
+  /* ---- phone: a bottom tab bar instead of the desktop's three columns ----
+     Sheets over the chat were already "one pane at a time"; the tab bar just
+     says so out loud, and gives Changes and Sessions a badge (§3 P5). Hidden
+     from the desktop breakpoint up, where the panes are real columns. */
+  .tabbar { display: none; }
+  @media (max-width: 859px) {
+    .tabbar {
+      flex: 0 0 auto; display: flex; height: calc(52px + env(safe-area-inset-bottom));
+      padding-bottom: env(safe-area-inset-bottom);
+      background: var(--surface-2); border-top: 1px solid var(--border); z-index: 40;
+    }
+    .tabbar button {
+      flex: 1; position: relative; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 3px; color: var(--muted);
+      font-family: var(--mono); font-size: 10px;
+    }
+    .tabbar button.on { color: var(--text); }
+    .tabbar button.on::before { content: ""; position: absolute; top: 0; left: 24%; right: 24%; height: 2px; background: var(--ink); }
+    .tabbar button svg { width: 19px; height: 19px; }
+    /* A changed-file count is just a count, so it is ink; a waiting prompt is
+       "needs you", so that one — and only that one — is amber (§1.1). */
+    .tabbar .n {
+      position: absolute; top: 5px; right: calc(50% - 20px); min-width: 15px; height: 15px; padding: 0 3px;
+      border-radius: 4px; background: var(--ink); color: var(--on-ink);
+      font: 9.5px/15px var(--mono); text-align: center;
+    }
+    .tabbar button[data-t="sessions"] .n { background: var(--warn); color: #fff; }
+    /* A tab is the whole pane, not a sheet floating over the chat: no scrim, no
+       rounded card, and it stops above the bar rather than above the home
+       indicator (the bar owns that inset now). */
+    #scrim, #files-scrim { display: none !important; }
+    #panel.open, #files.open {
+      top: calc(var(--crumb-h) + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0;
+      max-width: none; max-height: none; margin: 0;
+      border: none; border-radius: 0; box-shadow: none; animation: none;
+    }
+    /* The composer belongs to the chat pane, so it goes with it. */
+    #root:has(#panel.open) footer, #root:has(#files.open) footer,
+    #root:has(#panel.open) .dock, #root:has(#files.open) .dock { display: none; }
+    #root:has(.term-panel) .statusbar { display: none; }
+  }
   /* scrim behind panel */
   #scrim { position: fixed; inset: 0; z-index: 20; display: none; }
   #scrim.open { display: block; }
@@ -586,7 +693,6 @@
   .empty { display: flex; flex-direction: column; align-items: center; justify-content: center;
     text-align: center; min-height: 52vh; gap: 8px; padding: 24px; }
   .empty .robot, .empty .codex-mark, .empty .opencode-mark { width: 84px; height: 84px; margin-bottom: 6px; }
-  .empty .codex-mark { color: var(--accent); }
   .empty .spinner { width: 34px; height: 34px; border: 3px solid var(--border); border-top-color: var(--accent);
     border-radius: 50%; animation: wspin .8s linear infinite; margin-bottom: 12px; }
   .empty h2 { margin: 0; font-size: 22px; font-weight: 600; }
@@ -602,33 +708,69 @@
   .notice .nbody { padding: 0 14px 14px; color: var(--text); font-size: 14.5px;
     border-top: 1px solid var(--border); padding-top: 12px; }
 
-  /* messages */
-  .msg { margin: 14px 0; min-width: 0; max-width: 100%; }
-  .msg.user { display: flex; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
-  .msg.user .bubble {
-    background: var(--user-bubble); padding: 11px 16px; border-radius: 20px 20px 6px 20px;
-    min-width: 0; max-width: 84%; white-space: pre-wrap; word-wrap: break-word;
-    overflow-wrap: anywhere; font-size: var(--chat-user-size);
+  /* ---- turns ----
+     A message is text on the page, not a machine artefact, so it gets no
+     bubble, no panel and no title bar (§1.3). What names it is one mono label
+     line: "YOU" on one side, the agent's wordmark on the other. */
+  .turn { margin: 0 0 22px; min-width: 0; max-width: 100%; }
+  .lbl {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+    font-family: var(--mono); font-size: 11px;
+    color: var(--faint);
   }
-  .msg.assistant { min-width: 0; max-width: 100%; }
-  .msg.user .bubble.rich { white-space: normal; } /* .md handles layout when markdown-rendered */
-  .msg.user .bubble .md > :last-child { margin-bottom: 0; }
-  .msg.user .bubble .md { font-size: var(--chat-user-size); }
-  /* assistant replies render as editorial serif (Claude-iOS feel); code stays
-     mono (via .md code) and tables stay sans for density */
-  .msg.assistant .md { font-family: var(--serif); font-size: var(--chat-assistant-size); line-height: 1.62; letter-spacing: .1px; }
-  .msg.assistant .md table { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", sans-serif; }
+  .lbl .sp { flex: 1; }
+  /* Only "you" is shouted, so the engine record beside the agent's name (model,
+     thinking level — P3) stays quiet next to it. */
+  .lbl .you { letter-spacing: .09em; text-transform: uppercase; }
+  .lbl .who { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+  .lbl .wm { color: var(--muted); }
+  /* The one place the agent's brand colour is allowed to appear, and it is off
+     unless the reader asks for it (§1.2). */
+  .idot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto;
+    background: var(--agent-color, var(--ink)); display: none; }
+  :root[data-identity="dot"] .idot, :root[data-identity="hue"] .idot { display: block; }
+  .turn.user .body { font-size: var(--chat-user-size); min-width: 0; overflow-wrap: anywhere; }
+  .turn.user .body .md { font-size: var(--chat-user-size); }
+  .turn .body > :last-child { margin-bottom: 0; }
+  /* The reply is the page's own text, in the page's own face. It used to render
+     in an editorial serif, which read as a second typographic voice against a
+     UI that is otherwise sans and mono — the reading SIZE is what makes a reply
+     comfortable, not the family, so the size and leading stay. Code is still
+     mono (via .md code). */
+  .turn.agent .md { font-size: var(--chat-assistant-size); line-height: 1.62; letter-spacing: .1px; }
+  /* Thinking folds into the label line — it is not its own box. */
+  details.think { min-width: 0; }
+  details.think > summary {
+    list-style: none; display: inline-flex; align-items: center; gap: 3px;
+    cursor: pointer; color: var(--faint); user-select: none;
+  }
+  details.think > summary::-webkit-details-marker { display: none; }
+  details.think > summary:hover { color: var(--text); }
+  details.think > summary svg { width: 11px; height: 11px; }
+  details.think[open] > summary svg { transform: rotate(180deg); }
+  details.think .in {
+    margin: 8px 0 2px; padding-left: 11px; border-left: 1px solid var(--border-strong);
+    text-transform: none; letter-spacing: 0; color: var(--muted);
+  }
+  /* Reasoning is a note to itself, not the reply — smaller and quiet, so it
+     never competes with the answer above it. */
+  details.think .in .md {
+    font-size: var(--chat-secondary-size); line-height: 1.6; letter-spacing: 0;
+  }
+  details.think .in .md + .md { margin-top: .6em; }
+  /* An open thought is a block inside the label row, so the row must stop
+     centring its items against it. */
+  .lbl:has(details.think[open]) { align-items: flex-start; }
   /* per-message "copy" button under the text. Subtle by default, brightens on
-     hover/focus; on the user side it sits below the bubble, right-aligned. */
+     hover/focus. */
   .msg-copy {
     display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
     padding: 3px 8px; border: 0; border-radius: 8px; background: transparent;
     color: var(--muted); font-size: 12px; cursor: pointer; opacity: .6;
     transition: opacity .12s, background .12s, color .12s; -webkit-tap-highlight-color: transparent;
   }
-  .msg.user .msg-copy { flex: 0 0 100%; justify-content: flex-end; }
   .msg-copy:hover, .msg-copy:focus-visible { opacity: 1; background: var(--surface-2); color: var(--text); }
-  .msg-copy.copied { opacity: 1; color: #3a9b5c; }
+  .msg-copy.copied { opacity: 1; color: var(--text); }
   .msg-copy > svg { width: 14px; height: 14px; flex: 0 0 auto; }
   .msg-copy-label { line-height: 1; }
   @media (hover: none) { .msg-copy { opacity: .8; } }
@@ -637,7 +779,7 @@
   .md p { margin: 0 0 10px; } .md p:last-child { margin-bottom: 0; }
   .md pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     max-width: 100%; padding: 12px 14px; overflow: auto; margin: 10px 0; }
-  .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--chat-code-size); }
+  .md code { font-family: var(--mono); font-size: var(--chat-code-size); }
   .md :not(pre) > code { background: var(--surface-2); padding: 1.5px 5px; border-radius: 6px; }
   .md ul, .md ol { margin: 8px 0; padding-left: 22px; }
   .md a { color: var(--accent); }
@@ -667,36 +809,33 @@
   @keyframes wbl { 0%, 60%, 100% { opacity: .2; } 30% { opacity: 1; } }
   .working .wsec { opacity: .7; font-variant-numeric: tabular-nums; }
 
-  .thinking { margin: 12px 0; }
-  .thinking summary { color: var(--muted); font-size: 14px; cursor: pointer; list-style: none;
-    display: inline-flex; align-items: center; gap: 7px; user-select: none; }
-  .thinking summary::-webkit-details-marker { display: none; }
-  .thinking summary svg { width: 16px; height: 16px; }
-  .thinking .md { color: var(--muted); font-size: var(--chat-secondary-size); margin-top: 8px;
-    border-left: 2px solid var(--border-strong); padding-left: 12px; }
-
-  /* tool call card */
-  .tool { border: 1px solid var(--border); background: var(--surface); border-radius: 13px;
+  /* tool call card — the frame means "the agent did this" (§1.3). Header is the
+     tool's kind, the path it touched, and whatever is left to say on the right. */
+  .tool { border: 1px solid var(--border); background: var(--surface); border-radius: 10px;
     min-width: 0; max-width: 100%; margin: 12px 0; overflow: hidden; }
-  .tool > summary { display: flex; align-items: center; gap: 10px; padding: 11px 13px;
-    cursor: pointer; list-style: none; user-select: none; }
+  .tool > summary { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 11px;
+    cursor: pointer; list-style: none; user-select: none; background: var(--surface-2);
+    font-family: var(--mono); font-size: 12.5px; }
+  .tool[open] > summary { border-bottom: 1px solid var(--border); }
   .tool > summary::-webkit-details-marker { display: none; }
-  .tool .ticon { width: 22px; height: 22px; flex: 0 0 auto; color: var(--muted); display: grid; place-items: center; }
-  .tool .ticon svg { width: 18px; height: 18px; }
-  .tool .ttitle { flex: 1; min-width: 0; font-weight: 600; font-size: 15px; white-space: nowrap;
+  .tool .ticon { width: 16px; height: 16px; flex: 0 0 auto; color: var(--text); display: grid; place-items: center; }
+  .tool .ticon svg { width: 14px; height: 14px; }
+  .tool .tkind { flex: 0 0 auto; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; font-size: 10.5px; }
+  .tool .ttitle { flex: 1; min-width: 0; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
-  .tool .tstatus { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
-    background: var(--surface-2); color: var(--muted); flex: 0 0 auto; }
-  .tool .tstatus.in_progress { color: var(--warn); }
-  .tool .tstatus.completed { color: var(--ok); }
+  /* A finished tool call is silent (§1.1): no badge, no colour. Amber is
+     reserved for "needs you", so a running tool is ink, not amber. */
+  .tool .tstatus { font-size: 10.5px; color: var(--faint); flex: 0 0 auto; }
+  .tool .tstatus.in_progress, .tool .tstatus.pending { color: var(--text); }
+  .tool .tstatus.completed { display: none; }
   .tool .tstatus.failed { color: var(--err); }
-  .tool .tbody { min-width: 0; max-width: 100%; padding: 0 13px 13px; border-top: 1px solid var(--border); padding-top: 11px; }
-  .tool .loc { font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
+  .tool .tbody { min-width: 0; max-width: 100%; padding: 11px 13px 13px; }
+  .tool .loc { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
   .tool .tc-item { min-width: 0; max-width: 100%; overflow: hidden; }
   .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 
   /* diff */
-  .diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+  .diff { font-family: var(--mono); font-size: 12.5px;
     min-width: 0; max-width: 100%; border: 1px solid var(--border); border-radius: 10px; overflow: auto; margin: 8px 0; }
   .diff .path { padding: 7px 11px; background: var(--surface-2); color: var(--muted);
     border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -720,12 +859,13 @@
   .plan li.completed .txt { text-decoration: line-through; }
   .plan li.in_progress .txt { font-weight: 600; }
 
-  /* permission card */
-  .perm { border: 1px solid var(--border-strong); background: var(--surface); border-radius: 14px;
-    margin: 14px 0; padding: 14px; box-shadow: var(--shadow); }
-  .perm .ph { display: flex; align-items: center; gap: 9px; font-weight: 600; margin-bottom: 4px; }
-  .perm .ph svg { width: 20px; height: 20px; color: var(--permission-allow-bg); }
-  .perm .sub { color: var(--muted); font-size: 14px; margin-bottom: 12px; overflow-wrap: anywhere; }
+  /* permission card — amber is reserved for "needs you", so a 2px amber edge
+     carries the whole signal and the header strip is gone (§1.1, §1.3). */
+  .perm { border: 1px solid var(--border); border-left: 2px solid var(--warn); background: var(--surface);
+    border-radius: 10px; margin: 14px 0; padding: 12px 13px; }
+  .perm .q { font-size: var(--chat-secondary-size); margin-bottom: 3px; overflow-wrap: anywhere; }
+  .perm .sub { color: var(--warn); font-size: 11.5px; margin-bottom: 10px;
+    font-family: var(--mono); }
   .perm .opts { display: flex; flex-wrap: wrap; gap: 8px; }
   .perm .opts button { padding: 9px 14px; border-radius: 10px; font-weight: 600; font-size: 14px;
     border: 1px solid var(--border-strong); background: var(--surface-2); }
@@ -751,6 +891,60 @@
 
   .err-line { color: var(--err); font-size: var(--chat-secondary-size); margin: 12px 0; }
 
+  /* ---- engine dock ----
+     Bottom-right of the message pane, outside the input box. A row of its own
+     between the thread and the composer, so it never competes with the session
+     title in the crumb and never moves as the textarea grows. Costs 28px. */
+  /* Same column as the composer, so the chip's right edge lines up with the
+     input's rather than running out to the pane's edge: 760px of content plus
+     the 12px gutters footer pads with, box-sizing being border-box here. */
+  .dock { position: relative; flex: 0 0 auto; display: flex; align-items: center;
+    width: min(784px, 100%); margin: 0 auto; padding: 7px 12px; }
+  .dock .sp { flex: 1; min-width: 0; }
+  .mchip {
+    display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px;
+    border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface);
+    font-family: var(--mono); font-size: 11px;
+    color: var(--muted); flex: 0 1 auto; min-width: 0; max-width: 100%;
+  }
+  .mchip:hover { border-color: var(--muted); color: var(--text); }
+  /* NOT `.mode` — the composer's own pill owns that class (13.5px/600), and it
+     was leaking into this chip and making the two ends of the row disagree. */
+  .mchip-mode .am { color: var(--text); }
+  .mchip.running { border-color: var(--muted); }
+  .mchip .wm, .mchip .am { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mchip .eff, .mchip .el { color: var(--text); flex: 0 0 auto; }
+  .mchip .el { font-variant-numeric: tabular-nums; }
+  .mchip .sep { color: var(--faint); flex: 0 0 auto; }
+  .mchip .chev { display: grid; place-items: center; color: var(--faint); flex: 0 0 auto; }
+  .mchip .chev svg { width: 11px; height: 11px; }
+  /* Running: the same ink ring the mockup spins, sized to the chip. */
+  .mchip .spin { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto;
+    border: 1.5px solid var(--border-strong); border-top-color: var(--ink);
+    animation: wspin .8s linear infinite; }
+  /* The dock's menu is the action sheet's chrome, anchored to the chip rather
+     than to the window — on a phone the stylesheet turns it into a sheet, same
+     as .amenu everywhere else. */
+  .amenu.engine-menu { position: absolute; right: 12px; bottom: calc(100% + 4px); top: auto;
+    width: 260px; max-height: min(60vh, 460px); transform-origin: bottom right; }
+  /* The mode chip is at the other end of the row, so its menu hangs the other way. */
+  .amenu.engine-menu.mode-menu { right: auto; left: 12px; transform-origin: bottom left; }
+  /* Three short lists, not a settings screen: tighter rows than the action
+     sheet's, and no row is allowed to wrap a folder path into three lines. */
+  .engine-menu .arow { padding: 8px 12px; font-size: 13.5px; }
+  .engine-menu .arow + .arow, .engine-menu .agent-opt-row + .agent-opt-row .arow { border-top: none; }
+  .engine-menu .arow .col { flex: 1; min-width: 0; }
+  .engine-menu .arow .col > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .engine-menu .arow.on { color: var(--text); background: var(--surface-2); }
+  .engine-menu .arow .gt { color: var(--text); }
+  .engine-menu .agent-opt-row { display: flex; align-items: center; gap: 2px; padding-right: 6px; }
+  /* .amenu .arow is width:100%, which would squeeze its login sibling to zero. */
+  .engine-menu .agent-opt-row .arow { width: auto; flex: 1; min-width: 0; }
+  .engine-menu .agent-login-btn { flex: 0 0 auto; width: 28px; height: 28px; }
+  .engine-menu .agent-login-btn svg { width: 15px; height: 15px; }
+  .engine-menu .amenu-subhead { padding: 9px 12px 3px; }
+  .engine-menu .amenu-subhead:first-child { padding-top: 7px; }
+
   /* ---- composer ---- */
   footer { flex: 0 0 auto; padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
     background: linear-gradient(to top, var(--bg) 70%, transparent); }
@@ -760,15 +954,20 @@
   .tipbar .x { margin-left: 4px; }
   .tipbar #tip-reconnect { margin-left: auto; padding: 3px 11px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600; }
   .tipbar #tip-reconnect:hover { background: var(--accent-press); }
-  .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface);
-    border: 1px solid transparent; border-radius: var(--radius); padding: 8px 8px 8px 12px;
-    /* S4 edge accent: identity-coloured ring around the input instead of the neutral border */
-    box-shadow: 0 0 0 1.5px var(--agent-color, var(--accent)), var(--shadow); }
+  /* The composer is one of the few things that keeps a frame (§1.3), but the
+     frame is a hairline, not an identity-coloured ring — it brightens on focus
+     instead of announcing which agent is answering. */
+  .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface-2);
+    border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 6px 6px 10px; }
+  .composer:focus-within { border-color: var(--muted); }
   /* CodeMirror-backed composer input: the document is plain markdown, rendered
      inline as you type. Override CodeMirror's monospace defaults so prose uses
      the app font; code spans/blocks switch back to monospace below. */
   .composer .cm-input { width: 100%; }
-  .composer .cm-editor { background: transparent; font-size: var(--composer-text-size); }
+  /* What you type and what it becomes are the same message, so they are the
+     same size — the composer used to run a scale of its own, half a pixel off
+     the user turn it produces, at every tier. */
+  .composer .cm-editor { background: transparent; font-size: var(--chat-user-size); }
   .composer .cm-editor.cm-focused { outline: none; }
   .composer .cm-scroller { max-height: 200px; line-height: 1.5; font-family: inherit; }
   .composer .cm-content { padding: 6px 2px; color: var(--text); caret-color: var(--text); }
@@ -779,10 +978,10 @@
   .composer .cm-content ::selection { background: var(--surface-2); }
   .composer .cm-editor.cm-focused .cm-selectionBackground { background: color-mix(in srgb, var(--accent) 28%, transparent); }
   /* markdown rendering: inline code, fenced blocks, links, markers */
-  .composer .cm-md-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  .composer .cm-md-code { font-family: var(--mono);
     font-size: var(--chat-code-size); background: var(--surface-2); border-radius: 4px; padding: 0 3px; }
   .composer .cm-md-codeblock { background: var(--codeblock-bg); color: var(--codeblock-fg);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--chat-code-size);
+    font-family: var(--mono); font-size: var(--chat-code-size);
     padding: 2px 10px; }
   /* The ``` fence markers and `lang` identifier also get the `t.monospace` tag,
      so they pick up .cm-md-code's chip background — which looks like a stray
@@ -805,17 +1004,22 @@
   .mode:hover { background: var(--surface-2); }
   .mode svg { width: 16px; height: 16px; }
   .mode.on { color: var(--accent); }
-  .send { position: relative; width: 38px; height: 38px; border-radius: 50%; background: var(--accent); color: var(--accent-text);
-    display: grid; place-items: center; transition: background .12s, transform .06s; }
+  /* A mono label, not a circle: send is a primary action and primary actions are
+     ink (§1.1) — the same button Allow is, in the same colour. */
+  .send { position: relative; min-width: 30px; height: 28px; padding: 0 10px; border-radius: 6px;
+    background: var(--accent); color: var(--accent-text);
+    font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 5px; transition: background .12s, transform .06s; }
   .send:hover { background: var(--accent-press); }
-  .send:active { transform: scale(.94); }
-  .send:disabled { background: transparent; color: var(--muted); cursor: default; }
-  /* Absolute-centre the glyph: iOS Safari ignores grid/flex on <button>. */
-  .send svg { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 20px; height: 20px; }
-  .send.stop { background: var(--text); color: var(--bg); }
+  .send:active { transform: scale(.96); }
+  .send:disabled { background: transparent; color: var(--faint); cursor: default; }
+  .send svg { width: 14px; height: 14px; }
+  /* Stop is not a failure and not a fifth colour — it is the same control
+     wearing an outline instead of a fill, so it can't be mistaken for send. */
+  .send.stop { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
+  .send.stop:hover { background: var(--surface); }
   /* composer image attachments: thumbnail strip above the textarea, drop hint */
-  .composer.dragover { box-shadow: 0 0 0 2px var(--accent), var(--shadow); }
+  .composer.dragover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 2px 8px; }
   .attachments .thumb { position: relative; width: 64px; height: 64px; border-radius: 10px;
     overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); }
@@ -834,7 +1038,7 @@
   /* the lines a range chip covers — "412-427" */
   .file-chip .rng {
     flex: 0 0 auto; color: var(--accent);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 700;
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700;
   }
   .file-chip .chip-x { flex: 0 0 auto; width: 16px; height: 16px; border-radius: 50%;
     display: grid; place-items: center; font-size: 10px; line-height: 1; color: var(--muted); }
@@ -876,7 +1080,7 @@
 
   /* conversation action menu — dropdown on desktop, bottom sheet on mobile */
   .amenu-scrim { position: fixed; inset: 0; z-index: 40; }
-  .amenu { position: fixed; z-index: 50; top: calc(52px + env(safe-area-inset-top) + 6px); right: 10px; width: 290px;
+  .amenu { position: fixed; z-index: 50; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); right: 10px; width: 290px;
     background: var(--surface); border: 1px solid var(--border-strong); border-radius: 16px; box-shadow: var(--shadow);
     max-height: calc(100dvh - 72px - env(safe-area-inset-top)); overflow-x: hidden; overflow-y: auto;
     overscroll-behavior: contain; transform-origin: top right; animation: pop .14s ease-out; }
@@ -890,7 +1094,7 @@
   .amenu .arow .sub { font-size: 12px; color: var(--muted); }
   .amenu .arow .gt { margin-left: auto; color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
   .amenu .arow .gt svg { width: 15px; height: 15px; }
-  .amenu .arow .sample { font-family: var(--serif); color: var(--text); min-width: 28px; text-align: right; }
+  .amenu .arow .sample { color: var(--text); min-width: 28px; text-align: right; }
   .amenu .arow .sample-small { font-size: 14px; }
   .amenu .arow .sample-default { font-size: 16px; }
   .amenu .arow .sample-large { font-size: 18px; }
@@ -970,48 +1174,80 @@
   /* Height comes from the chip plus padding (28 + 5 + 5 = 38) rather than a
      fixed value, so the home-indicator inset can be added below it instead of
      eating into it — box-sizing is border-box everywhere here. */
-  .statusbar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
-    padding: 5px 10px; padding-bottom: calc(5px + env(safe-area-inset-bottom));
-    background: var(--surface-2); border-top: 1px solid var(--border); }
-  .statusbar .sb-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px;
-    padding: 0 12px; border-radius: 8px; font-size: 13px; font-weight: 650;
-    background: var(--accent); color: var(--accent-text); transition: background .12s; }
-  .statusbar .sb-chip:hover, .statusbar .sb-chip.on { background: var(--accent-press); }
-  .statusbar .sb-chip svg { width: 15px; height: 15px; }
-  .statusbar .sb-hint { color: var(--muted); font-size: 12px; }
-  .statusbar kbd { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 3px 5px;
-    border-radius: 4px; background: var(--bg); border: 1px solid var(--border-strong); color: var(--muted); }
-  /* No physical Ctrl key to press — the button is the whole story on a phone. */
-  @media (max-width: 640px) { .statusbar .sb-hint { display: none; } }
+  /* Machine-layer facts, one row (§1.4): transport, diffstat, context, quota,
+     terminal. Segments are divided by hairlines rather than by gaps, so the row
+     reads as one instrument panel instead of a scatter of chips. */
+  .statusbar { flex: 0 0 auto; display: flex; align-items: center; min-height: 26px;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--surface-2); border-top: 1px solid var(--border);
+    font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .statusbar .sb-seg { display: inline-flex; align-items: center; gap: 6px; align-self: stretch;
+    padding: 0 10px; border-right: 1px solid var(--border); white-space: nowrap; color: inherit; }
+  .statusbar .sb-seg:first-child { border-left: 1px solid var(--border); }
+  .statusbar .sb-sp { flex: 1; min-width: 0; }
+  .statusbar .sb-seg b { font-weight: 500; font-variant-numeric: tabular-nums; }
+  .statusbar .sb-seg b.add { color: var(--ok); }
+  .statusbar .sb-seg b.del { color: var(--err); }
+  .statusbar .conn.off { color: var(--err); }
+  /* The one control in a bar that is otherwise all readouts, so it is the one
+     thing here drawn in ink rather than muted — and when the terminal is open
+     it inverts, which is the same "on" language the tab bar and the panel
+     toggles use. */
+  .statusbar .sb-term { color: var(--text); background: var(--surface); font-weight: 500; }
+  .statusbar .sb-term:hover { background: var(--bg); }
+  .statusbar .sb-term.on { background: var(--ink); color: var(--on-ink); }
+  .statusbar .sb-term.on kbd { border-color: transparent; color: inherit; opacity: .7; }
+  .statusbar .sb-term svg { width: 13px; height: 13px; }
+  .statusbar kbd { font: 10px/1 var(--mono); padding: 2px 3px;
+    border-radius: 3px; border: 1px solid var(--border-strong); color: var(--faint); }
+  /* No physical Ctrl key to press — the glyph is the whole story on a phone. */
+  @media (max-width: 640px) { .statusbar kbd { display: none; } }
   /* ---- usage gauge (right end of the status strip) ---- */
   /* margin-left:auto rather than a spacer element, so the gauge still sits
      against the right edge on a gateway with no terminal chip to its left. */
   /* Scrolls rather than clips: a clipped strip drops its rightmost windows
      silently, which reads as "that quota doesn't exist" instead of "swipe". */
-  .usage-strip { display: flex; align-items: center; gap: 9px; margin-left: auto;
-    min-width: 0; overflow-x: auto; scrollbar-width: none; font-size: 12.5px; color: var(--muted); }
+  .usage-strip { display: flex; align-items: center; align-self: stretch;
+    min-width: 0; overflow-x: auto; scrollbar-width: none; color: var(--muted); }
   .usage-strip::-webkit-scrollbar { display: none; }
-  .u-seg { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-  .u-seg:not(:first-child)::before { content: "·"; color: var(--border-strong); margin-right: 3px; }
-  .u-seg b { font-weight: 650; color: var(--text); font-variant-numeric: tabular-nums; }
-  .u-bar { width: 42px; height: 6px; border-radius: 3px; background: var(--border-strong);
-    overflow: hidden; flex: 0 0 auto; }
-  .u-bar i { display: block; height: 100%; border-radius: 3px; background: var(--muted); }
-  .u-bar i.warn { background: var(--warn); }
-  .u-bar i.err { background: var(--err); }
+  .u-seg { display: inline-flex; align-items: center; gap: 6px; align-self: stretch;
+    padding: 0 10px; border-left: 1px solid var(--border); white-space: nowrap; }
+  /* The number wears the same tone as its bar: on a phone the bars are dropped
+     and the percentage is all that is left to read. */
+  .u-seg b { font-weight: 500; color: var(--text); font-variant-numeric: tabular-nums; }
+  .u-seg b.warn { color: var(--warn); }
+  .u-seg b.err { color: var(--err); }
+  /* Which window, then when it resets — one step apart in the ramp, so they
+     stop reading as one long number. */
+  .u-seg .lb { color: var(--muted); }
+  .u-seg .note { color: var(--faint); }
+  /* Four blocks, the shape a terminal statusline uses — at 11px a quarter-full
+     block is legible where three pixels of a continuous fill are not. The tone
+     lives on the bar so the lit blocks and the percentage can't disagree. */
+  .u-bar { display: inline-flex; gap: 2px; flex: 0 0 auto; }
+  .u-bar i { width: 7px; height: 5px; border-radius: 1px; background: var(--border-strong); }
+  .u-bar i.on { background: var(--muted); }
+  .u-bar.warn i.on { background: var(--warn); }
+  .u-bar.err i.on { background: var(--err); }
   /* A phone can't fit four windows spelled out. Drop the bars and the reset
      countdowns; the percentage and its window label ("36% 5h") are the part you
      act on, and they stay. */
   @media (max-width: 640px) {
     .usage-strip .u-bar, .usage-strip .note { display: none; }
-    .usage-strip { gap: 7px; }
+    .u-seg { padding: 0 7px; }
   }
-  /* The strip — or the panel, when that is open — is now the bottom edge of the
+  /* The strip — or the panel, when that is open — is the bottom edge of the
      app, so it owns the home-indicator gap and the composer above it must stop
      reserving one of its own. */
-  #root:has(.statusbar) footer { padding-bottom: 10px; }
-  .statusbar:has(+ .term-panel) { padding-bottom: 5px; }
+  #root:has(.statusbar) footer { padding-bottom: 8px; }
+  .statusbar:has(+ .term-panel) { padding-bottom: 0; }
   .term-panel { padding-bottom: env(safe-area-inset-bottom); }
+  /* …and below the desktop breakpoint the tab bar is the bottom edge instead,
+     so it is the only one that may reserve the inset. Written here rather than
+     in the phone block above because these two rules are what it overrides. */
+  @media (max-width: 859px) {
+    .statusbar, .term-panel { padding-bottom: 0; }
+  }
   /* one chip per shell, numbered; the whole row is flush against the panel's
      top edge, under the drag handle */
   .term-tabs { flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
@@ -1087,15 +1323,15 @@
      sessions panel on the left; at 1100px+ (where a 284px sidebar, a readable
      chat column and this can coexist) it becomes a real column instead. */
   #files {
-    position: absolute; top: calc(52px + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
+    position: absolute; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
     max-width: 560px; margin-left: auto;
     background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     box-shadow: var(--shadow); z-index: 25; overflow: hidden;
     transform-origin: top center; display: none; flex-direction: column;
-    max-height: calc(100vh - 52px - env(safe-area-inset-top) - 14px);
+    max-height: calc(100vh - var(--crumb-h) - env(safe-area-inset-top) - 14px);
   }
   @supports (height: 100dvh) {
-    #files { max-height: calc(100dvh - 52px - env(safe-area-inset-top) - 14px); }
+    #files { max-height: calc(100dvh - var(--crumb-h) - env(safe-area-inset-top) - 14px); }
   }
   #files.open { display: flex; animation: pop .14s ease-out; }
   /* Expanded: the whole window, at both breakpoints. width/height must be reset
@@ -1171,7 +1407,7 @@
   .wf-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
   .wf-mark {
     flex: 0 0 auto; width: 20px; text-align: center;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--mono);
     font-size: 12px; font-weight: 800; color: var(--muted);
   }
   /* git's own status letter, in git's own colours — the lead glyph is the whole
@@ -1193,7 +1429,7 @@
   }
   .wf-counts {
     flex: 0 0 auto; display: flex; gap: 6px; font-size: 12px; font-weight: 700;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--mono);
   }
   .wf-counts .add { color: var(--ok); }
   .wf-counts .del { color: var(--err); }
@@ -1222,6 +1458,21 @@
   }
   /* the folder the lists describe, next to the panel's own name */
   .wf-cwd { font-weight: 400; color: var(--muted); }
+  /* The changes summary, folded into the panel header instead of taking a row
+     of its own (§1.3). */
+  /* On a phone this header is the only place the count appears — the status bar
+     is behind the panel — so the folder name is what gives way, not the number. */
+  /* gap, not the space in "Files ": flex collapses an anonymous item's trailing
+     white space. */
+  .wf-title:has(.wf-stat) { display: flex; align-items: baseline; gap: 6px; }
+  .wf-cwd { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .wf-stat {
+    flex: 0 0 auto; margin-left: 2px; font-weight: 400; color: var(--faint);
+    font-family: var(--mono); font-size: 11px;
+  }
+  .wf-stat b { margin-left: 5px; font-weight: 500; }
+  .wf-stat b.add { color: var(--ok); }
+  .wf-stat b.del { color: var(--err); }
 
   /* ---- review mode ---- */
   /* Working / Commits / Branch. Chips rather than a second segmented control:
@@ -1245,7 +1496,7 @@
   .rv-ref {
     display: inline-flex; align-items: center; gap: 3px; max-width: 45%;
     padding: 4px 8px; border: 1px dashed var(--border-strong); border-radius: 7px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    font-family: var(--mono); font-size: 11.5px;
     color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .rv-ref:hover { color: var(--text); border-color: var(--accent); }
@@ -1254,11 +1505,11 @@
   .rv-base input {
     flex: 1; min-width: 0; padding: 6px 9px; border: 1px solid var(--border);
     border-radius: 8px; background: var(--surface-2); color: var(--text);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    font-family: var(--mono); font-size: 12.5px;
   }
   .rv-base-hint {
     flex: 0 0 auto; color: var(--muted);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    font-family: var(--mono); font-size: 11.5px;
   }
   /* back + what you are looking at, for the two screens that take over the mode */
   .rv-bar {
@@ -1272,7 +1523,7 @@
   }
   .rv-title .dim { font-weight: 400; color: var(--muted); }
   .rv-sha {
-    flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    flex: 0 0 auto; font-family: var(--mono);
     font-size: 11.5px; color: var(--muted);
   }
   /* comments on a file, on its row in the list */
@@ -1295,16 +1546,15 @@
   .rv-cmt {
     margin: 6px 10px 10px 46px; border: 1px solid var(--border-strong);
     border-radius: 10px; background: var(--surface); overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   }
   .rv-cmt.saved { border-color: var(--border); background: var(--surface-2); }
   .rv-cmt.in-list { margin-left: 10px; }
   .rv-anchor {
     padding: 6px 10px; border-bottom: 1px solid var(--border);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted);
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
   }
   .rv-quote {
-    display: block; margin-top: 3px; color: var(--ok);
+    display: block; margin-top: 3px; color: var(--muted);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .rv-body { padding: 9px 10px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
@@ -1354,7 +1604,7 @@
   .wf-tree-row.ignored .wf-mark { opacity: .45; font-style: italic; }
   .wf-size {
     flex: 0 0 auto; font-size: 11.5px; color: var(--muted);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--mono);
   }
   .wf-find { padding: 4px 8px 8px; }
   .wf-find input {
@@ -1389,7 +1639,7 @@
   .wf-add:disabled { opacity: .45; cursor: default; }
   .wf-add.on { background: var(--accent); color: var(--accent-text); }
   .wf-add .lines {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--mono);
     font-size: 11.5px; font-weight: 700; white-space: nowrap;
   }
   /* The code in the viewer must stay selectable — .wf-row above turns selection
@@ -1430,7 +1680,7 @@
   /* text / image viewers */
   .wf-text {
     margin: 0; padding: 10px 12px; overflow: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    font-family: var(--mono); font-size: 12.5px;
     line-height: 1.5; white-space: pre; tab-size: 2;
   }
   .wf-image { padding: 12px; display: grid; place-items: center; }
@@ -1464,7 +1714,7 @@
   /* max-content so the block is as wide as its widest line: the body scrolls
      horizontally for long lines, and without this the added/deleted row tint
      would stop at the viewport edge while the code kept going past it. */
-  .udiff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; min-width: max-content; }
+  .udiff { font-family: var(--mono); font-size: 12.5px; min-width: max-content; }
   .udiff-stat { display: flex; gap: 10px; padding: 8px 12px 4px; font-weight: 800; }
   .udiff-stat .add { color: var(--ok); }
   .udiff-stat .del { color: var(--err); }

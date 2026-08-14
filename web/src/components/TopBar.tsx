@@ -1,18 +1,32 @@
 import { useState } from "react";
 import { useStore } from "../store/store.ts";
 import { ActionMenu } from "./ActionMenu.tsx";
-import { AgentPill } from "./AgentPill.tsx";
 import { PendingPermissions } from "./PendingPermissions.tsx";
-import { RunningTasks } from "./RunningTasks.tsx";
-import { basename } from "../lib/format.ts";
+import { basename, dirname } from "../lib/format.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
-import { IconClock, IconPlus, IconDots, IconFolder, IconChevronDown, IconPanel } from "../lib/icons.tsx";
-import type { AgentRef } from "../types.ts";
-export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void; onPicker: () => void; onOpenLogin?: (agent: AgentRef) => void }) {
+import { IconClock, IconPlus, IconDots, IconPanel } from "../lib/icons.tsx";
+
+// The crumb answers one question — where are you — and nothing else (§1.4).
+// The folder's parents are muted, its own name is ink, the session title trails
+// it after a "›". Tapping it opens the folder switcher, which is what the
+// separate mobile folder chip used to be for.
+function Crumb({ cwd, title, onPicker }: { cwd: string; title: string; onPicker: () => void }) {
+  const parent = dirname(cwd).replace(/^\/Users\/[^/]+/, "~").replace(/\/$/, "");
+  return (
+    <button className="crumb-path" title={cwd} onClick={onPicker}>
+      {parent && <span className="up">{parent}/</span>}
+      <b>{basename(cwd)}</b>
+      <span className="sep"> › </span>
+      <span className="ttl">{title}</span>
+    </button>
+  );
+}
+
+// Identity and the engine settings live in the dock above the composer now, so
+// the crumb carries neither the agent pill nor its re-login button (§1.4).
+export function TopBar({ onPanel, onPicker }: { onPanel: () => void; onPicker: () => void }) {
   const s = useStore();
   const sess = s.activeId ? s.sessions[s.activeId] : null;
-  const connClass = s.conn === "connected" ? "conn on" : s.conn === "offline" ? "conn off" : "conn";
-  const connText = s.conn === "connected" ? "connected" : s.conn === "offline" ? "offline" : "connecting";
   const [menu, setMenu] = useState(false);
   return (
     <header>
@@ -22,14 +36,15 @@ export function TopBar({ onPanel, onPicker, onOpenLogin }: { onPanel: () => void
       <button className={"icon-btn sessions-btn" + (s.sidebarOpen ? " on" : "")} title="Sessions"
         aria-pressed={s.sidebarOpen}
         onClick={() => { if (isDesktopSidebarWidth()) s.toggleSidebar(); else onPanel(); }}><IconClock /></button>
-      <span className="title">{sess ? sess.title : "Untitled"}</span>
-      {/* mobile-only (CSS): the title gives way to the folder switcher */}
-      <button className="folder-chip" title={s.cwd} onClick={onPicker}>
-        <IconFolder /><span className="nm">{basename(s.cwd)}</span><span className="chev"><IconChevronDown /></span>
-      </button>
-      <AgentPill onOpenLogin={onOpenLogin} />
-      <span className={connClass}><span className="dot" />{connText}</span>
-      <RunningTasks />
+      <Crumb cwd={s.cwd} title={sess ? sess.title : "Untitled"} onPicker={onPicker} />
+      <span className="sp" />
+      {/* The cross-agent RUNNING badge is gone: the sessions list pins running
+          conversations above the fold now (P4), and jumping to one is all that
+          badge ever did. The PENDING badge stays, deliberately against the
+          plan's §3 P2 note — the list pins waiting prompts too, but pinning
+          only makes them visible, and this popup is the only place a prompt on
+          an agent this client has no live connection to can be ANSWERED
+          without first switching sessions. */}
       <PendingPermissions />
       <button className="icon-btn" title="Conversation menu" onClick={() => setMenu((v) => !v)}><IconDots /></button>
       <button className="icon-btn" title="New chat" onClick={() => { if (s.agentReady) s.newSession(); }}><IconPlus /></button>

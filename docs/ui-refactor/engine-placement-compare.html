@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engine readout · placement compare — B2</title>
+<style>
+/* Six ways to show "which agent / model / thinking level is running", each in
+   its real surroundings. Position is not the only variable: the two reference
+   treatments (Claude Desktop, Codex) are borderless text, which reads calmer
+   than a bordered chip — that difference is preserved here. */
+:root {
+  --bg:#eeeeec; --panel:#fbfbfa; --panel-2:#f2f2f0;
+  --text:#17181a; --muted:#6b6d70; --faint:#96979a;
+  --line:#dcdcd8; --line-strong:#c8c8c3;
+  --ink:#17181a; --on-ink:#fbfbfa;
+  --warn:#a8781f; --ok:#3f8f5f;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang TC",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --agent:#d97757;
+}
+* { box-sizing:border-box; }
+html,body { margin:0; }
+body { background:#d9d9d5; font:13.5px/1.5 var(--sans); color:var(--text); padding:26px 22px 40px; }
+button { border:0; background:none; cursor:pointer; font:inherit; color:inherit; }
+svg { display:block; }
+
+h1 { font-size:15px; margin:0 auto 4px; width:min(1180px,100%); }
+.sub { width:min(1180px,100%); margin:0 auto 22px; font-size:12px; color:#63656a; }
+.grid { width:min(1180px,100%); margin:0 auto; display:flex; flex-direction:column; gap:26px; }
+
+.case { background:var(--panel); border:1px solid var(--line-strong); border-radius:8px; overflow:hidden; }
+.case > h2 { margin:0; padding:9px 12px; background:var(--panel-2); border-bottom:1px solid var(--line);
+  font:11px var(--mono); letter-spacing:.04em; color:var(--muted); display:flex; align-items:center; gap:10px; }
+.case > h2 b { color:var(--text); font-weight:600; letter-spacing:0; }
+.case > h2 .tag { margin-left:auto; font-size:10.5px; color:var(--faint); }
+.case > h2 .pick { background:var(--ink); color:var(--on-ink); border-radius:3px; padding:1px 6px; font-size:10px; letter-spacing:.06em; }
+
+/* ---- shared mini-app pieces ---- */
+.mini { padding:0; }
+.crumb { height:32px; display:flex; align-items:center; gap:9px; padding:0 10px; background:var(--panel-2); border-bottom:1px solid var(--line); }
+.crumb .path { font:11.5px var(--mono); color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.crumb .path b { color:var(--text); font-weight:600; }
+.crumb .sp { flex:1; }
+.ic { width:26px; height:26px; border-radius:4px; display:grid; place-items:center; color:var(--muted); flex:0 0 auto; }
+.ic svg { width:15px; height:15px; }
+.tail { padding:14px 14px 10px; background:var(--panel); }
+.tail .txt { font:14.5px/1.6 var(--sans); color:var(--text); margin-bottom:12px; }
+.tail .wk { display:flex; align-items:center; gap:8px; font:11.5px var(--mono); color:var(--muted); }
+.dock { display:flex; align-items:center; padding:0 14px 8px; background:var(--panel); }
+.dock .sp { flex:1; }
+.composer { background:var(--panel); border-top:1px solid var(--line); padding:8px 10px 9px; }
+.cwrap { border:1px solid var(--line-strong); border-radius:6px; background:var(--panel-2); }
+.cw-top { display:flex; align-items:flex-start; gap:10px; padding:8px 9px 6px; font-size:14.5px; color:var(--faint); }
+.cw-top .sp { flex:1; }
+.crow { display:flex; align-items:center; gap:2px; padding:0 6px 6px; }
+.cbtn { width:27px; height:27px; border-radius:4px; display:grid; place-items:center; color:var(--muted); }
+.cbtn svg { width:15px; height:15px; }
+.crow .sp { flex:1; }
+.send { height:27px; padding:0 11px; border-radius:4px; background:var(--ink); color:var(--on-ink);
+  display:inline-flex; align-items:center; gap:5px; font:11.5px var(--mono); font-weight:600; }
+.send svg { width:13px; height:13px; }
+.below { display:flex; align-items:center; gap:10px; padding:7px 12px 2px; }
+.below .sp { flex:1; }
+.status { height:26px; display:flex; align-items:center; background:var(--panel-2); border-top:1px solid var(--line);
+  font:11px var(--mono); color:var(--muted); }
+.status .s { display:inline-flex; align-items:center; gap:6px; height:100%; padding:0 10px; border-right:1px solid var(--line); white-space:nowrap; }
+.status .s.first { border-left:1px solid var(--line); }
+.status .sp { flex:1; }
+.status b { color:var(--text); font-weight:500; }
+.status svg { width:13px; height:13px; }
+.ubar { width:38px; height:4px; border-radius:1px; background:var(--line-strong); overflow:hidden; }
+.ubar i { display:block; height:100%; background:var(--muted); }
+.ubar i.warn { background:var(--warn); }
+kbd { font:10px var(--mono); border:1px solid var(--line-strong); border-radius:3px; padding:0 3px; }
+
+/* ---- the readout, three treatments ---- */
+.spin { width:10px; height:10px; border-radius:50%; border:1.5px solid var(--line-strong); border-top-color:var(--ink);
+  animation:sp .8s linear infinite; flex:0 0 auto; }
+@keyframes sp { to { transform:rotate(360deg); } }
+.idot { width:7px; height:7px; border-radius:2px; background:var(--agent); flex:0 0 auto; }
+.sep { color:var(--faint); }
+.eff { color:var(--text); }
+.el { color:var(--text); }
+.chev svg { width:10px; height:10px; color:var(--faint); }
+
+/* A. bordered chip (B2's own) */
+.chip { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 6px;
+  border:1px solid var(--line-strong); border-radius:4px; background:var(--panel);
+  font:11px var(--mono); color:var(--muted); flex:0 0 auto; }
+/* B. borderless text + chevron (Claude Desktop) */
+.plain { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 2px;
+  font:11px var(--mono); color:var(--muted); flex:0 0 auto; }
+/* C. two bare words (Codex) */
+.words { display:inline-flex; align-items:center; gap:14px; font:12px var(--sans); color:var(--muted); flex:0 0 auto; }
+.words b { color:var(--text); font-weight:500; }
+.ring { width:13px; height:13px; border-radius:50%; border:1.5px solid var(--line-strong); border-top-color:var(--ink);
+  animation:sp .9s linear infinite; }
+.mark { display:inline-flex; align-items:center; gap:6px; font:11px var(--mono); color:var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Engine readout — 六種放置法（都在 working 狀態）</h1>
+<p class="sub">內容一律是 <code>agent · model · thinking level</code> ＋ 跑動中的 spinner 與計時。位置之外還有一個變數：邊框。Claude Desktop 與 Codex 都用無邊框純文字，比帶框 chip 安靜。</p>
+
+<div class="grid">
+
+  <!-- 1 ───────────────────────────── thread ↘ -->
+  <section class="case">
+    <h2><b>1 · thread ↘</b> 訊息窗格底部、輸入框之外，靠右 <span class="pick">你選的</span>
+      <span class="tag">帶框 chip · 多佔 28px 一列</span></h2>
+    <div class="mini">
+      <div class="tail">
+        <div class="txt">…<code>hasUsage</code> 改成「有 contextSize 或有 rateLimits」，首次 render 不閃。</div>
+        <div class="wk"><span class="spin"></span>working · 3 tools</div>
+      </div>
+      <div class="dock">
+        <span class="sp"></span>
+        <button class="chip"><span class="spin"></span><span class="idot"></span>claude<span class="sep">·</span>opus-5<span class="sep">·</span><span class="eff">think:high</span><span class="el">18s</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m6 9 6 6 6-6"/></svg></span></button>
+      </div>
+      <div class="composer">
+        <div class="cwrap">
+          <div class="cw-top"><span>Reply to claude…</span></div>
+          <div class="crow">
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 4 9 20"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 2 9 9 0 1 0-3.6 4.6"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.6 21a4.6 4.6 0 0 1-6.5-6.5l8-8a3.1 3.1 0 0 1 4.4 4.4l-8 8a1.6 1.6 0 0 1-2.2-2.2l7.2-7.2"/></svg></button>
+            <span class="sp"></span>
+            <button class="send">send<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span class="s first">connected</span>
+        <span class="s"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><path d="M6 8.4v7.2M18 8.4v5a3 3 0 0 1-3 3H8"/><circle cx="18" cy="6" r="2.4"/></svg>feat/usage-cache <b>+128 −35</b></span>
+        <span class="sp"></span>
+        <span class="s">ctx <b>34k</b>/200k <span class="ubar"><i style="width:17%"></i></span></span>
+        <span class="s">5h <b>62%</b> <span class="ubar"><i class="warn" style="width:62%"></i></span></span>
+        <span class="s">term <kbd>⌃`</kbd></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 ───────────────────────────── input ↘ (Claude Desktop) -->
+  <section class="case">
+    <h2><b>2 · input ↘</b> 輸入框內按鈕列的右側，緊鄰 send　<span style="color:var(--faint)">← Claude Desktop 的位置</span>
+      <span class="tag">無邊框純文字 ＋ chevron · 不多佔任何高度</span></h2>
+    <div class="mini">
+      <div class="tail">
+        <div class="txt">…<code>hasUsage</code> 改成「有 contextSize 或有 rateLimits」，首次 render 不閃。</div>
+        <div class="wk"><span class="spin"></span>working · 3 tools</div>
+      </div>
+      <div class="composer">
+        <div class="cwrap">
+          <div class="cw-top"><span>Reply to claude…</span></div>
+          <div class="crow">
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 4 9 20"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 2 9 9 0 1 0-3.6 4.6"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.6 21a4.6 4.6 0 0 1-6.5-6.5l8-8a3.1 3.1 0 0 1 4.4 4.4l-8 8a1.6 1.6 0 0 1-2.2-2.2l7.2-7.2"/></svg></button>
+            <span class="sp"></span>
+            <button class="plain"><span class="spin"></span><span class="idot"></span>claude<span class="sep">·</span>opus-5<span class="sep">·</span><span class="eff">think:high</span><span class="el">18s</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m6 9 6 6 6-6"/></svg></span></button>
+            <button class="send" style="margin-left:8px">send<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span class="s first">connected</span>
+        <span class="sp"></span>
+        <span class="s">ctx <b>34k</b>/200k <span class="ubar"><i style="width:17%"></i></span></span>
+        <span class="s">5h <b>62%</b> <span class="ubar"><i class="warn" style="width:62%"></i></span></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 ───────────────────────────── below ↘ (Codex) -->
+  <section class="case">
+    <h2><b>3 · below ↘</b> 輸入框外、下方靠右，model 與 level 是兩個獨立的字　<span style="color:var(--faint)">← Codex 的位置</span>
+      <span class="tag">無邊框 · sans 字體 · 沒有分隔點</span></h2>
+    <div class="mini">
+      <div class="tail">
+        <div class="txt">…<code>hasUsage</code> 改成「有 contextSize 或有 rateLimits」，首次 render 不閃。</div>
+        <div class="wk"><span class="spin"></span>working · 3 tools</div>
+      </div>
+      <div class="composer">
+        <div class="cwrap">
+          <div class="cw-top"><span>Reply to claude…</span></div>
+          <div class="crow">
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 4 9 20"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 2 9 9 0 1 0-3.6 4.6"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.6 21a4.6 4.6 0 0 1-6.5-6.5l8-8a3.1 3.1 0 0 1 4.4 4.4l-8 8a1.6 1.6 0 0 1-2.2-2.2l7.2-7.2"/></svg></button>
+            <span class="sp"></span>
+            <button class="send">send<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+          </div>
+        </div>
+        <div class="below">
+          <span class="mark"><span class="idot"></span>claude</span>
+          <span class="sp"></span>
+          <button class="words"><b>opus-5</b><b>high</b></button>
+          <span class="ring"></span>
+        </div>
+      </div>
+      <div class="status">
+        <span class="s first">connected</span>
+        <span class="sp"></span>
+        <span class="s">ctx <b>34k</b>/200k <span class="ubar"><i style="width:17%"></i></span></span>
+        <span class="s">5h <b>62%</b> <span class="ubar"><i class="warn" style="width:62%"></i></span></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 ───────────────────────────── input ↗ -->
+  <section class="case">
+    <h2><b>4 · input ↗</b> 輸入框內第一列的右上角
+      <span class="tag">帶框 chip · 輸入變多行時不會移動</span></h2>
+    <div class="mini">
+      <div class="tail">
+        <div class="txt">…<code>hasUsage</code> 改成「有 contextSize 或有 rateLimits」，首次 render 不閃。</div>
+        <div class="wk"><span class="spin"></span>working · 3 tools</div>
+      </div>
+      <div class="composer">
+        <div class="cwrap">
+          <div class="cw-top">
+            <span>Reply to claude…</span><span class="sp"></span>
+            <button class="chip"><span class="spin"></span><span class="idot"></span>claude<span class="sep">·</span>opus-5<span class="sep">·</span><span class="eff">think:high</span><span class="el">18s</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m6 9 6 6 6-6"/></svg></span></button>
+          </div>
+          <div class="crow">
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 4 9 20"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 2 9 9 0 1 0-3.6 4.6"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.6 21a4.6 4.6 0 0 1-6.5-6.5l8-8a3.1 3.1 0 0 1 4.4 4.4l-8 8a1.6 1.6 0 0 1-2.2-2.2l7.2-7.2"/></svg></button>
+            <span class="sp"></span>
+            <button class="send">send<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span class="s first">connected</span>
+        <span class="sp"></span>
+        <span class="s">ctx <b>34k</b>/200k <span class="ubar"><i style="width:17%"></i></span></span>
+        <span class="s">5h <b>62%</b> <span class="ubar"><i class="warn" style="width:62%"></i></span></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 ───────────────────────────── bottom bar -->
+  <section class="case">
+    <h2><b>5 · bottom bar</b> 狀態列，緊鄰 usage 讀數
+      <span class="tag">和 ctx / 5h 成為一組資源資訊 · 離輸入最遠</span></h2>
+    <div class="mini">
+      <div class="tail">
+        <div class="txt">…<code>hasUsage</code> 改成「有 contextSize 或有 rateLimits」，首次 render 不閃。</div>
+        <div class="wk"><span class="spin"></span>working · 3 tools</div>
+      </div>
+      <div class="composer">
+        <div class="cwrap">
+          <div class="cw-top"><span>Reply to claude…</span></div>
+          <div class="crow">
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 4 9 20"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 2 9 9 0 1 0-3.6 4.6"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 12.5 12.6 21a4.6 4.6 0 0 1-6.5-6.5l8-8a3.1 3.1 0 0 1 4.4 4.4l-8 8a1.6 1.6 0 0 1-2.2-2.2l7.2-7.2"/></svg></button>
+            <span class="sp"></span>
+            <button class="send">send<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+          </div>
+        </div>
+      </div>
+      <div class="status">
+        <span class="s first">connected</span>
+        <span class="s"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><path d="M6 8.4v7.2M18 8.4v5a3 3 0 0 1-3 3H8"/><circle cx="18" cy="6" r="2.4"/></svg>feat/usage-cache <b>+128 −35</b></span>
+        <span class="sp"></span>
+        <span class="s"><span class="spin"></span><span class="idot"></span><span style="color:var(--text)">claude</span><span class="sep">·</span>opus-5<span class="sep">·</span><span class="eff">think:high</span><span class="el">18s</span></span>
+        <span class="s">ctx <b>34k</b>/200k <span class="ubar"><i style="width:17%"></i></span></span>
+        <span class="s">5h <b>62%</b> <span class="ubar"><i class="warn" style="width:62%"></i></span></span>
+        <span class="s">term <kbd>⌃`</kbd></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 ───────────────────────────── crumb -->
+  <section class="case">
+    <h2><b>6 · crumb</b> 頂部麵包屑右側
+      <span class="tag">離對話最近 · 但吃掉 session 標題的寬度，手機要多一列</span></h2>
+    <div class="mini">
+      <div class="crumb">
+        <span class="path">~/git/my-apps/<b>cloud-acp-gateway</b> › Usage…</span>
+        <span class="sp"></span>
+        <button class="chip"><span class="spin"></span><span class="idot"></span>claude<span class="sep">·</span>opus-5<span class="sep">·</span><span class="eff">think:high</span><span class="el">18s</span><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m6 9 6 6 6-6"/></svg></span></button>
+        <button class="ic"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></button>
+      </div>
+      <div class="tail">
+        <div class="txt">…<code>hasUsage</code> 改成「有 contextSize 或有 rateLimits」，首次 render 不閃。</div>
+        <div class="wk"><span class="spin"></span>working · 3 tools</div>
+      </div>
+      <div class="composer">
+        <div class="cwrap">
+          <div class="cw-top"><span>Reply to claude…</span></div>
+          <div class="crow">
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 4 9 20"/></svg></button>
+            <button class="cbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 5 2 9 9 0 1 0-3.6 4.6"/></svg></button>
+            <span class="sp"></span>
+            <button class="send">send<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

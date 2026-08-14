@@ -3,7 +3,6 @@ import { getHistory, getDiscoveredHistory, searchSessions, type HistorySession, 
 import type { RecentSession } from "../lib/recentSessions.ts";
 import { resolveRunningTask, runningView } from "../lib/runningTask.ts";
 import { useStore } from "../store/store.ts";
-import { AgentMark } from "./AgentPill.tsx";
 import { SearchResults } from "./SearchResults.tsx";
 import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
@@ -12,8 +11,14 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconTrash, IconPencil, WorkingDots } from "../lib/icons.tsx";
+import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, WorkingDots,
+  Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
+import { homeFrom } from "../lib/folderKey.ts";
+import { groupByFolder, latestWithPinned, type GroupableRow } from "../lib/sessionGroups.ts";
+import {
+  readSessionsView, saveSessionsView, readFolderOverrides, saveFolderOverrides, type SessionsView,
+} from "../lib/sessionsView.ts";
 import type { AgentRef } from "../types.ts";
 
 // How many rows a collapsed list shows before "See more". Recent is a
@@ -129,9 +134,16 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const [err, setErr] = useState(false);
   const [q, setQ] = useState("");
   const [showMore, setShowMore] = useState(false);
-  const [showMoreRecent, setShowMoreRecent] = useState(false);
   const [discovered, setDiscovered] = useState<TaggedDiscoveredHistory[] | null>(null);
-  const [tab, setTab] = useState<"recent" | "conversations">("recent");
+  // The list is one list now — no Recent/Conversations tabs (§1.3). What the
+  // reader chooses is the VIEW over it, and that choice is theirs to keep:
+  // local, not the cross-device prefs KV, because a phone and a desktop want
+  // different views of the same sessions (§4.3).
+  const [view, setView] = useState<SessionsView>(readSessionsView);
+  const [viewMenu, setViewMenu] = useState(false);
+  // Folders the reader has toggled away from their default state (see
+  // sessionsView.ts) — NOT a list of collapsed folders.
+  const [folderFlips, setFolderFlips] = useState<Set<string>>(readFolderOverrides);
   // In-memory only, by design: neither localStorage nor the cross-device `meta` KV
   // that holds text_size/screen_lock. A sticky custom range that silently applies
   // to the next search is worse than re-picking it.
@@ -215,11 +227,18 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     });
   }
   useEffect(() => { loadHistory(true); loadDiscovered(true); }, [open, s.cwd, histAgentsKey, discoverAgentsKey]);
-  // The panel always opens on Recent so cross-folder switching is one tap away,
-  // collapsed back to the first few recents. The search filters reset with it:
-  // they're deliberately unpersisted, and the panel stays mounted while closed
-  // (desktop keeps it as a column), so nothing else would ever drop them.
-  useEffect(() => { if (open) { setTab("recent"); setShowMoreRecent(false); setQ(""); setFilters(DEFAULT_FILTERS); } }, [open]);
+  // Reopening collapses the list back to the first few rows and clears the
+  // search. The filters reset with it: they're deliberately unpersisted, and the
+  // panel stays mounted while closed (desktop keeps it as a column), so nothing
+  // else would ever drop them. The VIEW is not reset — it is a saved preference.
+  useEffect(() => { if (open) { setShowMore(false); setQ(""); setFilters(DEFAULT_FILTERS); } }, [open]);
+  const pickView = (next: SessionsView) => { setView(next); saveSessionsView(next); setViewMenu(false); };
+  const toggleFolder = (key: string) => setFolderFlips((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    saveFolderOverrides(next);
+    return next;
+  });
   // refresh the list in place (no loading flash) when something renames a session
   useEffect(() => {
     if (s.historyNonce === 0) return;
@@ -259,17 +278,43 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   const runningById = new Map(
     s.runningTasks.map((t) => [t.agentName + "\n" + t.sessionId, t.state] as const),
   );
+  // A prompt waiting on an answer, anywhere. The durable inbox spans every agent
+  // and survives a reload, so it — not the live SSE state — is what says a row
+  // needs you.
+  const needsYouKeys = new Set(
+    s.inboxItems.filter((it) => it.reqId != null && it.sessionId).map((it) => it.agentName + "\n" + it.sessionId),
+  );
   const runDot = (agentName: string, id: string) => {
     const state = runningById.get(agentName + "\n" + id);
-    if (!state) return null;
     // Awaiting input isn't "working", so keep it as a static attention dot;
-    // the spinner is reserved for actively-running sessions.
-    if (state === "awaiting-input")
+    // the spinner is reserved for actively-running sessions. Amber is the one
+    // colour that means "needs you" (§1.1), whether the gateway said so through
+    // /running or through the durable inbox.
+    if (state === "awaiting-input" || needsYouKeys.has(agentName + "\n" + id))
       return <span className="run-dot awaiting" title="Needs input" />;
+    if (!state) return null;
     return <span className="run-working" title="Working"><WorkingDots /></span>;
   };
-  // Per-row agent mark — only worth showing once more than one agent is configured.
-  const mark = (agentName: string) => (multiAgent ? <AgentMark agent={agentByName.get(agentName)} /> : null);
+  // Per-row identity: the agent's own glyph. A wordmark reads as one more
+  // word in a list that is already all words, and at this density the mark is
+  // what the eye picks a row out by — so §1.2's wordmark rule is relaxed here
+  // and only here. An agent with no glyph of its own still gets its name.
+  const mark = (agentName: string) => {
+    if (!multiAgent) return null;
+    const agent = agentByName.get(agentName);
+    // Same classification the agent glyph used, kept so anything keying off
+    // "which agent is this row" still can.
+    const kind = agent?.skin === "codex" ? "codex" : agent?.kind === "opencode" ? "opencode"
+      : agent?.name === "claude" ? "claude" : "mono";
+    return (
+      <span className={"mark who " + kind} title={agentName}>
+        {kind === "codex" ? <CodexMark />
+          : kind === "opencode" ? <OpencodeMark />
+            : kind === "claude" ? <Robot />
+              : <span className="wm">{agentName}</span>}
+      </span>
+    );
+  };
 
   const allItems = items || [];
   // A Recent row carries the title that was current when the conversation was last
@@ -315,12 +360,6 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     .filter((it) => recentReopenable(agentByName.get(it.agentName)))
     .filter((it) => !recentKeys.has(it.agentName + "\n" + it.cwd + "\n" + it.sessionId))
     .filter((it) => !isRunning(it.agentName, it.sessionId));
-  const mergedRecentItems = [
-    ...allRecentItems.map((it) => ({ kind: "recent" as const, it, when: it.lastActiveAt })),
-    ...discoveredExtras.map((it) => ({ kind: "discovered" as const, it, when: it.updatedAt })),
-  ].sort((a, b) => new Date(b.when).getTime() - new Date(a.when).getTime());
-  const recentItems = showMoreRecent ? mergedRecentItems : mergedRecentItems.slice(0, RECENT_LIMIT);
-  const hasMoreRecent = mergedRecentItems.length > RECENT_LIMIT;
   const currentItems = !localRecentSupported && histSupported
     ? Object.values(s.sessions)
       .filter((it) => !it.viewOnly && it.hasContent)
@@ -464,6 +503,56 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       </button>
     );
   };
+  // ---- one list, two views (§3 P4) ----
+  // Every source folds into the same row shape so the ordering and the grouping
+  // live in one pure place (lib/sessionGroups) instead of once per section.
+  // First source to claim a session wins: a running task knows more about it
+  // than the recents cache, which knows more than a discovered transcript.
+  const awaitingKeys = new Set(
+    s.runningTasks.filter((t) => t.state === "awaiting-input").map((t) => t.agentName + "\n" + t.sessionId),
+  );
+  const rows: Array<GroupableRow<React.ReactNode>> = [];
+  const claimed = new Set<string>();
+  const push = (agentName: string, sessionId: string, cwd: string, when: string | number, node: React.ReactNode, running: boolean) => {
+    const key = agentName + "\n" + sessionId;
+    if (claimed.has(key)) return;
+    claimed.add(key);
+    const ms = typeof when === "number" ? when : new Date(when).getTime();
+    rows.push({
+      key, cwd, when: Number.isFinite(ms) ? ms : 0, running,
+      needsYou: needsYouKeys.has(key) || awaitingKeys.has(key),
+      data: node,
+    });
+  };
+  // One `now` for every live task, not one per row: the pinned block sorts by
+  // `when` and Array#sort is stable, so equal stamps preserve the /running
+  // array's own order — which is roughly start order and deliberately does NOT
+  // re-sort on activity, so the list can't flap between concurrent streams.
+  const now = Date.now();
+  for (const t of activeTasks) push(t.agentName, t.sessionId, resolveRunningTask(t, s).cwd || s.cwd, now, renderRunningItem(t), true);
+  // A cooling task counts as running for ordering — that is the whole point of
+  // the grace window: it keeps the row pinned (and its folder's dot lit) for a
+  // few seconds instead of dropping it into the recency list the moment a turn
+  // ends, which is what made rows flip-flop between sections. It still renders
+  // with the muted "recently active" dot, and it sorts below the live ones
+  // because its `when` is the finish time rather than `now`.
+  for (const c of coolingTasks) push(c.task.agentName, c.task.sessionId, resolveRunningTask(c.task, s).cwd || s.cwd, c.at, renderRunningItem(c.task, c.at), true);
+  for (const it of allRecentItems) push(it.agentName, it.sessionId, it.cwd, it.lastActiveAt, renderRecentItem(it), false);
+  for (const it of discoveredExtras) push(it.agentName, it.sessionId, it.cwd, it.updatedAt, renderDiscoveredItem(it), false);
+  // The current folder's server-side history used to be a tab of its own; it is
+  // the same list, so it joins it. The two-day window is still what "See more"
+  // widens, it just widens one list now instead of one tab.
+  for (const it of (showMore ? allItems : allItems.filter((x) => withinRecentWindow(x.updatedAt))))
+    push(it.agentName, it.sessionId, s.cwd, it.updatedAt, renderItem(it), false);
+  for (const it of currentItems) push(s.agentName, it.id, it.cwd || s.cwd, it.createdAt, renderCurrentItem(it), false);
+  // The cap applies to the flat view only: by folder, hiding rows would leave a
+  // folder header claiming a count its children don't add up to.
+  const hasMoreRows = rows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt));
+  const folders = groupByFolder(rows, s.cwd, homeFrom(s.cwd, s.cfg.fsRoot, s.cfg.agents[0]?.cwd));
+  const { pinned, rest } = latestWithPinned(rows);
+  const latestRest = showMore ? rest : rest.slice(0, RECENT_LIMIT);
+  const listEmpty = rows.length === 0;
+
   return (
     <>
       <div id="scrim" className={open ? "open" : ""} onClick={onClose} />
@@ -494,52 +583,84 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
               <SearchFilters value={filters} agents={s.cfg.agents.map((a) => a.name)} onChange={setFilters} />
             )}
             {!searchOpen && (
-              <div className="sidebar-tabs" role="tablist">
-                <button className={"sidebar-tab" + (tab === "recent" ? " active" : "")}
-                  data-tab="recent" role="tab" aria-selected={tab === "recent"}
-                  onClick={() => setTab("recent")}>Recent</button>
-                <button className={"sidebar-tab" + (tab === "conversations" ? " active" : "")}
-                  data-tab="conversations" role="tab" aria-selected={tab === "conversations"}
-                  onClick={() => setTab("conversations")}>Conversations</button>
-              </div>
-            )}
-            {!searchOpen && tab === "recent" && (
-              <div className="recent-tab">
-                {(activeTasks.length > 0 || coolingTasks.length > 0) && (
-                  <div className="running-section recent-section">
-                    <div className="listhead"><span>Running</span></div>
-                    <div className="recent-list">
-                      {activeTasks.map((t) => renderRunningItem(t))}
-                      {coolingTasks.map((c) => renderRunningItem(c.task, c.at))}
-                    </div>
-                  </div>
-                )}
-                {recentItems.length > 0 && (
-                  <div className="recent-section">
-                    <div className="recent-list">
-                      {recentItems.map((row) => row.kind === "recent" ? renderRecentItem(row.it) : renderDiscoveredItem(row.it))}
-                    </div>
-                    {hasMoreRecent && (
-                      <button className="see-more" onClick={() => setShowMoreRecent((v) => !v)}>
-                        {showMoreRecent ? "Show less" : "See more"}
-                      </button>
+              <>
+                {/* The view is the reader's choice and it says which one it is
+                    in words, so nothing has to be learned from an icon. */}
+                <div className="sb-head">
+                  <span>Sessions</span>
+                  <span className="qty">{rows.length}</span>
+                  <span className="sp" />
+                  <div className="view-wrap">
+                    <button className="view-btn" aria-haspopup="menu" aria-expanded={viewMenu}
+                      onClick={() => setViewMenu((v) => !v)}>
+                      <span className="vlabel">{view === "folder" ? "folder" : "latest"}</span><IconChevronDown />
+                    </button>
+                    {viewMenu && (
+                      <>
+                        <div className="amenu-scrim" onClick={() => setViewMenu(false)} />
+                        <div className="view-menu" role="menu">
+                          <button className="view-item" role="menuitem" onClick={() => pickView("folder")}>
+                            <span className="tick">{view === "folder" && <IconCheck />}</span>By folder
+                          </button>
+                          <button className="view-item" role="menuitem" onClick={() => pickView("latest")}>
+                            <span className="tick">{view === "latest" && <IconCheck />}</span>Latest updated
+                          </button>
+                        </div>
+                      </>
                     )}
                   </div>
-                )}
-                {currentItems.length > 0 && (
-                  <div className="current-section recent-section">
-                    <div className="listhead"><span>Current</span></div>
-                    <div className="recent-list">
-                      {currentItems.map((it) => renderCurrentItem(it))}
-                    </div>
-                  </div>
-                )}
-                {recentItems.length === 0 && currentItems.length === 0 && activeTasks.length === 0 && coolingTasks.length === 0 && (
-                  <div className="panel-empty">No recent conversations yet.</div>
-                )}
-              </div>
+                </div>
+                <div className="recent-tab sess-list">
+                  {listEmpty && <div className="panel-empty">No recent conversations yet.</div>}
+                  {!listEmpty && view === "folder" && folders.map((g) => {
+                    // Open by default when you are in it or something in it is
+                    // running / waiting on you; collapsed otherwise. The stored
+                    // set flips that, so a folder that starts running opens on
+                    // its own and one you deliberately shut stays shut.
+                    const shut = (g.current || g.running || g.needsYou) === folderFlips.has(g.key);
+                    return (
+                      <div className="folder-group" key={g.key}>
+                        <button className={"fgroup" + (shut ? " closed" : "")} title={g.cwd}
+                          aria-expanded={!shut} onClick={() => toggleFolder(g.key)}>
+                          <span className="tw"><IconChevronDown /></span>
+                          <span className="fi"><IconFolder /></span>
+                          <span className="fname">{g.label}</span>
+                          <span className="fcount">{g.rows.length}</span>
+                          {(g.needsYou || g.running) && (
+                            <span className={"run-dot" + (g.needsYou ? " awaiting" : "")}
+                              title={g.needsYou ? "Needs input" : "Working"} />
+                          )}
+                        </button>
+                        {!shut && <div className="fkids recent-list">{g.rows.map((r) => r.data)}</div>}
+                      </div>
+                    );
+                  })}
+                  {!listEmpty && view === "latest" && (
+                    <>
+                      {pinned.length > 0 && (
+                        <div className="running-section recent-section">
+                          <div className="listhead"><span>Needs you · Running</span></div>
+                          <div className="recent-list">{pinned.map((r) => r.data)}</div>
+                          <div className="pin-div" />
+                        </div>
+                      )}
+                      {latestRest.length > 0 && (
+                        <div className="recent-section">
+                          <div className="recent-list">{latestRest.map((r) => r.data)}</div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {!listEmpty && hasMoreRows && (
+                    <button className="see-more" onClick={() => setShowMore((v) => !v)}>
+                      {showMore ? "Show less" : "See more"}
+                    </button>
+                  )}
+                  {err && <div className="panel-note">Couldn&apos;t load conversations.</div>}
+                </div>
+              </>
             )}
-            {(searchOpen || tab === "conversations") && (
+            {searchOpen && (
               <div className="all-section">
                 <div className="sess-list">
                   {err && <div className="panel-empty">Couldn't load conversations.</div>}

@@ -369,3 +369,90 @@ describe("Thread history paging", () => {
     expect(loadOlderMessages).not.toHaveBeenCalled();
   });
 });
+
+// A turn is folded at RENDER time only — `items` and the structuralSig derived
+// from it must be untouched, because forceRepaint is keyed on that string and
+// that key is the iOS/PWA blank-thread fix (issue #98). See plan §2.1.
+describe("Thread turn grouping", () => {
+  let root: Root | null = null;
+  let main: HTMLElement;
+
+  const session = (items: Session["items"]): Session => ({
+    id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
+    hasContent: true, working: false,
+    curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null,
+    seq: 1, historyStart: 0, loadingOlder: false, items,
+  });
+
+  beforeEach(() => {
+    vi.resetModules();
+    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "token": "t", "defaultAgent": "claude", "agents": [{ "name": "claude", "cwd": "/repo" }], "fsRoot": "/"
+    }</script>`;
+    main = document.createElement("main");
+    document.body.appendChild(main);
+  });
+
+  afterEach(() => {
+    if (root) { act(() => root?.unmount()); root = null; }
+    main.remove();
+    vi.unstubAllGlobals();
+  });
+
+  async function render(items: Session["items"]) {
+    const { Thread } = await import("./Thread.tsx");
+    await act(async () => {
+      root = createRoot(main);
+      root.render(React.createElement(Thread, { session: session(items), agentReady: true }));
+    });
+  }
+
+  test("a thought and the reply that follows it share one label line", async () => {
+    await render([
+      { id: "t1", kind: "thought", text: "weighing it up" },
+      { id: "a1", kind: "assistant", text: "here is the answer" },
+    ]);
+
+    expect(main.querySelectorAll(".turn.agent")).toHaveLength(1);
+    expect(main.querySelectorAll(".turn.agent .lbl")).toHaveLength(1);
+    expect(main.querySelector(".turn.agent .wm")?.textContent).toBe("claude");
+    expect(main.querySelector("details.think")).not.toBeNull();
+    expect(main.textContent).toContain("here is the answer");
+  });
+
+  test("a reply with no thought renders no thinking disclosure", async () => {
+    await render([{ id: "a1", kind: "assistant", text: "straight to it" }]);
+
+    expect(main.querySelectorAll(".turn.agent")).toHaveLength(1);
+    expect(main.querySelector("details.think")).toBeNull();
+  });
+
+  test("a thought still streaming, with no reply yet, is a turn of its own", async () => {
+    await render([{ id: "t1", kind: "thought", text: "still thinking" }]);
+
+    expect(main.querySelectorAll(".turn.agent")).toHaveLength(1);
+    expect(main.querySelector("details.think")).not.toBeNull();
+    expect(main.querySelector(".turn.agent .body")).toBeNull();
+  });
+
+  test("a tool call between two replies breaks the run into two turns", async () => {
+    await render([
+      { id: "a1", kind: "assistant", text: "first" },
+      { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+      { id: "t2", kind: "thought", text: "hmm" },
+      { id: "a2", kind: "assistant", text: "second" },
+    ]);
+
+    expect(main.querySelectorAll(".turn.agent")).toHaveLength(2);
+    expect(main.querySelectorAll("details.tool")).toHaveLength(1);
+  });
+
+  test("a user message is plain text under a YOU label, with no bubble", async () => {
+    await render([{ id: "u1", kind: "user", text: "do the thing" }]);
+
+    expect(main.querySelector(".turn.user .lbl .you")?.textContent).toBe("you");
+    expect(main.querySelector(".bubble")).toBeNull();
+    expect(main.querySelector(".turn.user .body")?.textContent).toContain("do the thing");
+  });
+});

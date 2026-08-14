@@ -163,6 +163,24 @@ export function IconPanel() {
   );
 }
 
+// The phone tab bar's two glyphs that had no icon yet: a speech bubble for the
+// conversation, a branch for the folder's changes.
+export function IconChat() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 5h16v11H9l-5 4Z" />
+    </svg>
+  );
+}
+
+export function IconBranch() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M6 3v12a3 3 0 0 0 3 3h6" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="6" r="2.4" />
+    </svg>
+  );
+}
+
 // A file's glyph, chosen from its type (see lib/fileKind.ts): a document with
 // the mark of what it holds. One component rather than six exports because the
 // caller always has a FileIcon string, never a specific icon in mind.
@@ -265,17 +283,11 @@ export function IconImage() {
   );
 }
 
-export function IconThinking() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M9 18h6M10 22h4M12 2a7 7 0 00-4 12.7V17h8v-2.3A7 7 0 0012 2z" />
-    </svg>
-  );
-}
-
 export function IconCheck() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="#3a9b5c" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+    // currentColor, not a fixed green: green means diff "+" and nothing else
+    // (docs/ui-refactor-plan.md §1.1), so a completed tick takes its host's ink.
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
       <path d="M20 6L9 17l-5-5" />
     </svg>
   );
@@ -378,10 +390,13 @@ export function IconLogin() {
 
 export function Robot() {
   return (
-    <svg className="robot" viewBox="0 0 24 24" fill="#d97757">
+    // The identity glyph takes its colour from its host (ink by default, the
+    // brand hue only under data-identity="hue" — see .mark in styles.css), so
+    // the eyes have to be knocked out with the page colour rather than #fff.
+    <svg className="robot" viewBox="0 0 24 24" fill="currentColor">
       <rect x="6" y="7" width="12" height="9" rx="2.5" />
-      <rect x="9" y="10" width="2" height="2" rx=".5" fill="#fff" />
-      <rect x="13" y="10" width="2" height="2" rx=".5" fill="#fff" />
+      <rect x="9" y="10" width="2" height="2" rx=".5" fill="var(--bg)" />
+      <rect x="13" y="10" width="2" height="2" rx=".5" fill="var(--bg)" />
       <rect x="7" y="16" width="2" height="3" rx="1" />
       <rect x="11" y="16" width="2" height="3" rx="1" />
       <rect x="15" y="16" width="2" height="3" rx="1" />
