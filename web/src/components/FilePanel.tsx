@@ -29,7 +29,8 @@ import {
   clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH,
   DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
 } from "../lib/panelWidth.ts";
-import { IconBack, IconX, IconRefresh, IconExpand, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, fileIcon } from "../lib/icons.tsx";
+import { IconBack, IconX, IconRefresh, IconExpand, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, fileIcon } from "../lib/icons.tsx";
+import { findRanges, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/findInFile.ts";
 
 // The file preview panel: what the agent actually produced, rather than what it
 // said about it. Two modes, three lists and one viewer.
@@ -626,6 +627,36 @@ function FileView({ cwd, target, canAttach, onAttach }: {
     return () => { alive = false; };
   }, [cwd, target.abs, mode]);
 
+  // ---- find in file ----
+  // The search surface is the whole body, so one implementation covers the
+  // diff, the file and the rendered markdown. Not the HTML preview: that is an
+  // iframe, and no highlight of ours reaches inside it.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [find, setFind] = useState("");
+  const [hits, setHits] = useState<Range[]>([]);
+  const [hit, setHit] = useState(0);
+
+  // Anything that re-renders the body is a new document to search: a mode
+  // switch, a finished load, a different file.
+  useEffect(() => {
+    setHits(findOpen ? findRanges(bodyRef.current, find.trim()) : []);
+    setHit(0);
+  }, [findOpen, find, mode, loading, file, diff, render]);
+
+  useEffect(() => {
+    paintHits(hits, hit);
+    scrollToHit(bodyRef.current, hits[hit]);
+  }, [hits, hit]);
+
+  // Highlights outlive the component that registered them (see clearHits).
+  useEffect(() => clearHits, []);
+
+  // Wraps at both ends — a search that stops dead at the last match sends you
+  // back to the box to retype what you already typed.
+  const step = (d: number) => { if (hits.length) setHit((i) => (i + d + hits.length) % hits.length); };
+  const closeFind = () => { setFindOpen(false); setFind(""); };
+
   const raw = rawFileUrl(cwd, target.abs);
   const ext = extensionOf(target.path);
   const isHtml = ext === "html" || ext === "htm";
@@ -650,7 +681,10 @@ function FileView({ cwd, target, canAttach, onAttach }: {
       <div className="wf-modes">
         <button className={mode === "diff" ? "active" : ""} onClick={() => setMode("diff")}>Diff</button>
         <button className={mode === "file" ? "active" : ""} onClick={() => setMode("file")}>File</button>
-        {canPreview && <button className={mode === "render" ? "active" : ""} onClick={() => setMode("render")}>Preview</button>}
+        {canPreview && <button className={mode === "render" ? "active" : ""}
+          // An HTML preview is an iframe, which no search of ours reaches into
+          // — leaving the bar open there would only ever report 0/0.
+          onClick={() => { setMode("render"); if (isHtml) closeFind(); }}>Preview</button>}
         <span className="sp" />
         {/* Yields the room to the range while there is one: both at once
             overflow the toolbar on a phone-width panel. */}
@@ -671,10 +705,42 @@ function FileView({ cwd, target, canAttach, onAttach }: {
             <IconAddToChat />{range && <span className="lines">{formatRange(range)}</span>}
           </button>
         )}
+        {!(mode === "render" && isHtml) && (
+          <button type="button" className={"icon-btn wf-search-btn" + (findOpen ? " on" : "")}
+            onClick={() => (findOpen ? closeFind() : setFindOpen(true))}
+            title={findOpen ? "Close search" : "Find in this file"}>
+            <IconSearch />
+          </button>
+        )}
         <DownloadButton raw={raw} name={basename(target.path)}
           selfContained={mode === "render" && isHtml && render && render.inlined > 0 ? render.html : undefined} />
       </div>
-      <div className="wf-body">
+      {/* Its own row rather than a field in the toolbar: at 390px that bar
+          already carries three mode buttons and two icons. */}
+      {findOpen && (
+        <div className="wf-search">
+          <input autoFocus value={find} placeholder="Find in file" aria-label="Find in file"
+            onChange={(e) => setFind(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { closeFind(); return; }
+              if (e.key !== "Enter") return;
+              // Enter would otherwise submit nothing and dismiss the phone's
+              // keyboard, which is the opposite of stepping through matches.
+              e.preventDefault();
+              step(e.shiftKey ? -1 : 1);
+            }} />
+          <span className="n">
+            {find.trim() === "" ? "" : hits.length === 0 ? "0/0"
+              : `${hit + 1}/${hits.length}${hits.length === MAX_HITS ? "+" : ""}`}
+          </span>
+          <button type="button" className="icon-btn prev" disabled={!hits.length}
+            onClick={() => step(-1)} title="Previous match"><IconChevronDown /></button>
+          <button type="button" className="icon-btn" disabled={!hits.length}
+            onClick={() => step(1)} title="Next match"><IconChevronDown /></button>
+          <button type="button" className="icon-btn" onClick={closeFind} title="Close search"><IconX /></button>
+        </div>
+      )}
+      <div className="wf-body" ref={bodyRef}>
         {err && <div className="wf-empty">{err}</div>}
         {!err && loading && <div className="wf-empty">Loading…</div>}
         {!err && !loading && mode === "diff" && diff && (

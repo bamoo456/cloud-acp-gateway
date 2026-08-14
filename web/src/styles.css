@@ -478,6 +478,20 @@
      child is the same fact twice (§1.4), and dropping it shortens the row. */
   .fkids .folder-name { display: none; }
   .fkids .sess-item { padding-block: 5px; }
+  /* On a phone the panel is the whole screen, not a 284px column — the sizes
+     that keep a desktop sidebar dense (13px titles over 10.5px metadata) are
+     just small there, and the metadata line is the one that stops being
+     readable first. The rows grow with the text, which also lands them nearer
+     the 44px a fingertip wants. */
+  @media (max-width: 640px) {
+    .sess-item .name { font-size: 15px; }
+    .folder-name, .sess-item .when { font-size: 12px; }
+    .fgroup .fname { font-size: 13.5px; }
+    .fgroup .fcount { font-size: 12px; }
+    .sb-head, .sb-head .qty, .view-btn { font-size: 12px; }
+    .sb-head { height: 34px; }
+    .view-btn { height: 28px; padding: 0 7px; }
+  }
   /* Row wrapper: the session button and its delete control are siblings (a
      <button> can't nest another). The trash overlays the row's right edge and
      is revealed on hover — or on focus, so it stays keyboard-reachable
@@ -901,7 +915,9 @@
      the 12px gutters footer pads with, box-sizing being border-box here. */
   .dock { position: relative; flex: 0 0 auto; display: flex; align-items: center;
     width: min(784px, 100%); margin: 0 auto; padding: 7px 12px; }
-  .dock .sp { flex: 1; min-width: 0; }
+  /* 8px, not 0: at 390px the two chips shrink together and a spacer that gives
+     up its last pixel leaves them border to border, reading as one broken box. */
+  .dock .sp { flex: 1; min-width: 8px; }
   .mchip {
     display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px;
     border: 1px solid var(--border-strong); border-radius: 5px; background: var(--surface);
@@ -1646,6 +1662,34 @@
   .wf-modes button:hover:not(.active) { background: var(--surface-2); color: var(--text); }
   .wf-modes .sp { flex: 1 1 auto; }
   .wf-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  /* ---- find in file ----
+     A row of its own under the mode switch (see FileView), and highlights
+     painted through ::highlight() rather than <mark> — which is also why the
+     colours live here and not on an element. Only a handful of properties are
+     accepted there: background-COLOR, never the background shorthand. */
+  .wf-search {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
+    padding: 6px 6px 6px 10px; border-bottom: 1px solid var(--border);
+  }
+  .wf-search input {
+    flex: 1 1 auto; min-width: 0; padding: 7px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text); outline: none; font-size: 13px;
+  }
+  .wf-search input:focus { border-color: var(--accent); }
+  .wf-search .n {
+    flex: 0 0 auto; min-width: 5ch; text-align: right;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .wf-search .icon-btn { flex: 0 0 auto; width: 32px; height: 32px; color: var(--muted); }
+  .wf-search .icon-btn svg { width: 16px; height: 16px; }
+  .wf-search .icon-btn:disabled { opacity: .4; }
+  .wf-search .prev svg { transform: rotate(180deg); }
+  .wf-search-btn { width: 34px; height: 34px; color: var(--muted); }
+  .wf-search-btn svg { width: 17px; height: 17px; }
+  .wf-search-btn.on { color: var(--accent); background: var(--surface-2); }
+  ::highlight(wf-find) { background-color: var(--hit-bg, rgba(255, 214, 0, 0.35)); }
+  ::highlight(wf-find-current) { background-color: var(--accent); color: var(--accent-text); }
   .wf-dl { width: 34px; height: 34px; }
   .wf-dl svg { width: 18px; height: 18px; }
   /* "add the selected lines to the chat". Dim until there is a selection, then
@@ -1877,7 +1921,7 @@
      text-size setting can still scale the composer above the floor. */
   @media (max-width: 640px) {
     .composer .cm-editor { font-size: max(16px, var(--chat-user-size)); }
-    .search input, .amenu .rename-input, .rv-cmt textarea,
+    .search input, .amenu .rename-input, .rv-cmt textarea, .wf-search input,
     .search-filter-row input[type=date], .search-filter-row select { font-size: 16px; }
   }
 
