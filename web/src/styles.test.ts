@@ -114,6 +114,25 @@ describe("global styles", () => {
     expect(hue).toMatch(/--accent-text\s*:\s*#fff/);
   });
 
+  test("every theme redefines the whole neutral ramp, in both modes", () => {
+    // A half-defined theme inherits the rest from :root and reads as a third
+    // palette — e.g. slate's cool text on paper's warm page.
+    const RAMP = ["--bg", "--surface", "--surface-2", "--text", "--muted", "--faint", "--border", "--border-strong"];
+    for (const theme of ["slate", "contrast", "sepia"]) {
+      const blocks = styles.match(new RegExp(`:root\\[data-theme="${theme}"\\]\\s*\\{[^}]*\\}`, "g")) ?? [];
+
+      expect(blocks).toHaveLength(2); // light, and the prefers-color-scheme one
+      for (const block of blocks) for (const token of RAMP) expect(block).toContain(token + ":");
+    }
+  });
+
+  test("a chosen theme outranks the automatic agent skin", () => {
+    // Same specificity, so source order is the whole rule: switching agent must
+    // not repaint a page whose colours the reader picked on purpose.
+    expect(styles.indexOf(':root[data-theme="slate"]'))
+      .toBeGreaterThan(styles.lastIndexOf(':root[data-agent-skin="codex"]'));
+  });
+
   test("every popup sits above the scrim that closes it", () => {
     // The scrim is transparent on desktop, so a menu below it still LOOKS
     // clickable — it just isn't: every click lands on the scrim and only closes

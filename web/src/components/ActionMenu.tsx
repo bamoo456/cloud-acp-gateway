@@ -5,6 +5,7 @@ import { engineReadout } from "../lib/engine.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { setLockPin, clearLock, MIN_PIN_LENGTH } from "../lib/lock.ts";
 import { IDENTITY_OPTIONS, applyIdentity, readIdentity, type Identity } from "../lib/identity.ts";
+import { THEME_OPTIONS, applyTheme, readTheme, type Theme } from "../lib/theme.ts";
 import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconCircle, IconPencil, IconTrash, IconType, IconLock, IconX } from "../lib/icons.tsx";
 import type { ConfigOption } from "../types.ts";
 
@@ -36,11 +37,13 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   // Per-screen taste, kept out of the store because it is neither shared across
   // devices nor read by anything but <html> (see lib/identity.ts).
   const [identity, setIdentity] = useState<Identity>(readIdentity);
+  const [theme, setTheme] = useState<Theme>(readTheme);
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const resumableId = s.activeId && !s.activeId.startsWith("pending-") ? s.activeId : null;
   const engine = engineReadout(s.configOptions, s.models, sess?.modelId, s.modes, sess?.mode);
   const curTextSize = TEXT_SIZE_OPTIONS.find((o) => o.id === s.textSize)?.label || "Default";
   const curIdentity = IDENTITY_OPTIONS.find((o) => o.id === identity)?.label || "Wordmark";
+  const curTheme = THEME_OPTIONS.find((o) => o.id === theme)?.label || "Paper";
   const agentRef = s.cfg.agents.find((a) => a.name === s.agentName);
   const hasHistory = agentRef?.history !== false;
   // The gateway refuses to delete a conversation with a turn in flight (it would
@@ -138,6 +141,10 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
               <IconType /><span className="col"><span>Text size</span><span className="sub">adjust chat readability</span></span>
               <span className="gt">{curTextSize} <IconChevron /></span>
             </button>
+            <button className="arow" onClick={() => setView("theme")}>
+              <IconCircle /><span className="col"><span>Theme</span><span className="sub">the palette this screen reads on</span></span>
+              <span className="gt">{curTheme} <IconChevron /></span>
+            </button>
             <button className="arow" onClick={() => setView("identity")}>
               <IconCircle /><span className="col"><span>Agent identity</span><span className="sub">how much of the agent's colour to show</span></span>
               <span className="gt">{curIdentity} <IconChevron /></span>
@@ -165,6 +172,19 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
                 onClick={() => s.setTextSize(opt.id)}>
                 <span className="col"><span>{opt.label}</span><span className="sub">{opt.description}</span></span>
                 <span className="gt"><span className={"sample sample-" + opt.id}>Aa</span>{s.textSize === opt.id && "✓"}</span>
+              </button>
+            ))}
+          </>
+        )}
+        {view === "theme" && (
+          <>
+            <div className="ahead"><button className="iback" onClick={() => setView("main")}><IconBack /></button>Theme</div>
+            <div className="amenu-note">Each theme sets a light and a dark palette; your system still decides which of the two you get.</div>
+            {THEME_OPTIONS.map((opt) => (
+              <button key={opt.id} className={"arow" + (theme === opt.id ? " on" : "")}
+                onClick={() => { applyTheme(opt.id); setTheme(opt.id); }}>
+                <span className="col"><span>{opt.label}</span><span className="sub">{opt.description}</span></span>
+                {theme === opt.id && <span className="gt">✓</span>}
               </button>
             ))}
           </>
