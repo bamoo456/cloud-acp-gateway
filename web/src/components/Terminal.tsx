@@ -82,6 +82,9 @@ function TermTab({ id, cwd, active, onExit }: {
     const term = new XTerm({
       cursorBlink: true,
       fontSize: 13,
+      // The app's --mono, spelled out: xterm measures glyphs on a canvas and
+      // builds a `ctx.font` string, where a var() would not resolve. Consolas is
+      // the one addition — a terminal on Windows wants a terminal face.
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
       theme: { background: "#0b0f14" },
     });

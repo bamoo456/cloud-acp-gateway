@@ -114,6 +114,19 @@ describe("global styles", () => {
     expect(hue).toMatch(/--accent-text\s*:\s*#fff/);
   });
 
+  test("two faces, both of them tokens", () => {
+    // Every drift so far came from a re-typed stack: one dropped the CJK
+    // fallbacks, two dropped half the mono stack. A literal family name outside
+    // the token declarations is that mistake starting again.
+    const literals = styles.split("\n")
+      .filter((line) => /font-family\s*:|font\s*:\s*\d/.test(line))
+      .filter((line) => !/var\(--(mono|sans)\)|font-family\s*:\s*inherit/.test(line));
+
+    expect(literals).toEqual([]);
+    expect(cssRule(":root")).toMatch(/--sans\s*:\s*-apple-system[^;]*PingFang TC/);
+    expect(cssRule(":root")).toMatch(/--mono\s*:\s*ui-monospace, SFMono-Regular, Menlo, monospace/);
+  });
+
   test("every theme redefines the whole neutral ramp, in both modes", () => {
     // A half-defined theme inherits the rest from :root and reads as a third
     // palette — e.g. slate's cool text on paper's warm page.
