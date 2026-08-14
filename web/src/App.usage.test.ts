@@ -110,8 +110,12 @@ describe("App usage strip", () => {
 
     // Percentages and labels only: the countdown text is a function of the wall
     // clock, and formatUntil already has exact coverage in format.test.ts.
-    expect([...container.querySelectorAll(".u-seg b")].map((e) => e.textContent)).toEqual(["13%", "59%", "10%"]);
-    expect([...container.querySelectorAll(".u-seg .lb")].map((e) => e.textContent)).toEqual(["5h", "wk", "Fable"]);
+    // Scoped to the default row — the same windows also appear in the
+    // hover/click popover now that every provider's quota is polled in the
+    // background, and that duplicate isn't what this test is checking.
+    const row = container.querySelector(".usage-strip")!;
+    expect([...row.querySelectorAll(".u-seg b")].map((e) => e.textContent)).toEqual(["13%", "59%", "10%"]);
+    expect([...row.querySelectorAll(".u-seg .lb")].map((e) => e.textContent)).toEqual(["5h", "wk", "Fable"]);
   });
 
   test("a gateway that can't report quota leaves the strip alone", async () => {

@@ -87,11 +87,12 @@ interface State {
   modes: Mode[];
   commands: SlashCommand[];
   configOptions: ConfigOption[];
-  // rateLimitType -> the latest window the agent reported. Account-wide rather
-  // than per-session (every session on this agent shares the same quota), and
-  // agent-scoped: it resets alongside models/modes because only Claude reports
-  // these and another agent's account has nothing to do with them.
-  rateLimits: Record<string, RateLimit>;
+  // provider kind ("claude" / "codex") -> rateLimitType -> the latest window
+  // that account reported. Keyed by provider, not by the active agent: each
+  // provider's quota is polled continuously regardless of which agent is on
+  // screen (UsageStrip.tsx shows the active one by default, every provider on
+  // hover/click), so switching agents must never wipe another provider's data.
+  rateLimits: Record<string, Record<string, RateLimit>>;
   promptCapabilities: PromptCapabilities; // what the active agent accepts in a prompt (image, …)
   pendingPermissions: PendingPermission[];
   promptStateRevision: number;
@@ -177,7 +178,7 @@ interface State {
   // a listing covers one folder (or one provider's discoverable store), so absence
   // from it means "not asked about", never "no longer named".
   mergeHistoryTitles: (rows: Array<{ agentName: string; sessionId: string; title: string | null }>) => void;
-  ingestUsageLimits: (windows: Record<string, RateLimit>) => void;
+  ingestUsageLimits: (kind: string, windows: Record<string, RateLimit>) => void;
   ingestRunningTasks: (tasks: RunningTask[]) => void;
   ingestInboxItems: (items: InboxItem[], expectedRevision: number) => void;
   ensureConnected: () => void;
@@ -211,6 +212,18 @@ function activeAgentSkin(state: SkinState): AgentSkin | null {
 
 export function hasCodexSkin(state: SkinState): boolean {
   return activeAgentSkin(state) === "codex";
+}
+
+// Which provider's quota an agent config maps to — the only two the gateway's
+// /usage/limits route knows how to fetch. `kind` is absent on agents configured
+// before it existed, so an unnamed kind falls back to the agent's own name.
+export function agentQuotaKind(agent: { kind?: string; name: string } | undefined): "claude" | "codex" | null {
+  const kind = agent?.kind ?? agent?.name;
+  return kind === "claude" || kind === "codex" ? kind : null;
+}
+
+export function activeQuotaKind(state: SkinState): "claude" | "codex" | null {
+  return agentQuotaKind(state.cfg.agents.find((a) => a.name === state.agentName));
 }
 
 function activeAgentColor(state: SkinState): string {
@@ -526,7 +539,9 @@ export const useStore = create<State>((set, get) => {
     set({
       agentReady: false, tip: "Reconnecting…",
       sessions: {}, activeId: null,
-      models: [], modes: [], commands: [], configOptions: [], rateLimits: {},
+      // rateLimits is deliberately untouched: it's polled per provider,
+      // independent of this connection, and a restart shouldn't blank it.
+      models: [], modes: [], commands: [], configOptions: [],
       promptCapabilities: {}, pendingPermissions: [],
       busy: false, busySessionIds: {},
       promptStateRevision: get().promptStateRevision + 1,
@@ -567,7 +582,10 @@ export const useStore = create<State>((set, get) => {
     // one window, so this accumulates rather than replaces.
     const rl = p.update._meta?.["_claude/rateLimit"] as RateLimit | undefined;
     if (p.update.sessionUpdate === "usage_update" && rl?.rateLimitType) {
-      set({ rateLimits: { ...get().rateLimits, [rl.rateLimitType]: rl } });
+      // This _meta key only ever rides on a Claude usage_update — hardcoded
+      // rather than derived from the active agent, so it lands correctly even
+      // if a background Codex poll is what's currently being displayed.
+      set({ rateLimits: { ...get().rateLimits, claude: { ...get().rateLimits.claude, [rl.rateLimitType]: rl } } });
     }
     const st = get();
     const remotePrompt = p.update.sessionUpdate === "user_message_chunk";
@@ -880,7 +898,9 @@ export const useStore = create<State>((set, get) => {
     set({
       agentName, cwd: cwd || get().cwd,
       conn: "connecting", agentReady: false, tip,
-      sessions: {}, activeId: null, models: [], modes: [], commands: [], configOptions: [], rateLimits: {},
+      // rateLimits carries over: it's keyed by provider and polled independent
+      // of which agent is active, so a different provider's quota is still valid.
+      sessions: {}, activeId: null, models: [], modes: [], commands: [], configOptions: [],
       promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
@@ -1072,7 +1092,10 @@ export const useStore = create<State>((set, get) => {
         // switch retains sessions, wiping it would drop a background session's prompt
         // (its badge) on a switch-away/back. Entries carry their agentName so the
         // badge only surfaces prompts answerable on the now-active agent.
-        models: [], modes: [], commands: [], configOptions: [], rateLimits: {},
+        // rateLimits is NOT reset here: it's keyed by provider and polled
+        // continuously regardless of which agent is on screen, so switching
+        // away from Codex must not blank the Codex quota it already fetched.
+        models: [], modes: [], commands: [], configOptions: [],
         promptCapabilities: {}, busy: false, busySessionIds: {}, joining: false,
         promptStateRevision: get().promptStateRevision + 1,
       });
@@ -1354,17 +1377,19 @@ export const useStore = create<State>((set, get) => {
       });
     },
 
-    // Called by the /usage/limits poll. Replaces rather than merges: the route
-    // reports every window the account has, so folding it into whatever the ACP
-    // path happened to leave behind could only keep a staler copy of the same
-    // window alive. Same object back when nothing moved, since this runs on a
-    // timer and the strip subscribes to the map.
-    ingestUsageLimits(windows) {
-      const prev = get().rateLimits;
+    // Called by the /usage/limits poll, once per provider it's running for.
+    // Replaces rather than merges that provider's own windows: the route
+    // reports every window the account has, so folding it into whatever the
+    // ACP path happened to leave behind could only keep a staler copy of the
+    // same window alive. Other providers' entries are untouched. Same object
+    // back when nothing moved, since this runs on a timer and the strip
+    // subscribes to the map.
+    ingestUsageLimits(kind, windows) {
+      const prev = get().rateLimits[kind] ?? {};
       const same = Object.keys(windows).length === Object.keys(prev).length
         && Object.entries(windows).every(([k, w]) =>
           prev[k]?.utilization === w.utilization && prev[k]?.resetsAt === w.resetsAt);
-      if (!same) set({ rateLimits: windows });
+      if (!same) set({ rateLimits: { ...get().rateLimits, [kind]: windows } });
     },
 
     // Called by the /running poll: store the live snapshot and fold it into the

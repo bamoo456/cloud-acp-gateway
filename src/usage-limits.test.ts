@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { normalizeLimits, parseCredential } from "./usage-limits.ts";
+import { normalizeLimits, parseCredential, normalizeCodexLimits, parseCodexCredential } from "./usage-limits.ts";
 
 const AT = 1_700_000_000_000;
 
@@ -108,5 +108,60 @@ describe("parseCredential", () => {
 
   it("unparseable content is simply no credential", () => {
     assert.equal(parseCredential("not json"), "no-credential");
+  });
+});
+
+describe("normalizeCodexLimits", () => {
+  it("maps the 5h and weekly window_seconds to Claude's own keys", () => {
+    const out = normalizeCodexLimits({
+      rate_limit: {
+        primary_window: { used_percent: 12.5, reset_at: 1_700_003_600, limit_window_seconds: 18000 },
+        secondary_window: { used_percent: 30, reset_at: 1_700_600_000, limit_window_seconds: 604800 },
+      },
+    }, AT);
+    assert.ok(out.status === "ok");
+    assert.deepEqual(out.windows.five_hour, { utilization: 0.125, resetsAt: 1_700_003_600 });
+    assert.deepEqual(out.windows.seven_day, { utilization: 0.3, resetsAt: 1_700_600_000 });
+  });
+
+  it("primary/secondary are positional, not named — a swapped order still lands on the right key", () => {
+    const out = normalizeCodexLimits({
+      rate_limit: {
+        primary_window: { used_percent: 30, limit_window_seconds: 604800 },
+        secondary_window: { used_percent: 12.5, limit_window_seconds: 18000 },
+      },
+    }, AT);
+    assert.ok(out.status === "ok");
+    assert.equal(out.windows.five_hour.utilization, 0.125);
+    assert.equal(out.windows.seven_day.utilization, 0.3);
+  });
+
+  it("drops a window whose duration isn't one this gateway aligns to Claude's", () => {
+    const out = normalizeCodexLimits({
+      rate_limit: { primary_window: { used_percent: 50, limit_window_seconds: 86400 } },
+    }, AT);
+    assert.ok(out.status === "ok");
+    assert.deepEqual(out.windows, {});
+  });
+
+  it("a non-object body is unavailable, not an empty set of windows", () => {
+    assert.deepEqual(normalizeCodexLimits(null, AT), { status: "unavailable", reason: "http-error" });
+  });
+});
+
+describe("parseCodexCredential", () => {
+  it("reads the access token and account id out of tokens", () => {
+    assert.deepEqual(
+      parseCodexCredential(JSON.stringify({ tokens: { access_token: "tok", account_id: "acc" } })),
+      { accessToken: "tok", accountId: "acc" },
+    );
+  });
+
+  it("a credential with no access token is a re-auth", () => {
+    assert.equal(parseCodexCredential(JSON.stringify({ tokens: { refresh_token: "r" } })), "reauth");
+  });
+
+  it("unparseable content is simply no credential", () => {
+    assert.equal(parseCodexCredential("not json"), "no-credential");
   });
 });

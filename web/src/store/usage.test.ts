@@ -67,9 +67,9 @@ describe("usage_update", () => {
     ws.recv(usage("s1", { used: 1, size: 200_000, ...rateLimit("seven_day", 0.57, 1_700_100_000) }));
     ws.recv(usage("s1", { used: 1, size: 200_000, ...rateLimit("seven_day_opus", 0.1) }));
     await flush();
-    expect(Object.keys(useStore.getState().rateLimits).sort())
+    expect(Object.keys(useStore.getState().rateLimits.claude).sort())
       .toEqual(["five_hour", "seven_day", "seven_day_opus"]);
-    expect(useStore.getState().rateLimits.five_hour).toMatchObject({ utilization: 0.36, resetsAt: 1_700_000_000 });
+    expect(useStore.getState().rateLimits.claude.five_hour).toMatchObject({ utilization: 0.36, resetsAt: 1_700_000_000 });
   });
 
   test("a later event for the same window replaces it", async () => {
@@ -77,7 +77,7 @@ describe("usage_update", () => {
     ws.recv(usage("s1", { ...rateLimit("five_hour", 0.36) }));
     ws.recv(usage("s1", { ...rateLimit("five_hour", 0.41) }));
     await flush();
-    expect(useStore.getState().rateLimits.five_hour.utilization).toBe(0.41);
+    expect(useStore.getState().rateLimits.claude.five_hour.utilization).toBe(0.41);
   });
 
   test("an update carrying both halves applies both", async () => {
@@ -87,7 +87,7 @@ describe("usage_update", () => {
     ws.recv(usage("s1", { used: 90_000, size: 200_000, ...rateLimit("five_hour", 0.36) }));
     await flush();
     expect(useStore.getState().sessions.s1).toMatchObject({ contextUsed: 90_000 });
-    expect(useStore.getState().rateLimits.five_hour.utilization).toBe(0.36);
+    expect(useStore.getState().rateLimits.claude.five_hour.utilization).toBe(0.36);
   });
 
   test("limits from a session this client isn't holding still count", async () => {
@@ -96,14 +96,17 @@ describe("usage_update", () => {
     const { useStore, ws } = await bootClaude();
     ws.recv(usage("other-session", { ...rateLimit("seven_day", 0.57) }));
     await flush();
-    expect(useStore.getState().rateLimits.seven_day.utilization).toBe(0.57);
+    expect(useStore.getState().rateLimits.claude.seven_day.utilization).toBe(0.57);
   });
 
-  test("switching agents drops the previous account's limits", async () => {
+  test("switching agents keeps the previous account's limits", async () => {
+    // Each provider's quota is polled in the background regardless of which
+    // agent is active (App.tsx) — switching away from Claude must not blank
+    // the Claude entry the popover still shows it under.
     const { useStore, ws } = await bootClaude();
     ws.recv(usage("s1", { ...rateLimit("five_hour", 0.36) }));
     await flush();
     useStore.getState().setAgent("codex");
-    expect(useStore.getState().rateLimits).toEqual({});
+    expect(useStore.getState().rateLimits.claude.five_hour.utilization).toBe(0.36);
   });
 });
