@@ -42,6 +42,9 @@ describe("App usage strip", () => {
       listDir: vi.fn().mockResolvedValue({ root: "/", path: "/", parent: null, dirs: [] }),
       getPrefs: vi.fn().mockResolvedValue({ textSize: null, lock: null, recentSessions: [], recentFolders: [] }),
       putTextSize: vi.fn().mockResolvedValue(undefined),
+      // The status bar's diffstat: the file panel reads the checkout even
+      // while it is shut, so App-level renders touch this route too.
+      getWorkspaceChanges: vi.fn().mockResolvedValue({ repo: null, files: [], truncated: false }),
     }));
   });
 

@@ -26,8 +26,19 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 // gracefully; no test fails).
 import { Terminal } from "./components/Terminal.tsx";
 import { UsageStrip } from "./components/UsageStrip.tsx";
-import { IconTerminal } from "./lib/icons.tsx";
+import { IconTerminal, IconChat, IconBranch, IconClock } from "./lib/icons.tsx";
 import type { AgentRef } from "./types.ts";
+
+// The phone's four panes. A bottom tab bar rather than the desktop's three
+// columns squeezed narrow (§3 P5) — one pane at a time is what a 392px screen
+// can actually show.
+type MobileTab = "chat" | "changes" | "sessions" | "term";
+const TABS: Array<{ id: MobileTab; label: string; icon: () => JSX.Element }> = [
+  { id: "chat", label: "Chat", icon: () => <IconChat /> },
+  { id: "changes", label: "Changes", icon: () => <IconBranch /> },
+  { id: "sessions", label: "Sessions", icon: () => <IconClock /> },
+  { id: "term", label: "Term", icon: () => <IconTerminal /> },
+];
 
 export function App() {
   const bootstrap = useStore((s) => s.bootstrap);
@@ -39,6 +50,12 @@ export function App() {
   const cwd = useStore((s) => s.cwd);
   const terminalEnabled = useStore((s) => s.cfg.terminalEnabled);
   const conn = useStore((s) => s.conn);
+  const filesOpen = useStore((s) => s.filesOpen);
+  const toggleFiles = useStore((s) => s.toggleFiles);
+  // Cross-agent prompts waiting on an answer. The mobile Sessions tab carries
+  // the count the crumb used to (§3 P5) — the sessions list itself pins them.
+  const pendingCount = useStore((s) =>
+    s.inboxItems.filter((it) => it.reqId != null && it.sessionId !== s.activeId).length);
   // Machine-layer facts, in one row along the bottom edge (§1.4): the
   // transport, the folder's diffstat, the context window, the account's quota
   // and the terminal. Not the agent — the crumb and the dock already name it.
@@ -48,6 +65,13 @@ export function App() {
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
   useEffect(() => { bootstrap(); }, [bootstrap]);
+  // Derived, never stored: whichever sheet is open IS the current tab.
+  const mobileTab: MobileTab = terminalOpen ? "term" : filesOpen ? "changes" : panel ? "sessions" : "chat";
+  const pickTab = (t: MobileTab) => {
+    setPanel(t === "sessions");
+    if ((t === "changes") !== filesOpen) toggleFiles();
+    setTerminalOpen(t === "term");
+  };
   // Ctrl-` toggles the terminal, the shortcut the strip advertises. Capture
   // phase and stopPropagation because xterm listens on its own textarea: once
   // the panel has focus, a bubbling handler would reach us only after the
@@ -181,6 +205,25 @@ export function App() {
         )}
       </div>
       {terminalEnabled && terminalOpen && <Terminal cwd={cwd} onEmpty={() => setTerminalOpen(false)} />}
+      {/* Phone only (CSS). Below the desktop breakpoint the sidebar and the file
+          panel are sheets over the chat, which is the same "one pane at a time"
+          the tab bar makes explicit — so the tab is DERIVED from the state those
+          sheets already use rather than being a fourth source of truth that
+          could disagree with them. */}
+      <nav className="tabbar">
+        {TABS.map((t) => {
+          if (t.id === "term" && !terminalEnabled) return null;
+          const on = mobileTab === t.id;
+          const n = t.id === "changes" ? changeStat?.files ?? 0 : t.id === "sessions" ? pendingCount : 0;
+          return (
+            <button key={t.id} className={on ? "on" : ""} aria-pressed={on} data-t={t.id}
+              onClick={() => pickTab(t.id)}>
+              {t.icon()}{t.label}
+              {n > 0 && <span className="n">{n}</span>}
+            </button>
+          );
+        })}
+      </nav>
       {locked && <LockScreen />}
     </>
   );

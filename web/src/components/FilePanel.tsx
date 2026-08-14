@@ -106,6 +106,18 @@ function Section({ title, count, open, onToggle, children }: {
   );
 }
 
+// The one-line summary of the same read the panel does — null when the folder
+// is clean, so the status bar and the tab badge can drop out entirely rather
+// than saying "0 files".
+function diffstat(r: ChangesResult) {
+  if (!r.files.length) return null;
+  return {
+    files: r.files.length,
+    additions: r.files.reduce((n, f) => n + (f.additions ?? 0), 0),
+    deletions: r.files.reduce((n, f) => n + (f.deletions ?? 0), 0),
+  };
+}
+
 // One file row. Its lead glyph is the whole answer to "does git know about
 // this": a tracked-and-changed file gets git's own status letter, in git's own
 // colours, and everything else — a file outside the repo, one written and
@@ -215,13 +227,7 @@ export function FilePanel() {
         setChanges(r); setErr(null);
         // The status bar reports the same diffstat (§1.4) and has no reader of
         // its own, so publish the total here rather than fetching it twice.
-        setChangeStat(r.files.length
-          ? {
-            files: r.files.length,
-            additions: r.files.reduce((n, f) => n + (f.additions ?? 0), 0),
-            deletions: r.files.reduce((n, f) => n + (f.deletions ?? 0), 0),
-          }
-          : null);
+        setChangeStat(diffstat(r));
       })
       .catch((e: Error) => { if (mine === gen.current) { setChanges(null); setChangeStat(null); setErr(e.message || "Couldn't read this folder's changes."); } })
       .finally(() => { if (mine === gen.current) setLoading(false); });
@@ -241,15 +247,22 @@ export function FilePanel() {
       .catch(() => { if (mine === gen.current) setReviewCount(0); });
   }
 
-  // Fetched whenever the panel is open, because Outputs now depends on it: git
-  // is what supplies a row's status letter and line counts, and what surfaces
-  // the files an agent wrote through a shell (which name no path in any tool
-  // call). Still gated on `open` — with the panel shut, nobody is looking, and
-  // the status bar's diffstat is a summary of what this read anyway, not a
-  // second reason to run `git status` on a folder nobody has asked about.
+  // With the panel shut, the count is still on screen — in the status bar, and
+  // on a phone as the Changes tab's badge (§3 P5) — so the checkout is still
+  // read, but only for that: no Outputs, no review draft, no file lists to
+  // build for a panel nobody is looking at.
+  function loadStat() {
+    const mine = ++gen.current;
+    getWorkspaceChanges(cwd)
+      .then((r) => { if (mine === gen.current) setChangeStat(diffstat(r)); })
+      .catch(() => { if (mine === gen.current) setChangeStat(null); });
+  }
+
+  // The open panel reads the checkout because Outputs is built from it: git is
+  // what supplies a row's status letter and line counts, and what surfaces the
+  // files an agent wrote through a shell (which name no path in any tool call).
   useEffect(() => {
-    if (!open) return;
-    loadChanges();
+    if (open) loadChanges(); else loadStat();
     // The panel is closed and reopened, not unmounted, so retire any in-flight
     // request on the way out rather than letting it repaint a stale list later.
     return () => { gen.current++; };
@@ -263,7 +276,7 @@ export function FilePanel() {
   useEffect(() => {
     const justFinished = wasWorking.current && !working;
     wasWorking.current = working;
-    if (justFinished && open) loadChanges();
+    if (justFinished) { if (open) loadChanges(); else loadStat(); }
   }, [working, open]);
 
   // Width is applied inline, so it must only exist in column mode — below the
