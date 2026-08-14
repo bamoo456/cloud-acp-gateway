@@ -354,6 +354,57 @@ test("Esc cancels the folder browser", async ({ page }) => {
   await expect(page.locator("#fb")).toHaveCount(0);
 });
 
+// The usage strip is the only shrinkable segment in the status bar (its
+// siblings are nowrap, so they never give a pixel back) — every other segment
+// is therefore paid for out of the quota's width. On a phone a big diffstat
+// alone pushed all four quota windows off the right edge, into a scroll nobody
+// can see: the strip read "ctx 56%" and nothing else. The diffstat and a
+// healthy "connected" drop below 640px so the quota fits.
+test("the quota windows stay on screen on a phone, behind a big diffstat", async ({ page }) => {
+  const CWD = "/home/user/workspace";
+  await page.route(/\/usage\/limits/, (r) => r.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      status: "ok",
+      windows: {
+        // Four windows at their widest: "100%" is one digit more than a normal
+        // reading, and Opus/Sonnet carry the longest labels.
+        five_hour: { rateLimitType: "five_hour", utilization: 0.36 },
+        seven_day: { rateLimitType: "seven_day", utilization: 0.57 },
+        seven_day_opus: { rateLimitType: "seven_day_opus", utilization: 0.84 },
+        seven_day_sonnet: { rateLimitType: "seven_day_sonnet", utilization: 1 },
+      },
+    }),
+  }));
+  await page.route(/\/workspace\/changes/, (r) => r.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      repo: CWD,
+      files: Array.from({ length: 500 }, (_, i) => ({
+        path: `src/f${i}.ts`, status: "modified",
+        additions: i === 0 ? 94358 : 0, deletions: i === 0 ? 7162 : 0,
+      })),
+    }),
+  }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(SEED_SSE(1));
+  await page.goto(`/?cwd=${encodeURIComponent(CWD)}`);
+
+  await expect(page.locator(".usage-strip .u-seg")).toHaveCount(4);
+  await expect(page.locator(".statusbar .sb-diff")).toBeHidden();
+  await expect(page.locator(".statusbar .conn")).toBeHidden();
+  const strip = await page.locator(".usage-strip").evaluate((el) => ({
+    scroll: el.scrollWidth, client: el.clientWidth,
+  }));
+  expect(strip.scroll, "every quota window must fit without a hidden sideways scroll")
+    .toBeLessThanOrEqual(strip.client + 1);
+
+  // Desktop has the room for all of it, and keeps it.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.locator(".statusbar .sb-diff")).toBeVisible();
+  await expect(page.locator(".statusbar .conn")).toHaveText("connected");
+});
+
 test("slash-command menu dismisses on an outside click", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
