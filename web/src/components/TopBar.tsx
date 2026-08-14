@@ -2,7 +2,6 @@ import { useState } from "react";
 import { useStore } from "../store/store.ts";
 import { ActionMenu } from "./ActionMenu.tsx";
 import { PendingPermissions } from "./PendingPermissions.tsx";
-import { RunningTasks } from "./RunningTasks.tsx";
 import { basename, dirname } from "../lib/format.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { IconClock, IconPlus, IconDots, IconPanel } from "../lib/icons.tsx";
@@ -39,7 +38,13 @@ export function TopBar({ onPanel, onPicker }: { onPanel: () => void; onPicker: (
         onClick={() => { if (isDesktopSidebarWidth()) s.toggleSidebar(); else onPanel(); }}><IconClock /></button>
       <Crumb cwd={s.cwd} title={sess ? sess.title : "Untitled"} onPicker={onPicker} />
       <span className="sp" />
-      <RunningTasks />
+      {/* The cross-agent RUNNING badge is gone: the sessions list pins running
+          conversations above the fold now (P4), and jumping to one is all that
+          badge ever did. The PENDING badge stays, deliberately against the
+          plan's §3 P2 note — the list pins waiting prompts too, but pinning
+          only makes them visible, and this popup is the only place a prompt on
+          an agent this client has no live connection to can be ANSWERED
+          without first switching sessions. */}
       <PendingPermissions />
       <button className="icon-btn" title="Conversation menu" onClick={() => setMenu((v) => !v)}><IconDots /></button>
       <button className="icon-btn" title="New chat" onClick={() => { if (s.agentReady) s.newSession(); }}><IconPlus /></button>

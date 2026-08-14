@@ -3,7 +3,8 @@ import { TEXT_SIZE_OPTIONS, useStore } from "../store/store.ts";
 import { resumeCommand } from "../lib/config.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { setLockPin, clearLock, MIN_PIN_LENGTH } from "../lib/lock.ts";
-import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconPencil, IconTrash, IconType, IconLock, IconX } from "../lib/icons.tsx";
+import { IDENTITY_OPTIONS, applyIdentity, readIdentity, type Identity } from "../lib/identity.ts";
+import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconCircle, IconPencil, IconTrash, IconType, IconLock, IconX } from "../lib/icons.tsx";
 import type { ConfigOption } from "../types.ts";
 
 function configRank(option: ConfigOption): number {
@@ -31,11 +32,15 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   const [pin1, setPin1] = useState("");
   const [pin2, setPin2] = useState("");
   const [pinErr, setPinErr] = useState("");
+  // Per-screen taste, kept out of the store because it is neither shared across
+  // devices nor read by anything but <html> (see lib/identity.ts).
+  const [identity, setIdentity] = useState<Identity>(readIdentity);
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const resumableId = s.activeId && !s.activeId.startsWith("pending-") ? s.activeId : null;
   const curModel = s.models.find((m) => m.modelId === sess?.modelId)?.name || "";
   const curMode = s.modes.find((m) => m.id === sess?.mode)?.name || "";
   const curTextSize = TEXT_SIZE_OPTIONS.find((o) => o.id === s.textSize)?.label || "Default";
+  const curIdentity = IDENTITY_OPTIONS.find((o) => o.id === identity)?.label || "Wordmark";
   const hasConfigOptions = s.configOptions.length > 0;
   const agentRef = s.cfg.agents.find((a) => a.name === s.agentName);
   const hasHistory = agentRef?.history !== false;
@@ -135,6 +140,10 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
               <IconType /><span className="col"><span>Text size</span><span className="sub">adjust chat readability</span></span>
               <span className="gt">{curTextSize} <IconChevron /></span>
             </button>
+            <button className="arow" onClick={() => setView("identity")}>
+              <IconCircle /><span className="col"><span>Agent identity</span><span className="sub">how much of the agent's colour to show</span></span>
+              <span className="gt">{curIdentity} <IconChevron /></span>
+            </button>
             <button className="arow" onClick={() => setView("lock")}>
               <IconLock /><span className="col"><span>Screen lock</span><span className="sub">require a PIN on reload or reconnect</span></span>
               <span className="gt">{s.lockEnabled ? "On" : "Off"} <IconChevron /></span>
@@ -182,6 +191,19 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
                 onClick={() => s.setTextSize(opt.id)}>
                 <span className="col"><span>{opt.label}</span><span className="sub">{opt.description}</span></span>
                 <span className="gt"><span className={"sample sample-" + opt.id}>Aa</span>{s.textSize === opt.id && "✓"}</span>
+              </button>
+            ))}
+          </>
+        )}
+        {view === "identity" && (
+          <>
+            <div className="ahead"><button className="iback" onClick={() => setView("main")}><IconBack /></button>Agent identity</div>
+            <div className="amenu-note">The agent is a wordmark, not a colour — so amber can mean "needs you" and green can mean "added line" without competing with a brand. Turn the colour back on here if you prefer it.</div>
+            {IDENTITY_OPTIONS.map((opt) => (
+              <button key={opt.id} className={"arow" + (identity === opt.id ? " on" : "")}
+                onClick={() => { applyIdentity(opt.id); setIdentity(opt.id); }}>
+                <span className="col"><span>{opt.label}</span><span className="sub">{opt.description}</span></span>
+                {identity === opt.id && <span className="gt">✓</span>}
               </button>
             ))}
           </>

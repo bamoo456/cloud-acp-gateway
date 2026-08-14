@@ -29,8 +29,12 @@ describe("global styles", () => {
     expect(cssRule(".diff .path")).toMatch(/text-overflow\s*:\s*ellipsis/);
   });
 
-  test("mobile header gives width priority to navigation and the folder chip", () => {
-    expect(styles).toMatch(/@media \(max-width: 640px\)[\s\S]*header \.conn\s*\{\s*display:\s*none;\s*\}/);
+  test("the crumb gives width to the path, and cuts the parents first", () => {
+    // The connection moved to the status bar, so the crumb no longer has to
+    // drop it on a phone — what it drops instead is the folder's parents, which
+    // are context; the folder itself and the session title stay.
+    expect(styles).toMatch(/@media \(max-width: 640px\)\s*\{\s*\.crumb-path \.up\s*\{\s*display:\s*none;\s*\}/);
+    expect(cssRule(".crumb-path b")).toMatch(/flex\s*:\s*0 0 auto/);
   });
 
   test("desktop columns reset the mobile sheet max-height", () => {
@@ -108,6 +112,17 @@ describe("global styles", () => {
 
     expect(hue).toMatch(/--accent\s*:\s*var\(--agent-color/);
     expect(hue).toMatch(/--accent-text\s*:\s*#fff/);
+  });
+
+  test("exactly one bar reserves the home-indicator inset", () => {
+    // Three stacked bars each adding env(safe-area-inset-bottom) is ~100px of
+    // dead space on an iPhone. Whichever one is last owns it: the tab bar on a
+    // phone, the status bar (or the terminal) from the desktop breakpoint up.
+    // (the bare `.tabbar` rule only hides it; the one that matters is the
+    // phone-breakpoint one that turns it on)
+    expect(styles).toMatch(/\.tabbar \{[^}]*padding-bottom:\s*env\(safe-area-inset-bottom\)/);
+    expect(styles).toMatch(/@media \(max-width: 859px\) \{\s*\.statusbar, \.term-panel \{ padding-bottom: 0/);
+    expect(cssRule("#root:has(.statusbar) footer")).toMatch(/padding-bottom:\s*8px/);
   });
 
   test("green means diff + and nothing else", () => {

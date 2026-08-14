@@ -83,6 +83,9 @@ const ROUTES: Record<string, unknown> = {
   },
   "/workspace/changes": {
     repo: CWD,
+    // `abs` is what the panel keys and addresses every row by (see
+    // src/workspace.test.ts:466 for the real shape) — without it React sees a
+    // list of undefined keys.
     files: [
       { path: "src/gateway.ts", status: "modified", additions: 12, deletions: 4 },
       { path: "web/src/components/UsageStrip.tsx", status: "modified", additions: 8, deletions: 2 },
@@ -91,7 +94,7 @@ const ROUTES: Record<string, unknown> = {
       { path: "src/usageCache.test.ts", status: "added", additions: 58, deletions: 0 },
       { path: "web/src/store/store.ts", status: "modified", additions: 6, deletions: 6 },
       { path: "web/src/lib/usagePoll.ts", status: "deleted", additions: 0, deletions: 22 },
-    ],
+    ].map((f) => ({ ...f, abs: CWD + "/" + f.path })),
     truncated: false,
   },
   "/workspace/outputs": { folders: [] },
@@ -164,7 +167,9 @@ useStore.setState({
   bootstrap: () => {}, ensureConnected: () => {},
   agentName: "claude", cwd: CWD, conn: "connected", agentReady: true,
   activeId: "s-usage", sessions: { "s-usage": session },
-  sidebarOpen: true, filesOpen: true,
+  // On a phone the panels are tabs, so opening one starts the harness on the
+  // wrong tab; only the desktop layout wants the changes column open.
+  sidebarOpen: true, filesOpen: window.innerWidth >= 1100,
   models: [
     { modelId: "opus", name: "Opus 4.8", description: "Most capable" },
     { modelId: "sonnet", name: "Sonnet 4.8", description: "Fast" },
