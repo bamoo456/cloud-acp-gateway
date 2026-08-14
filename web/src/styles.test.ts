@@ -37,6 +37,16 @@ describe("global styles", () => {
     expect(cssRule(".crumb-path b")).toMatch(/flex\s*:\s*0 0 auto/);
   });
 
+  test("the session list is sized for a phone, not a 284px column", () => {
+    // Desktop sizes (13px titles, 10.5px folder/time) applied unchanged to the
+    // full-screen phone panel, where the metadata line stopped being readable.
+    const phone = styles.match(/@media \(max-width: 640px\) \{\s*\.sess-item \.name[\s\S]*?\n  \}/)?.[0] ?? "";
+
+    expect(phone).toMatch(/\.sess-item \.name \{ font-size: 15px/);
+    expect(phone).toMatch(/\.folder-name, \.sess-item \.when \{ font-size: 12px/);
+    expect(phone).toMatch(/\.sb-head[^{]*\{ font-size: 12px/);
+  });
+
   test("desktop columns reset the mobile sheet max-height", () => {
     // The mobile sheet rules cap #panel/#files with a 100dvh-based max-height;
     // the desktop column overrides set height: 100% but inherit that cap, which

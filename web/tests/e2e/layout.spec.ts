@@ -471,3 +471,38 @@ test("slash-command menu dismisses on an outside click", async ({ page }) => {
   await page.locator("main").click({ position: { x: 30, y: 90 } });
   await expect(page.locator(".cmds.open")).toHaveCount(0);
 });
+
+// The engine dock puts the permission mode at one end of a row and the model /
+// thinking level at the other. Both chips are `flex: 0 1 auto`, so at 390px they
+// shrank together: the mode was cut to "Au…" while the model still read
+// "Default (recommende…", and the spacer between them collapsed to zero, leaving
+// the two borders touching.
+test("the engine dock reads at 390px instead of crushing both chips", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(SEED_SSE(1));
+  await page.goto("/");
+  await expect(page.locator(".dock .mchip").first()).toBeVisible();
+
+  const measure = () => page.evaluate(() => {
+    const chip = document.querySelector(".dock .mchip:not(.mchip-mode)")!;
+    const mode = document.querySelector(".dock .mchip-mode")!;
+    const model = chip.querySelector(".am")!;
+    return {
+      gap: Math.round(chip.getBoundingClientRect().left - mode.getBoundingClientRect().right),
+      modelClipped: model.scrollWidth - model.clientWidth,
+      modeClipped: mode.scrollWidth - mode.clientWidth,
+      // Dropped at every width, not just here: the composer's placeholder says
+      // "Reply to <agent>" on a desktop too.
+      agentInChip: chip.querySelector(".wm") !== null,
+    };
+  });
+
+  const phone = await measure();
+  expect(phone.gap, "the two chips must not end up border to border").toBeGreaterThanOrEqual(8);
+  expect(phone.modelClipped, "the model name is the one fact with nowhere else to appear").toBe(0);
+  expect(phone.modeClipped, "and the permission mode must stay readable").toBe(0);
+  expect(phone.agentInChip).toBe(false);
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  expect((await measure()).agentInChip).toBe(false);
+});
