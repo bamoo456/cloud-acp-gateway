@@ -523,13 +523,20 @@ export async function getRunning(): Promise<RunningTask[]> {
 // or Codex's ChatGPT-backend one on "codex". `unlimited` is set for a
 // Business/enterprise seat, which reports no windows at all — metered by
 // credits instead — so the UI has something to show besides a blank row.
-export interface UsageLimitsResult { windows: Record<string, RateLimit>; unlimited?: boolean }
+export interface UsageLimitsResult { windows: Record<string, RateLimit>; unlimited?: boolean; unavailable?: string }
 
 export async function getUsageLimits(kind: "claude" | "codex" = "claude"): Promise<UsageLimitsResult | null> {
   try {
     const r = await fetch(base() + "/usage/limits?kind=" + kind);
     if (!r.ok) return null;
     const j = await r.json();
+    // "unavailable" is an answer, not a failure — the gateway says it when the
+    // account's credential is expired or missing, which no amount of retrying
+    // fixes. Passing it through is what lets the strip say so; dropping it (as
+    // this did) leaves an empty gauge that reads as a broken feature.
+    if (j?.status === "unavailable") {
+      return { windows: {}, unavailable: typeof j.reason === "string" ? j.reason : "unknown" };
+    }
     if (j?.status !== "ok" || !j.windows || typeof j.windows !== "object") return null;
     return { windows: j.windows as Record<string, RateLimit>, unlimited: j.unlimited === true || undefined };
   } catch {

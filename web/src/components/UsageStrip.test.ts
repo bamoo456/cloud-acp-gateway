@@ -239,4 +239,31 @@ describe("UsageStrip", () => {
     expect(rows).toHaveLength(2);
     expect(rows[1].querySelector(".u-seg b")!.textContent).toBe("∞");
   });
+
+  // A stale credential used to render an empty strip, which reads as "the quota
+  // gauge is broken" rather than "go and sign in again".
+  test("a quota the gateway can't read says so, and says it needs you", async () => {
+    await render({ activeId: null, sessions: {}, rateLimits: {}, quotaUnavailable: { claude: "expired" } });
+    const seg = strip().querySelector(".u-seg")!;
+    expect(seg.textContent).toBe("quotare-auth");
+    expect(seg.querySelector("b")!.className).toBe("warn");
+    expect(seg.getAttribute("title")).toContain("expired");
+  });
+
+  // A blip is not something the user can act on, so it gets no amber.
+  test("a transient reason is reported without demanding anything", async () => {
+    await render({ activeId: null, sessions: {}, rateLimits: {}, quotaUnavailable: { claude: "network" } });
+    const seg = strip().querySelector(".u-seg")!;
+    expect(seg.textContent).toBe("quotanetwork");
+    expect(seg.querySelector("b")!.className).toBe("");
+  });
+
+  test("a reason never displaces windows that did arrive", async () => {
+    await render({
+      activeId: null, sessions: {},
+      rateLimits: { claude: { five_hour: { rateLimitType: "five_hour", utilization: 0.36 } } },
+      quotaUnavailable: { claude: "network" },
+    });
+    expect([...strip().querySelectorAll(".u-seg")].map((e) => e.textContent)).toEqual(["5h36%"]);
+  });
 });
