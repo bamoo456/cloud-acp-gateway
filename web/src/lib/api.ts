@@ -513,15 +513,17 @@ export async function getRunning(): Promise<RunningTask[]> {
   }
 }
 
-// This account's Claude quota windows, keyed the same way the ACP rate-limit
-// path keys them ("five_hour", "seven_day", …) and carrying the same
+// This account's quota windows, keyed the same way the ACP rate-limit path
+// keys them ("five_hour", "seven_day", …) and carrying the same
 // {utilization, resetsAt} shape, so both sources land in one store map and the
 // gauge renders them identically. Unlike the ACP path this needs no turn to have
 // happened. `null` means the gateway couldn't say (too old to have the route,
-// offline, no Claude credential) — which is different from "no windows".
-export async function getUsageLimits(): Promise<Record<string, RateLimit> | null> {
+// offline, no credential) — which is different from "no windows". `kind`
+// selects which account the gateway reads — Claude's own OAuth usage endpoint,
+// or Codex's ChatGPT-backend one on "codex".
+export async function getUsageLimits(kind: "claude" | "codex" = "claude"): Promise<Record<string, RateLimit> | null> {
   try {
-    const r = await fetch(base() + "/usage/limits");
+    const r = await fetch(base() + "/usage/limits?kind=" + kind);
     if (!r.ok) return null;
     const j = await r.json();
     if (j?.status !== "ok" || !j.windows || typeof j.windows !== "object") return null;
