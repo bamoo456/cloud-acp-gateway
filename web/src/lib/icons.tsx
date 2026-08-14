@@ -163,24 +163,6 @@ export function IconPanel() {
   );
 }
 
-// The phone tab bar's two glyphs that had no icon yet: a speech bubble for the
-// conversation, a branch for the folder's changes.
-export function IconChat() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 5h16v11H9l-5 4Z" />
-    </svg>
-  );
-}
-
-export function IconBranch() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M6 3v12a3 3 0 0 0 3 3h6" /><circle cx="6" cy="18" r="2.4" /><circle cx="18" cy="6" r="2.4" />
-    </svg>
-  );
-}
-
 // A file's glyph, chosen from its type (see lib/fileKind.ts): a document with
 // the mark of what it holds. One component rather than six exports because the
 // caller always has a FileIcon string, never a specific icon in mind.

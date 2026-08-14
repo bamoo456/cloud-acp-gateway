@@ -587,36 +587,11 @@
   .search-hit-snippet mark { background: var(--hit-bg, rgba(255, 214, 0, 0.35)); color: inherit; }
   .panel-note { font-size: 0.8em; opacity: 0.6; padding: 4px 12px; }
 
-  /* ---- phone: a bottom tab bar instead of the desktop's three columns ----
-     Sheets over the chat were already "one pane at a time"; the tab bar just
-     says so out loud, and gives Changes and Sessions a badge (§3 P5). Hidden
-     from the desktop breakpoint up, where the panes are real columns. */
-  .tabbar { display: none; }
+  /* ---- phone: one pane at a time ----
+     Below the desktop breakpoint the sidebar and the file panel take the whole
+     pane rather than floating over the chat: no scrim, no rounded card. The
+     header buttons they belong to are what closes them again. */
   @media (max-width: 859px) {
-    .tabbar {
-      flex: 0 0 auto; display: flex; height: calc(52px + env(safe-area-inset-bottom));
-      padding-bottom: env(safe-area-inset-bottom);
-      background: var(--surface-2); border-top: 1px solid var(--border); z-index: 40;
-    }
-    .tabbar button {
-      flex: 1; position: relative; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 3px; color: var(--muted);
-      font-family: var(--mono); font-size: 10px;
-    }
-    .tabbar button.on { color: var(--text); }
-    .tabbar button.on::before { content: ""; position: absolute; top: 0; left: 24%; right: 24%; height: 2px; background: var(--ink); }
-    .tabbar button svg { width: 19px; height: 19px; }
-    /* A changed-file count is just a count, so it is ink; a waiting prompt is
-       "needs you", so that one — and only that one — is amber (§1.1). */
-    .tabbar .n {
-      position: absolute; top: 5px; right: calc(50% - 20px); min-width: 15px; height: 15px; padding: 0 3px;
-      border-radius: 4px; background: var(--ink); color: var(--on-ink);
-      font: 9.5px/15px var(--mono); text-align: center;
-    }
-    .tabbar button[data-t="sessions"] .n { background: var(--warn); color: #fff; }
-    /* A tab is the whole pane, not a sheet floating over the chat: no scrim, no
-       rounded card, and it stops above the bar rather than above the home
-       indicator (the bar owns that inset now). */
     #scrim, #files-scrim { display: none !important; }
     #panel.open, #files.open {
       top: calc(var(--crumb-h) + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0;
@@ -626,7 +601,6 @@
     /* The composer belongs to the chat pane, so it goes with it. */
     #root:has(#panel.open) footer, #root:has(#files.open) footer,
     #root:has(#panel.open) .dock, #root:has(#files.open) .dock { display: none; }
-    #root:has(.term-panel) .statusbar { display: none; }
   }
   /* scrim behind panel */
   #scrim { position: fixed; inset: 0; z-index: 20; display: none; }
@@ -1242,12 +1216,6 @@
   #root:has(.statusbar) footer { padding-bottom: 8px; }
   .statusbar:has(+ .term-panel) { padding-bottom: 0; }
   .term-panel { padding-bottom: env(safe-area-inset-bottom); }
-  /* …and below the desktop breakpoint the tab bar is the bottom edge instead,
-     so it is the only one that may reserve the inset. Written here rather than
-     in the phone block above because these two rules are what it overrides. */
-  @media (max-width: 859px) {
-    .statusbar, .term-panel { padding-bottom: 0; }
-  }
   /* one chip per shell, numbered; the whole row is flush against the panel's
      top edge, under the drag handle */
   .term-tabs { flex: 0 0 auto; display: flex; align-items: center; gap: 4px;

@@ -102,25 +102,13 @@ describe("App running-task polling", () => {
   });
 
   // Shares this block's mocks rather than standing up a second App harness.
-  test("the phone tab bar badges the changed files and the waiting prompts", async () => {
+  test("the status bar carries the diffstat", async () => {
     await render();
     const { useStore } = await import("./store/store.ts");
     act(() => {
-      useStore.setState({
-        changeStat: { files: 7, additions: 128, deletions: 35 },
-        inboxItems: [{
-          id: 1, type: "permission", agentName: "claude", sessionId: "other",
-          reqId: "99", title: "Edit", options: [], status: "pending", createdAt: "now",
-        }] as any,
-      });
+      useStore.setState({ changeStat: { files: 7, additions: 128, deletions: 35 } });
     });
-    const badge = (tab: string) =>
-      container.querySelector(`.tabbar button[data-t="${tab}"] .n`)?.textContent;
 
-    expect(badge("changes")).toBe("7");
-    expect(badge("sessions")).toBe("1"); // the badge P2 took off the crumb
-    // The same diffstat, said once more only because the bar is the other
-    // half of the phone's bottom edge (§1.4) — not a third copy elsewhere.
     expect(container.querySelector(".statusbar")?.textContent).toContain("7 files");
   });
 });

@@ -158,13 +158,12 @@ describe("global styles", () => {
   });
 
   test("exactly one bar reserves the home-indicator inset", () => {
-    // Three stacked bars each adding env(safe-area-inset-bottom) is ~100px of
-    // dead space on an iPhone. Whichever one is last owns it: the tab bar on a
-    // phone, the status bar (or the terminal) from the desktop breakpoint up.
-    // (the bare `.tabbar` rule only hides it; the one that matters is the
-    // phone-breakpoint one that turns it on)
-    expect(styles).toMatch(/\.tabbar \{[^}]*padding-bottom:\s*env\(safe-area-inset-bottom\)/);
-    expect(styles).toMatch(/@media \(max-width: 859px\) \{\s*\.statusbar, \.term-panel \{ padding-bottom: 0/);
+    // Two stacked bars each adding env(safe-area-inset-bottom) is dead space on
+    // an iPhone. Whichever one is last owns it: the status bar, or the terminal
+    // when that is docked below it.
+    expect(cssRule(".statusbar")).toMatch(/padding-bottom:\s*env\(safe-area-inset-bottom\)/);
+    expect(cssRule(".statusbar:has(+ .term-panel)")).toMatch(/padding-bottom:\s*0/);
+    expect(styles).toMatch(/\.term-panel \{ padding-bottom:\s*env\(safe-area-inset-bottom\)/);
     expect(cssRule("#root:has(.statusbar) footer")).toMatch(/padding-bottom:\s*8px/);
   });
 
