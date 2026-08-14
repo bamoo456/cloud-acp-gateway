@@ -97,6 +97,11 @@ interface State {
   // Business/enterprise seat metered by credits instead (UsageStrip.tsx shows
   // this as an unbounded gauge rather than leaving the row blank).
   quotaUnlimited: Record<string, boolean>;
+  // provider kind -> why the gateway could not read that account's quota
+  // ("expired", "reauth", "no-credential", "network", …), or absent when it
+  // could. A quota that silently renders nothing is indistinguishable from a
+  // broken gauge, and the credential reasons need the user to go and re-auth.
+  quotaUnavailable: Record<string, string>;
   promptCapabilities: PromptCapabilities; // what the active agent accepts in a prompt (image, …)
   pendingPermissions: PendingPermission[];
   promptStateRevision: number;
@@ -182,7 +187,7 @@ interface State {
   // a listing covers one folder (or one provider's discoverable store), so absence
   // from it means "not asked about", never "no longer named".
   mergeHistoryTitles: (rows: Array<{ agentName: string; sessionId: string; title: string | null }>) => void;
-  ingestUsageLimits: (kind: string, windows: Record<string, RateLimit>, unlimited?: boolean) => void;
+  ingestUsageLimits: (kind: string, windows: Record<string, RateLimit>, unlimited?: boolean, unavailable?: string) => void;
   ingestRunningTasks: (tasks: RunningTask[]) => void;
   ingestInboxItems: (items: InboxItem[], expectedRevision: number) => void;
   ensureConnected: () => void;
@@ -1012,7 +1017,7 @@ export const useStore = create<State>((set, get) => {
     cwd: initialAgent?.cwd || cfg.fsRoot || "",
     conn: "connecting", agentReady: false, tip: "Connecting to the local agent…",
     sessions: {}, activeId: null,
-    models: [], modes: [], commands: [], configOptions: [], rateLimits: {}, quotaUnlimited: {},
+    models: [], modes: [], commands: [], configOptions: [], rateLimits: {}, quotaUnlimited: {}, quotaUnavailable: {},
     promptCapabilities: {},
     pendingPermissions: [],
     promptStateRevision: 0,
@@ -1388,18 +1393,31 @@ export const useStore = create<State>((set, get) => {
     // same window alive. Other providers' entries are untouched. Same object
     // back when nothing moved, since this runs on a timer and the strip
     // subscribes to the map.
-    ingestUsageLimits(kind, windows, unlimited) {
+    ingestUsageLimits(kind, windows, unlimited, unavailable) {
+      const prevReason = get().quotaUnavailable[kind] ?? "";
+      const nextReason = unavailable ?? "";
+      // An unavailable answer carries no windows, and must not be read as "this
+      // account now has none": a blip mid-session would wipe a gauge that was
+      // right a minute ago. Only the reason changes; whatever was last known
+      // stays on screen, and the reason speaks for itself when nothing is.
+      if (unavailable) {
+        if (prevReason === nextReason) return;
+        set({ quotaUnavailable: { ...get().quotaUnavailable, [kind]: nextReason } });
+        return;
+      }
       const prevWindows = get().rateLimits[kind] ?? {};
       const sameWindows = Object.keys(windows).length === Object.keys(prevWindows).length
         && Object.entries(windows).every(([k, w]) =>
           prevWindows[k]?.utilization === w.utilization && prevWindows[k]?.resetsAt === w.resetsAt);
       const prevUnlimited = !!get().quotaUnlimited[kind];
       const nextUnlimited = !!unlimited;
-      if (sameWindows && prevUnlimited === nextUnlimited) return;
+      if (sameWindows && prevUnlimited === nextUnlimited && prevReason === nextReason) return;
       set({
         rateLimits: sameWindows ? get().rateLimits : { ...get().rateLimits, [kind]: windows },
         quotaUnlimited: prevUnlimited === nextUnlimited
           ? get().quotaUnlimited : { ...get().quotaUnlimited, [kind]: nextUnlimited },
+        quotaUnavailable: prevReason === nextReason
+          ? get().quotaUnavailable : { ...get().quotaUnavailable, [kind]: nextReason },
       });
     },
 

@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { SEED_SSE } from "./seed-sse.ts";
 
 // Two conversations under the same agent: chat in #1 (seeded), start #2 from
-// the "New chat" button, switch back to #1 via the sidebar Recent list.
+// the "New chat" button, switch back to #1 via the sidebar session list.
 // The thread must NOT reload from /history and must keep its messages intact.
 test("switching back to a background conversation is instant and loss-free", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -13,9 +13,15 @@ test("switching back to a background conversation is instant and loss-free", asy
     historyMessagesCalls++;
     return r.fulfill({ contentType: "application/json", body: JSON.stringify({ messages: [], total: 0, truncated: false }) });
   });
-  // Stub the conversation list so the sidebar doesn't show stale data.
+  // The sidebar builds its list from the gateway's own conversation list, not
+  // from whatever happens to be live in this tab — so sess-1 has to be in it to
+  // be clickable at all. That it is *also* live is the whole point: clicking a
+  // listed conversation this tab already holds must not go back to the gateway.
   await page.route(/\/history\?/, (r) =>
-    r.fulfill({ contentType: "application/json", body: JSON.stringify({ sessions: [] }) }),
+    r.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [{ sessionId: "sess-1", title: "Chat one", updatedAt: new Date().toISOString() }] }),
+    }),
   );
 
   // The seed now hands out incrementing session ids: first session/new → sess-1
@@ -24,15 +30,15 @@ test("switching back to a background conversation is instant and loss-free", asy
   await page.goto("/");
 
   // Wait for sess-1 conversation to render.
-  await page.waitForFunction(() => document.querySelectorAll(".msg").length > 0);
-  const firstCount = await page.locator(".msg").count();
+  await page.waitForFunction(() => document.querySelectorAll(".turn").length > 0);
+  const firstCount = await page.locator(".turn").count();
   expect(firstCount).toBeGreaterThan(0);
 
   // Confirm we're on sess-1.
   await expect.poll(() => page.evaluate(() => new URL(location.href).searchParams.get("session"))).toBe("sess-1");
 
-  // Start a second chat (same agent) from the sidebar "New chat" button.
-  await page.locator("#panel .all-section .list-new").click();
+  // Start a second chat (same agent). "New chat" is the crumb's button since P4.
+  await page.getByRole("button", { name: "New chat" }).click();
   // URL should move off sess-1 (provisional id, then sess-2 once resolved).
   await expect
     .poll(() => page.evaluate(() => new URL(location.href).searchParams.get("session")))
@@ -41,13 +47,13 @@ test("switching back to a background conversation is instant and loss-free", asy
   // Capture the call count before switching back — should not change.
   const callsBeforeSwitchBack = historyMessagesCalls;
 
-  // The Recent section shows sessions the current agent has recently been active
-  // in. sess-1 was active with a conversation, so it appears there. sess-2 has
-  // no content yet, so it is NOT in recents — the first (and only) entry is
-  // sess-1. Click it to switch back.
-  const recentSection = page.locator("#panel .recent-section");
-  await expect(recentSection).toBeVisible();
-  const sess1Item = recentSection.locator(".sess-item").first();
+  // The list shows sessions the current agent has recently been active in,
+  // grouped by folder since P4. sess-1 was active with a conversation, so it
+  // appears there. sess-2 has no content yet, so it is not listed — the first
+  // (and only) entry is sess-1. Click it to switch back.
+  const sessions = page.locator("#panel .sess-list");
+  await expect(sessions).toBeVisible();
+  const sess1Item = sessions.locator(".sess-item").first();
   await expect(sess1Item).toBeVisible();
   await sess1Item.click();
 
@@ -60,7 +66,7 @@ test("switching back to a background conversation is instant and loss-free", asy
   await expect(page.locator(".thread .empty")).toHaveCount(0);
 
   // All original messages preserved — no reload flush.
-  expect(await page.locator(".msg").count()).toBe(firstCount);
+  expect(await page.locator(".turn").count()).toBe(firstCount);
 
   // Critical assertion: the hot path hit /history/messages zero additional times.
   expect(historyMessagesCalls).toBe(callsBeforeSwitchBack);

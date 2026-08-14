@@ -207,7 +207,15 @@
   .crumb-path b { flex: 0 0 auto; color: var(--text); font-weight: 600; }
   .crumb-path .sep { flex: 0 0 auto; color: var(--faint); white-space: pre; }
   .crumb-path .ttl { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  @media (max-width: 640px) { .crumb-path .up { display: none; } }
+  /* On a phone the parents go, and the priority inverts: you already know which
+     folder you are in — what you can't tell from the screen is which
+     conversation this is. So the title takes the room and the folder is what
+     truncates, down to a few characters that still say which one it is. */
+  @media (max-width: 640px) {
+    .crumb-path .up { display: none; }
+    .crumb-path b { flex: 0 1 auto; min-width: 5ch; overflow: hidden; text-overflow: ellipsis; }
+    .crumb-path .ttl { flex: 1 1 auto; }
+  }
   /* Universal "working" indicator: three dots fading in sequence (typing-style).
      Same shape for every agent — state, not identity. */
   .working-dots { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
@@ -648,6 +656,9 @@
   /* ---- conversation ---- */
   main { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
   .thread { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; padding: 18px 16px 8px; }
+  /* 16px a side plus a card's own 13px leaves 330 of 390 for content — six
+     characters of every monospace line spent on margin. A phone gets 10. */
+  @media (max-width: 640px) { .thread { padding: 18px 10px 8px; } }
   .earlier-hint { text-align: center; margin: 2px auto 16px; padding: 4px 0; font-size: 12px; color: var(--muted); opacity: .7; user-select: none; }
   /* "Jump to latest" arrow. Sticky to the bottom of the scrollport (which ends right
      above the composer), so it floats clear of the input without hard-coding the
@@ -754,6 +765,14 @@
   .md pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     max-width: 100%; padding: 12px 14px; overflow: auto; margin: 10px 0; }
   .md code { font-family: var(--mono); font-size: var(--chat-code-size); }
+  /* A 390px column fits about 30 monospace characters, so a code block that
+     scrolls sideways shows a third of every line and no hint that the rest
+     exists — tool output reads as truncated garbage. Wrap it instead: the page
+     already scrolls vertically, and that gesture is free. `anywhere` rather
+     than break-all so ordinary words still break at spaces; the long unbroken
+     tokens this is for (paths, ids, base64) break wherever they must. Diffs
+     and the file viewer keep their columns — see .diff .ln / .wf-text. */
+  @media (max-width: 640px) { .md pre { white-space: pre-wrap; overflow-wrap: anywhere; } }
   .md :not(pre) > code { background: var(--surface-2); padding: 1.5px 5px; border-radius: 6px; }
   .md ul, .md ol { margin: 8px 0; padding-left: 22px; }
   .md a { color: var(--accent); }
@@ -805,6 +824,14 @@
   .tool .tstatus.failed { color: var(--err); }
   .tool .tbody { min-width: 0; max-width: 100%; padding: 11px 13px 13px; }
   .tool .loc { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
+  /* Truncate a path from the front on a phone. `file:///Users/…/cloud-acp-g…`
+     cuts off the one part that identifies the file; reversing the direction
+     puts the ellipsis at the head instead, so the row reads
+     `…/web/src/components/UsageStrip.tsx`. Paths end in a filename, never in
+     the punctuation that makes this trick misorder text. */
+  @media (max-width: 640px) {
+    .tool .loc { direction: rtl; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  }
   .tool .tc-item { min-width: 0; max-width: 100%; overflow: hidden; }
   .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -1221,11 +1248,19 @@
   .u-bar.err i.on { background: var(--err); }
   /* A phone can't fit four windows spelled out. Drop the bars and the reset
      countdowns; the percentage and its window label ("36% 5h") are the part you
-     act on, and they stay. */
+     act on, and they stay.
+     The strip is also the only shrinkable item in the row (its siblings are
+     nowrap, so they never give a pixel back), which means every other segment
+     is paid for out of the quota's width — on a phone a big diffstat alone
+     pushed all four windows off the right edge. So the two segments that are
+     not acted on from a phone go instead: the diffstat, which the Changes
+     panel/tab badge still carries, and a healthy connection, which §1.1 says
+     should be silent anyway. `offline`/`connecting` still speak up. */
   @media (max-width: 640px) {
     .usage-strip .u-bar, .usage-strip .note,
     .usage-popover .u-bar, .usage-popover .note { display: none; }
     .u-seg { padding: 0 7px; }
+    .statusbar .sb-diff, .statusbar .conn.ok { display: none; }
   }
   /* The strip — or the panel, when that is open — is the bottom edge of the
      app, so it owns the home-indicator gap and the composer above it must stop
@@ -1830,4 +1865,45 @@
     .wf-resize:hover, .wf-resize:focus-visible { background: var(--accent); opacity: .5; outline: none; }
     /* body.resizing lives in the 860px block with the sidebar handle — the
        earliest breakpoint at which anything is draggable. */
+  }
+
+  /* ---- 16px floor for anything a phone can focus ----
+     iOS zooms the page in on a focused field under 16px and never zooms back
+     out, so the composer, the search box and the panels' own fields all take
+     a 16px floor on a phone. Two fields already carried their own 16px for
+     exactly this reason (.sess-confirm .rename-input, .amenu .pin-field) —
+     this is that rule stated once, in one place, for the rest of them. Placed
+     last so it wins on source order at equal specificity; max() so the
+     text-size setting can still scale the composer above the floor. */
+  @media (max-width: 640px) {
+    .composer .cm-editor { font-size: max(16px, var(--chat-user-size)); }
+    .search input, .amenu .rename-input, .rv-cmt textarea,
+    .search-filter-row input[type=date], .search-filter-row select { font-size: 16px; }
+  }
+
+  /* ---- touch targets ----
+     Everything here is drawn at desktop-pointer sizes: the crumb's controls are
+     30px, the composer's 34, send is 28 high, the dock's chips 24. A fingertip
+     wants ~44 and misses at 30, which on a phone is the difference between
+     opening the panel and opening nothing. These grow the hit area, not the
+     glyph — the icons keep their size, the buttons get room around them, and
+     the whole thing costs about 14px of thread height.
+     Left alone deliberately: the status bar's own chips, which are as tall as
+     the 26px bar and can't grow without growing it. */
+  @media (max-width: 640px) {
+    /* The crumb grows with its controls rather than letting them hang out of
+       it — everything positioned against the bar (the action sheet) reads this
+       token, so raising it keeps them aligned. */
+    :root { --crumb-h: 46px; }
+    /* Height buys more than width here. Five controls sit shoulder to shoulder,
+       so a horizontal miss lands on the neighbour either way — what a taller
+       button prevents is the miss above or below, which today hits nothing at
+       all. Width stays modest because every pixel of it comes out of the
+       crumb, which at 390px has none to spare. flex: 0 0 auto or the row
+       shrinks them straight back to 30. */
+    header .icon-btn { width: 34px; height: 40px; flex: 0 0 auto; }
+    .crow .cbtn { width: 40px; height: 40px; }
+    .send { height: 36px; padding: 0 14px; }
+    .mchip { height: 32px; }
+    .msg-copy { padding: 9px 10px; }
   }
