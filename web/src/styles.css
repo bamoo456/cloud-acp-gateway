@@ -50,9 +50,6 @@
     --chat-table-size: 14px;
     --chat-plan-size: 15px;
     --composer-text-size: 16px;
-    /* Claude's responses read as editorial serif. ui-serif is New York on Apple
-       devices (the iOS system serif) — authentic look, zero network. */
-    --serif: ui-serif, "New York", Georgia, "Songti TC", "Noto Serif CJK TC", serif;
     font-size: 16px;
   }
   :root[data-text-size="small"] {
@@ -95,7 +92,6 @@
   :root[data-agent-skin="codex"] {
     --bg: #f7f7f4; --surface: #ffffff; --surface-2: #f1f1ee;
     --text: #20201d; --muted: #73736b; --faint: #9d9d94; --border: #e3e3de; --border-strong: #d3d3cc;
-    --serif: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang TC", sans-serif;
     --radius: 12px;
   }
   @media (prefers-color-scheme: dark) {
@@ -514,6 +510,10 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; color: var(--muted);
   }
   .sess-item .mark.who svg { width: 15px; height: 15px; flex: 0 0 auto; }
+  /* Codex and opencode carry their own brand colours inside the SVG; claude's
+     glyph is drawn in currentColor, so without this one line it is the only
+     mark in the column rendered in grey. */
+  .sess-item .mark.who.claude { color: var(--agent-claude); }
   .sess-item .mark.who .wm {
     max-width: 68px; color: var(--faint); font-size: 10.5px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -728,10 +728,12 @@
   .turn.user .body { font-size: var(--chat-user-size); min-width: 0; overflow-wrap: anywhere; }
   .turn.user .body .md { font-size: var(--chat-user-size); }
   .turn .body > :last-child { margin-bottom: 0; }
-  /* assistant replies render as editorial serif (Claude-iOS feel); code stays
-     mono (via .md code) and tables stay sans for density */
-  .turn.agent .md { font-family: var(--serif); font-size: var(--chat-assistant-size); line-height: 1.62; letter-spacing: .1px; }
-  .turn.agent .md table { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", sans-serif; }
+  /* The reply is the page's own text, in the page's own face. It used to render
+     in an editorial serif, which read as a second typographic voice against a
+     UI that is otherwise sans and mono — the reading SIZE is what makes a reply
+     comfortable, not the family, so the size and leading stay. Code is still
+     mono (via .md code). */
+  .turn.agent .md { font-size: var(--chat-assistant-size); line-height: 1.62; letter-spacing: .1px; }
   /* Thinking folds into the label line — it is not its own box. */
   details.think { min-width: 0; }
   details.think > summary {
@@ -746,10 +748,9 @@
     margin: 8px 0 2px; padding-left: 11px; border-left: 1px solid var(--border-strong);
     text-transform: none; letter-spacing: 0; color: var(--muted);
   }
-  /* Reasoning is a note to itself, not the reply — sans and quiet, so it never
-     competes with the editorial serif of the answer above it. */
+  /* Reasoning is a note to itself, not the reply — smaller and quiet, so it
+     never competes with the answer above it. */
   details.think .in .md {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", sans-serif;
     font-size: var(--chat-secondary-size); line-height: 1.6; letter-spacing: 0;
   }
   details.think .in .md + .md { margin-top: .6em; }
@@ -903,6 +904,9 @@
     color: var(--muted); flex: 0 1 auto; min-width: 0; max-width: 100%;
   }
   .mchip:hover { border-color: var(--muted); color: var(--text); }
+  /* NOT `.mode` — the composer's own pill owns that class (13.5px/600), and it
+     was leaking into this chip and making the two ends of the row disagree. */
+  .mchip-mode .am { color: var(--text); }
   .mchip.running { border-color: var(--muted); }
   .mchip .wm, .mchip .am { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mchip .eff, .mchip .el { color: var(--text); flex: 0 0 auto; }
@@ -1083,7 +1087,7 @@
   .amenu .arow .sub { font-size: 12px; color: var(--muted); }
   .amenu .arow .gt { margin-left: auto; color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
   .amenu .arow .gt svg { width: 15px; height: 15px; }
-  .amenu .arow .sample { font-family: var(--serif); color: var(--text); min-width: 28px; text-align: right; }
+  .amenu .arow .sample { color: var(--text); min-width: 28px; text-align: right; }
   .amenu .arow .sample-small { font-size: 14px; }
   .amenu .arow .sample-default { font-size: 16px; }
   .amenu .arow .sample-large { font-size: 18px; }
