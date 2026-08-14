@@ -44,6 +44,11 @@ export const SEED_SSE = (turns: number): string => `
       content: [{ type: "content", content: { type: "text", text: "$ grep -rl 'model:' service-config/virtual-models/\\n→ 18 virtual models across 4 providers" } }],
     } } });
     note(sid, "agent_message_chunk", "Here are the models retiring within **~6 months** — act on these first:\\n\\n| Model | Retires | Replace with |\\n|---|---|---|\\n| gemini-2.0-flash | 2026-06-24 | gemini-2.5-flash |\\n| imagen-3.0-capability-001 | 2026-08-01 | imagen-4.0-generate-001 |\\n\\nWant me to open the config PR to bump these, or post the full table to Slack?");
+    // A fenced block whose line is far wider than a phone, and whose longest
+    // token has nowhere to break — the shape real tool output takes (a path, an
+    // id, a blob). Wrapping this rather than clipping it is what the phone
+    // layout has to prove.
+    note(sid, "agent_message_chunk", "設定檔的位置與那一行的 token：\\n\\n\`\`\`\\nfile:///Users/dev/git/my-apps/cloud-acp-gateway/service-config/virtual-models/gemini.yaml:142 sig=aGVsbG8td29ybGQtdGhpcy1pcy1vbmUtbG9uZy10b2tlbi13aXRoLW5vLXNwYWNlcy1hdC1hbGw=\\n\`\`\`");
   };
   let nextSession = 0;
   const handle = (m) => {

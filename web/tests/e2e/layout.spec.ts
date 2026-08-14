@@ -434,6 +434,31 @@ test("no field a phone can focus sits under 16px", async ({ page }) => {
   expect(composer).toBeLessThan(16);
 });
 
+// A 390px column holds about 30 monospace characters. A code block that scrolls
+// sideways therefore shows a third of every line, with no affordance saying the
+// rest exists — tool output read as clipped garbage on a phone. It wraps now;
+// the desktop keeps its columns, which is why the second half of this test
+// asserts the overflow is still there at 1280.
+test("a code block wraps on a phone and still scrolls on a desktop", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(SEED_SSE(1));
+  await page.goto("/");
+
+  const pre = page.locator(".turn.agent .body .md pre").last();
+  await expect(pre).toBeVisible();
+  const phone = await pre.evaluate((el) => ({
+    scroll: el.scrollWidth, client: el.clientWidth, right: Math.round(el.getBoundingClientRect().right),
+  }));
+  expect(phone.scroll, "no line may hide past the right edge of the block")
+    .toBeLessThanOrEqual(phone.client + 1);
+  expect(phone.right, "and the block itself must stay on screen").toBeLessThanOrEqual(390);
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const desktop = await pre.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+  expect(desktop.scroll, "a wide screen keeps the block's own columns intact")
+    .toBeGreaterThan(desktop.client);
+});
+
 test("slash-command menu dismisses on an outside click", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
