@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
-import { useStore } from "../store/store.ts";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useStore, activeQuotaKind } from "../store/store.ts";
 import { formatUntil } from "../lib/format.ts";
+import { Robot, CodexMark } from "../lib/icons.tsx";
+import type { RateLimit } from "../types.ts";
 
 // The rate-limit windows worth a segment, left to right. Each carries its own
 // short label rather than relying on position, because the phone layout drops
@@ -51,36 +53,19 @@ function Segment({ pct, label, note, title }: { pct: number; label?: string; not
   );
 }
 
-// Right-hand end of the bottom status strip: how full the active conversation's
-// context window is, plus this account's rate-limit windows. Renders nothing
-// until an agent has actually reported usage — both halves arrive on
-// `usage_update`, which no agent sends before a turn has produced tokens.
-export function UsageStrip() {
-  const sess = useStore((s) => (s.activeId ? s.sessions[s.activeId] : null));
-  const rateLimits = useStore((s) => s.rateLimits);
-  // The countdowns are the only thing here that goes stale without a store
-  // update, so re-render once a minute rather than leaving "1h 32m" frozen at
-  // whatever it read when the last frame landed.
-  const [, tick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => tick((n) => n + 1), 60_000);
-    return () => clearInterval(id);
-  }, []);
+const PROVIDER_LABEL: Record<string, string> = { claude: "Claude", codex: "Codex" };
 
-  const segments = [];
-  if (sess?.contextSize) {
-    const used = sess.contextUsed ?? 0;
-    // Clamped: the adapter really does report `used` past `size` for a frame or
-    // two while a session moves onto a bigger window (observed 202610/200000,
-    // then the same tokens against 1000000), and a gauge reading 101% looks
-    // broken rather than full.
-    segments.push(
-      <Segment key="context" pct={Math.min(100, Math.round((used / sess.contextSize) * 100))} label="ctx"
-        title={`${used.toLocaleString()} / ${sess.contextSize.toLocaleString()} tokens in context`} />,
-    );
-  }
+function ProviderMark({ kind }: { kind: string }) {
+  return kind === "codex" ? <CodexMark /> : <Robot />;
+}
+
+// One provider's quota windows as segments — the fixed 5h/weekly ones, then
+// whatever model-scoped weekly caps the endpoint named (arrives keyed by
+// model, not by one of WINDOWS' own types, so it can't be listed up front).
+function buildQuotaSegments(windows: Record<string, RateLimit>): ReactNode[] {
+  const segments: ReactNode[] = [];
   for (const { type, label, title } of WINDOWS) {
-    const rl = rateLimits[type];
+    const rl = windows[type];
     // The adapter only fills `utilization` on some events; a window without one
     // is unknown, not empty, so it gets no bar rather than a 0% one.
     if (typeof rl?.utilization !== "number") continue;
@@ -90,10 +75,8 @@ export function UsageStrip() {
         title={until ? `${title} · resets in ${until}` : title} />,
     );
   }
-  // Model-scoped weekly caps, which arrive named rather than under a known key
-  // (the endpoint moved them out of the flat seven_day_* fields). Sorted so the
-  // order doesn't shuffle between polls.
-  for (const [key, rl] of Object.entries(rateLimits).sort(([a], [b]) => a.localeCompare(b))) {
+  // Sorted so the order doesn't shuffle between polls.
+  for (const [key, rl] of Object.entries(windows).sort(([a], [b]) => a.localeCompare(b))) {
     if (!rl.label || WINDOWS.some((w) => w.type === key)) continue;
     if (typeof rl.utilization !== "number") continue;
     const until = rl.resetsAt ? formatUntil(rl.resetsAt) : "";
@@ -102,9 +85,81 @@ export function UsageStrip() {
         title={until ? `${rl.label} weekly limit · resets in ${until}` : `${rl.label} weekly limit`} />,
     );
   }
-  if (!segments.length) return null;
+  return segments;
+}
 
-  // The "·" between segments is a CSS ::before on every segment but the first,
-  // so nothing here has to carry a separator it doesn't own.
-  return <span className="usage-strip">{segments}</span>;
+// Right-hand end of the bottom status strip: how full the active conversation's
+// context window is, plus the active agent's own rate-limit windows. Every
+// configured provider (Claude, Codex) is polled in the background regardless
+// of which agent is on screen (App.tsx), so a hover/click on the strip reveals
+// all of them — the default row only shows the one you're currently talking
+// to, since that's the number worth a glance without asking for it.
+// Renders nothing until an agent has actually reported usage — context arrives
+// on `usage_update`, which no agent sends before a turn has produced tokens.
+export function UsageStrip() {
+  const sess = useStore((s) => (s.activeId ? s.sessions[s.activeId] : null));
+  const rateLimits = useStore((s) => s.rateLimits);
+  const activeKind = useStore(activeQuotaKind);
+  // The countdowns are the only thing here that goes stale without a store
+  // update, so re-render once a minute rather than leaving "1h 32m" frozen at
+  // whatever it read when the last frame landed.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Pinned open by a click/tap, for touch devices with no real hover — closed
+  // by tapping anywhere outside the strip.
+  const [pinned, setPinned] = useState(false);
+  const rootRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!pinned) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setPinned(false);
+    };
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
+  }, [pinned]);
+
+  let ctxSegment: ReactNode = null;
+  if (sess?.contextSize) {
+    const used = sess.contextUsed ?? 0;
+    // Clamped: the adapter really does report `used` past `size` for a frame or
+    // two while a session moves onto a bigger window (observed 202610/200000,
+    // then the same tokens against 1000000), and a gauge reading 101% looks
+    // broken rather than full.
+    ctxSegment = (
+      <Segment key="context" pct={Math.min(100, Math.round((used / sess.contextSize) * 100))} label="ctx"
+        title={`${used.toLocaleString()} / ${sess.contextSize.toLocaleString()} tokens in context`} />
+    );
+  }
+
+  const activeSegments = buildQuotaSegments(activeKind ? rateLimits[activeKind] ?? {} : {});
+  const providerKinds = Object.keys(rateLimits)
+    .filter((k) => Object.keys(rateLimits[k] ?? {}).length > 0)
+    .sort();
+
+  if (!ctxSegment && !activeSegments.length && !providerKinds.length) return null;
+
+  return (
+    <span className={"usage-strip-wrap" + (pinned ? " pinned" : "")} ref={rootRef}>
+      <span className="usage-strip" onClick={() => providerKinds.length > 0 && setPinned((p) => !p)}>
+        {ctxSegment}
+        {activeSegments}
+      </span>
+      {providerKinds.length > 0 && (
+        // Every provider with data, not just the active one — the strip itself
+        // stays a one-line glance, this is the "show me everything" view.
+        <span className="usage-popover">
+          {providerKinds.map((kind) => (
+            <span className="usage-popover-row" key={kind}>
+              <span className="usage-popover-mark" title={PROVIDER_LABEL[kind] || kind}><ProviderMark kind={kind} /></span>
+              <span className="usage-popover-segs">{buildQuotaSegments(rateLimits[kind] ?? {})}</span>
+            </span>
+          ))}
+        </span>
+      )}
+    </span>
+  );
 }

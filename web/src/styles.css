@@ -1179,11 +1179,27 @@
   /* ---- usage gauge (right end of the status strip) ---- */
   /* margin-left:auto rather than a spacer element, so the gauge still sits
      against the right edge on a gateway with no terminal chip to its left. */
+  /* The wrap is the positioning root for the popover — it has to sit outside
+     .usage-strip's own overflow-x:auto box, or the popover would be clipped/
+     scrolled instead of floating above the bar. */
+  .usage-strip-wrap { position: relative; display: flex; align-items: center; align-self: stretch; min-width: 0; }
   /* Scrolls rather than clips: a clipped strip drops its rightmost windows
      silently, which reads as "that quota doesn't exist" instead of "swipe". */
   .usage-strip { display: flex; align-items: center; align-self: stretch;
     min-width: 0; overflow-x: auto; scrollbar-width: none; color: var(--muted); }
   .usage-strip::-webkit-scrollbar { display: none; }
+  /* Every configured provider's quota, revealed on hover — or pinned open by a
+     tap, for touch devices with no hover to reveal it. The default row above
+     only shows the active agent's own windows. */
+  .usage-popover { display: none; position: absolute; bottom: 100%; right: 0; margin-bottom: 6px;
+    flex-direction: column; gap: 2px; padding: 4px; background: var(--surface);
+    border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); z-index: 30; }
+  .usage-strip-wrap:hover .usage-popover, .usage-strip-wrap.pinned .usage-popover { display: flex; }
+  .usage-popover-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .usage-popover-mark { display: grid; place-items: center; width: 16px; height: 16px; flex: 0 0 auto; color: var(--muted); }
+  .usage-popover-mark svg { width: 13px; height: 13px; }
+  .usage-popover-segs { display: flex; align-items: center; }
+  .usage-popover-segs .u-seg:first-child { border-left: none; }
   .u-seg { display: inline-flex; align-items: center; gap: 6px; align-self: stretch;
     padding: 0 10px; border-left: 1px solid var(--border); white-space: nowrap; }
   /* The number wears the same tone as its bar: on a phone the bars are dropped
@@ -1207,7 +1223,8 @@
      countdowns; the percentage and its window label ("36% 5h") are the part you
      act on, and they stay. */
   @media (max-width: 640px) {
-    .usage-strip .u-bar, .usage-strip .note { display: none; }
+    .usage-strip .u-bar, .usage-strip .note,
+    .usage-popover .u-bar, .usage-popover .note { display: none; }
     .u-seg { padding: 0 7px; }
   }
   /* The strip — or the panel, when that is open — is the bottom edge of the

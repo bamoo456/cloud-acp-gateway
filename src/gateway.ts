@@ -43,7 +43,7 @@ import { DatabaseSync } from "node:sqlite";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleTerminal, setCwdResolver } from "./terminal.ts";
 import { handleUpload } from "./uploads.ts";
-import { usageLimits } from "./usage-limits.ts";
+import { usageLimits, codexUsageLimits } from "./usage-limits.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
   tree as workspaceTree, find as workspaceFind, outputFolder as workspaceOutputFolder,
@@ -4620,11 +4620,14 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
   }
-  // This account's Claude quota windows. Independent of any session — the ACP
+  // This account's quota windows — Claude by default, Codex's ChatGPT-backend
+  // counterpart on `?kind=codex`. Independent of any session — the ACP
   // rate-limit path only reports after a turn, and usually without a percentage.
   // Only the normalized windows go out; the OAuth token stays in the gateway.
   if (consoleEnabled && pathname === "/usage/limits") {
-    usageLimits({ claudeDir: CLAUDE_DIR })
+    const kind = new URL(req.url ?? "/", "http://x").searchParams.get("kind");
+    const limitsFor = kind === "codex" ? codexUsageLimits({ codexHome: codexHome() }) : usageLimits({ claudeDir: CLAUDE_DIR });
+    limitsFor
       .then((limits) => {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
         res.end(JSON.stringify(limits));
