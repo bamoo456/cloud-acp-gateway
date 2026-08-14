@@ -77,8 +77,8 @@ const ROUTES: Record<string, unknown> = {
   "/usage/limits": {
     status: "ok",
     windows: {
-      five_hour: { rateLimitType: "five_hour", utilization: 0.62, resetsAt: Math.floor(Date.UTC(2026, 7, 14, 13, 0) / 1000) },
-      seven_day: { rateLimitType: "seven_day", utilization: 0.31, resetsAt: Math.floor(Date.UTC(2026, 7, 19) / 1000) },
+      five_hour: { rateLimitType: "five_hour", utilization: 0.84, resetsAt: Math.floor(Date.UTC(2026, 7, 14, 13, 0) / 1000) },
+      seven_day: { rateLimitType: "seven_day", utilization: 0.57, resetsAt: Math.floor(Date.UTC(2026, 7, 19) / 1000) },
     },
   },
   "/workspace/changes": {

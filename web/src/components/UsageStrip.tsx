@@ -21,12 +21,18 @@ function percent(utilization: number): number {
   return Math.min(100, Math.floor(Number((utilization * 100).toFixed(4))));
 }
 
+// Half the window gone is worth noticing, four fifths is worth acting on. This
+// is the one place amber and red mean "the number itself is getting bad" rather
+// than "needs you" / "failed" (§1.1) — a quota is the one fact on screen that
+// has a fuel gauge's semantics, and the bar is 38px of colour, not a badge.
+const WARN_AT = 50, ERR_AT = 80;
+
 function Segment({ pct, label, note, title }: { pct: number; label: string; note?: string; title: string }) {
-  const tone = pct >= 90 ? "err" : pct >= 75 ? "warn" : "";
+  const tone = pct >= ERR_AT ? "err" : pct >= WARN_AT ? "warn" : "";
   return (
     <span className="u-seg" title={title}>
       <span className="u-bar"><i className={tone} style={{ width: Math.min(100, pct) + "%" }} /></span>
-      <b>{pct}%</b>
+      <b className={tone}>{pct}%</b>
       <span className="lb">{label}</span>
       {note && <span className="note">{note}</span>}
     </span>
