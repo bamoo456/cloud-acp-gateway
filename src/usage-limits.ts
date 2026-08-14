@@ -155,6 +155,8 @@ let inFlight: Promise<UsageLimits> | null = null;
 export function resetUsageLimitsCache(): void {
   cache = null;
   inFlight = null;
+  codexCache = null;
+  codexInFlight = null;
 }
 
 async function fetchLimits(claudeDir: string, now: number): Promise<UsageLimits> {
@@ -195,4 +197,100 @@ export function usageLimits(
     })
     .finally(() => { inFlight = null; });
   return inFlight;
+}
+
+// Codex's counterpart, read from the same ChatGPT backend CodexBar's Codex
+// provider uses. `auth.json` under $CODEX_HOME is a plain file (no Keychain
+// fallback — the CLI never puts it there), holding `tokens.access_token`
+// alongside an optional `tokens.account_id` the endpoint wants as a header.
+const CODEX_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
+
+interface CodexCredential { accessToken: string; accountId?: string }
+
+export function parseCodexCredential(raw: string): CodexCredential | UnavailableReason {
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return "no-credential";
+  }
+  const tokens = json.tokens as Record<string, unknown> | undefined;
+  const accessToken = tokens?.access_token;
+  if (typeof accessToken !== "string" || !accessToken) return "reauth";
+  const accountId = typeof tokens?.account_id === "string" ? tokens.account_id : undefined;
+  return { accessToken, accountId };
+}
+
+function readCodexCredential(codexHome: string): CodexCredential | UnavailableReason {
+  const file = path.join(codexHome, "auth.json");
+  if (!fs.existsSync(file)) return "no-credential";
+  try {
+    return parseCodexCredential(fs.readFileSync(file, "utf8"));
+  } catch {
+    return "no-credential";
+  }
+}
+
+// Only the two windows that carry the same meaning as Claude's `five_hour` /
+// `seven_day`: the raw response names neither window, it only says how long
+// it lasts (`limit_window_seconds`), and these are the two durations that
+// line up. Everything else the endpoint reports — credits, spend controls,
+// per-model `additional_rate_limits` — has no Claude-side equivalent to align
+// to, so it's left unread for now.
+const CODEX_WINDOW_KEY: Record<number, string> = { 18000: "five_hour", 604800: "seven_day" };
+
+export function normalizeCodexLimits(body: unknown, fetchedAt: number): UsageLimits {
+  const root = body as Record<string, unknown> | null;
+  if (!root || typeof root !== "object") return { status: "unavailable", reason: "http-error" };
+  const rateLimit = root.rate_limit as Record<string, unknown> | undefined;
+  const windows: Record<string, UsageWindow> = {};
+  for (const raw of [rateLimit?.primary_window, rateLimit?.secondary_window]) {
+    const w = raw as Record<string, unknown> | undefined;
+    const key = typeof w?.limit_window_seconds === "number" ? CODEX_WINDOW_KEY[w.limit_window_seconds] : undefined;
+    if (!key) continue;
+    const util = fraction(w?.used_percent);
+    if (util === null) continue;
+    windows[key] = { utilization: util, resetsAt: resetSeconds(w?.reset_at) };
+  }
+  return { status: "ok", windows, fetchedAt };
+}
+
+async function fetchCodexLimits(codexHome: string, now: number): Promise<UsageLimits> {
+  const credential = readCodexCredential(codexHome);
+  if (typeof credential === "string") return { status: "unavailable", reason: credential };
+  try {
+    const res = await fetch(CODEX_ENDPOINT, {
+      headers: {
+        authorization: `Bearer ${credential.accessToken}`,
+        accept: "application/json",
+        "user-agent": "acp-gateway",
+        ...(credential.accountId ? { "chatgpt-account-id": credential.accountId } : {}),
+      },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (res.status === 401 || res.status === 403) return { status: "unavailable", reason: "reauth" };
+    if (res.status === 429) return { status: "unavailable", reason: "rate-limited" };
+    if (!res.ok) return { status: "unavailable", reason: "http-error" };
+    return normalizeCodexLimits(await res.json(), now);
+  } catch {
+    return { status: "unavailable", reason: "network" };
+  }
+}
+
+let codexCache: { at: number; value: UsageLimits } | null = null;
+let codexInFlight: Promise<UsageLimits> | null = null;
+
+export function codexUsageLimits(
+  opts: { codexHome: string; now?: number },
+): Promise<UsageLimits> {
+  const now = opts.now ?? Date.now();
+  if (codexCache && now - codexCache.at < TTL_MS) return Promise.resolve(codexCache.value);
+  if (codexInFlight) return codexInFlight;
+  codexInFlight = fetchCodexLimits(opts.codexHome, now)
+    .then((value) => {
+      codexCache = { at: now, value };
+      return value;
+    })
+    .finally(() => { codexInFlight = null; });
+  return codexInFlight;
 }
