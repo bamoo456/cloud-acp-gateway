@@ -147,6 +147,27 @@ describe("normalizeCodexLimits", () => {
   it("a non-object body is unavailable, not an empty set of windows", () => {
     assert.deepEqual(normalizeCodexLimits(null, AT), { status: "unavailable", reason: "http-error" });
   });
+
+  it("a Business/enterprise seat with no rate_limit is flagged unlimited", () => {
+    // The real shape seen from a business-plan ChatGPT account: rate_limit is
+    // null outright, and credits.unlimited is the one fact worth surfacing.
+    const out = normalizeCodexLimits({
+      rate_limit: null,
+      credits: { has_credits: true, unlimited: true },
+    }, AT);
+    assert.ok(out.status === "ok");
+    assert.deepEqual(out.windows, {});
+    assert.equal(out.unlimited, true);
+  });
+
+  it("a metered account with real windows is not marked unlimited", () => {
+    const out = normalizeCodexLimits({
+      rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18000 } },
+      credits: { has_credits: true, unlimited: false },
+    }, AT);
+    assert.ok(out.status === "ok");
+    assert.equal(out.unlimited, undefined);
+  });
 });
 
 describe("parseCodexCredential", () => {

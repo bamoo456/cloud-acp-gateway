@@ -189,4 +189,54 @@ describe("UsageStrip", () => {
     });
     expect(container.querySelectorAll(".usage-popover-row")).toHaveLength(1);
   });
+
+  test("a Business/unlimited account gets ∞ instead of a blank row", async () => {
+    // Codex's own real shape for a business seat: rate_limit is null, so
+    // normalizeCodexLimits reports empty windows — the strip must not treat
+    // that as "nothing to show" once quotaUnlimited says otherwise.
+    await render({
+      agentName: "codex",
+      activeId: null, sessions: {},
+      rateLimits: { codex: {} },
+      quotaUnlimited: { codex: true },
+    });
+    expect([...strip().querySelectorAll(".u-seg")].map((e) => e.textContent)).toEqual(["5h∞", "wk∞"]);
+    const bar = strip().querySelector(".u-bar")!;
+    // Full bar, but neither warn nor err — "full" isn't a warning here.
+    expect(bar.className.trim()).toBe("u-bar");
+    expect(bar.querySelectorAll("i.on")).toHaveLength(4);
+  });
+
+  test("unlimited only fills in the two windows this gateway actually aligns Codex onto", async () => {
+    // Opus/Sonnet caps are a Claude-only concept; an unmetered Codex seat has
+    // no analogue for them, so they must stay silent rather than also read ∞.
+    await render({
+      agentName: "codex",
+      activeId: null, sessions: {},
+      rateLimits: { codex: {} },
+      quotaUnlimited: { codex: true },
+    });
+    expect(strip().querySelectorAll(".u-seg .lb").length).toBe(2);
+  });
+
+  test("a real window always wins over the unlimited fallback", async () => {
+    await render({
+      agentName: "codex",
+      activeId: null, sessions: {},
+      rateLimits: { codex: { five_hour: { rateLimitType: "five_hour", utilization: 0.2 } } },
+      quotaUnlimited: { codex: true },
+    });
+    expect([...strip().querySelectorAll(".u-seg")].map((e) => e.textContent)).toEqual(["5h20%", "wk∞"]);
+  });
+
+  test("an unlimited provider with no windows of its own still earns a popover row", async () => {
+    await render({
+      activeId: null, sessions: {},
+      rateLimits: { claude: { five_hour: { rateLimitType: "five_hour", utilization: 0.36 } }, codex: {} },
+      quotaUnlimited: { codex: true },
+    });
+    const rows = [...container.querySelectorAll(".usage-popover-row")];
+    expect(rows).toHaveLength(2);
+    expect(rows[1].querySelector(".u-seg b")!.textContent).toBe("∞");
+  });
 });

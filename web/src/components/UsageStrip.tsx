@@ -37,17 +37,21 @@ const BLOCKS = 4;
 // label · gauge · percent · countdown, in that order — the label leads so the
 // row parses left to right, and the countdown trails as one unspaced token
 // ("2h12m"), which is why it can sit next to the window's own name without the
-// two reading as one figure.
-function Segment({ pct, label, note, title }: { pct: number; label?: string; note?: string; title: string }) {
-  const tone = pct >= ERR_AT ? "err" : pct >= WARN_AT ? "warn" : "";
-  const lit = Math.min(BLOCKS, Math.ceil((pct / 100) * BLOCKS));
+// two reading as one figure. `inf` overrides the percent with ∞ for a
+// Business/enterprise seat that reports no window at all (unmetered) — the bar
+// still reads full, but in a neutral tone: "full" here isn't a warning.
+function Segment(
+  { pct, label, note, title, inf }: { pct: number; label?: string; note?: string; title: string; inf?: boolean },
+) {
+  const tone = inf ? "" : pct >= ERR_AT ? "err" : pct >= WARN_AT ? "warn" : "";
+  const lit = inf ? BLOCKS : Math.min(BLOCKS, Math.ceil((pct / 100) * BLOCKS));
   return (
     <span className="u-seg" title={title}>
       {label && <span className="lb">{label}</span>}
       <span className={"u-bar " + tone} aria-hidden>
         {Array.from({ length: BLOCKS }, (_, i) => <i key={i} className={i < lit ? "on" : ""} />)}
       </span>
-      <b className={tone}>{pct}%</b>
+      <b className={tone}>{inf ? "∞" : `${pct}%`}</b>
       {note && <span className="note">{note}</span>}
     </span>
   );
@@ -59,16 +63,29 @@ function ProviderMark({ kind }: { kind: string }) {
   return kind === "codex" ? <CodexMark /> : <Robot />;
 }
 
+// The two windows a Business/enterprise seat's ∞ fallback applies to — the
+// ones this gateway actually aligns Codex onto (see usage-limits.ts). Opus/
+// Sonnet caps are Claude-only concepts an unmetered seat has no analogue for,
+// so they stay silent rather than also claiming to be unlimited.
+const UNLIMITED_FALLBACK_TYPES = new Set(["five_hour", "seven_day"]);
+
 // One provider's quota windows as segments — the fixed 5h/weekly ones, then
 // whatever model-scoped weekly caps the endpoint named (arrives keyed by
 // model, not by one of WINDOWS' own types, so it can't be listed up front).
-function buildQuotaSegments(windows: Record<string, RateLimit>): ReactNode[] {
+function buildQuotaSegments(windows: Record<string, RateLimit>, unlimited?: boolean): ReactNode[] {
   const segments: ReactNode[] = [];
   for (const { type, label, title } of WINDOWS) {
     const rl = windows[type];
     // The adapter only fills `utilization` on some events; a window without one
-    // is unknown, not empty, so it gets no bar rather than a 0% one.
-    if (typeof rl?.utilization !== "number") continue;
+    // is unknown, not empty, so it gets no bar rather than a 0% one — unless
+    // the account is unlimited, in which case "unknown" and "unbounded" are
+    // the same fact and get an ∞ segment instead of silence.
+    if (typeof rl?.utilization !== "number") {
+      if (unlimited && UNLIMITED_FALLBACK_TYPES.has(type)) {
+        segments.push(<Segment key={type} label={label} pct={100} inf title={`${title} · unlimited`} />);
+      }
+      continue;
+    }
     const until = rl.resetsAt ? formatUntil(rl.resetsAt) : "";
     segments.push(
       <Segment key={type} label={label} note={until} pct={percent(rl.utilization)}
@@ -99,6 +116,7 @@ function buildQuotaSegments(windows: Record<string, RateLimit>): ReactNode[] {
 export function UsageStrip() {
   const sess = useStore((s) => (s.activeId ? s.sessions[s.activeId] : null));
   const rateLimits = useStore((s) => s.rateLimits);
+  const quotaUnlimited = useStore((s) => s.quotaUnlimited);
   const activeKind = useStore(activeQuotaKind);
   // The countdowns are the only thing here that goes stale without a store
   // update, so re-render once a minute rather than leaving "1h 32m" frozen at
@@ -135,9 +153,14 @@ export function UsageStrip() {
     );
   }
 
-  const activeSegments = buildQuotaSegments(activeKind ? rateLimits[activeKind] ?? {} : {});
-  const providerKinds = Object.keys(rateLimits)
-    .filter((k) => Object.keys(rateLimits[k] ?? {}).length > 0)
+  const activeSegments = buildQuotaSegments(
+    activeKind ? rateLimits[activeKind] ?? {} : {}, activeKind ? quotaUnlimited[activeKind] : undefined,
+  );
+  // A provider counts as "has something to show" if it reported real windows
+  // OR turned out to be unlimited — an unlimited account's own windows are
+  // legitimately `{}`, so that alone can't be the test.
+  const providerKinds = Array.from(new Set([...Object.keys(rateLimits), ...Object.keys(quotaUnlimited)]))
+    .filter((k) => Object.keys(rateLimits[k] ?? {}).length > 0 || quotaUnlimited[k])
     .sort();
 
   if (!ctxSegment && !activeSegments.length && !providerKinds.length) return null;
@@ -155,7 +178,7 @@ export function UsageStrip() {
           {providerKinds.map((kind) => (
             <span className="usage-popover-row" key={kind}>
               <span className="usage-popover-mark" title={PROVIDER_LABEL[kind] || kind}><ProviderMark kind={kind} /></span>
-              <span className="usage-popover-segs">{buildQuotaSegments(rateLimits[kind] ?? {})}</span>
+              <span className="usage-popover-segs">{buildQuotaSegments(rateLimits[kind] ?? {}, quotaUnlimited[kind])}</span>
             </span>
           ))}
         </span>
