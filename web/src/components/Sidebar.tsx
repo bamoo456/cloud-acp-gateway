@@ -3,7 +3,6 @@ import { getHistory, getDiscoveredHistory, searchSessions, type HistorySession, 
 import type { RecentSession } from "../lib/recentSessions.ts";
 import { resolveRunningTask, runningView } from "../lib/runningTask.ts";
 import { useStore } from "../store/store.ts";
-import { agentColor } from "../lib/identity.ts";
 import { SearchResults } from "./SearchResults.tsx";
 import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
@@ -12,7 +11,8 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, WorkingDots } from "../lib/icons.tsx";
+import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, WorkingDots,
+  Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { homeFrom } from "../lib/folderKey.ts";
 import { groupByFolder, latestWithPinned, type GroupableRow } from "../lib/sessionGroups.ts";
@@ -295,10 +295,10 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
     if (!state) return null;
     return <span className="run-working" title="Working"><WorkingDots /></span>;
   };
-  // Per-row identity: a mono wordmark, not a hue (§1.2). The 7px block beside it
-  // is the only place the agent's colour is allowed, and it is off by default —
-  // inline because each row names a different agent, so this cannot come from
-  // the document-level --agent-color.
+  // Per-row identity: the agent's own glyph. A wordmark reads as one more
+  // word in a list that is already all words, and at this density the mark is
+  // what the eye picks a row out by — so §1.2's wordmark rule is relaxed here
+  // and only here. An agent with no glyph of its own still gets its name.
   const mark = (agentName: string) => {
     if (!multiAgent) return null;
     const agent = agentByName.get(agentName);
@@ -308,8 +308,10 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
       : agent?.name === "claude" ? "claude" : "mono";
     return (
       <span className={"mark who " + kind} title={agentName}>
-        <span className="idot" style={{ background: agentColor(agent) }} />
-        <span className="wm">{agentName}</span>
+        {kind === "codex" ? <CodexMark />
+          : kind === "opencode" ? <OpencodeMark />
+            : kind === "claude" ? <Robot />
+              : <span className="wm">{agentName}</span>}
       </span>
     );
   };
