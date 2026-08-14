@@ -112,8 +112,8 @@ export function App() {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       if (useStore.getState().locked) return;
       for (const kind of kinds) {
-        void getUsageLimits(kind).then((windows) => {
-          if (alive && windows) useStore.getState().ingestUsageLimits(kind, windows);
+        void getUsageLimits(kind).then((result) => {
+          if (alive && result) useStore.getState().ingestUsageLimits(kind, result.windows, result.unlimited);
         });
       }
     };
