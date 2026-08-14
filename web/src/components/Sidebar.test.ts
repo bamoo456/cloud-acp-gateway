@@ -13,6 +13,14 @@ async function seedRecentSessions(list: Array<Record<string, string>>) {
   hydrateRecentSessions(list);
 }
 
+// The view is read once, on mount (useState(readSessionsView)), so a test whose
+// SUBJECT is something other than the view switcher itself should seed the
+// preference before rendering rather than clicking through the menu — that
+// keeps the test's subject the thing it is actually testing.
+function seedLatestView() {
+  localStorage.setItem("acpg.sessionsView", "latest");
+}
+
 const historyItems: HistorySession[] = [
   { sessionId: "s-recent", title: "Recent conversation sidebar", updatedAt: "2026-06-10T03:58:00.000Z" },
   { sessionId: "s-busy", title: "Fix session scoped busy state", updatedAt: "2026-06-10T03:00:00.000Z" },
@@ -97,10 +105,17 @@ describe("Sidebar recent conversations", () => {
     });
   }
 
-  async function clickConversationsTab() {
-    const tabBtn = container.querySelector<HTMLButtonElement>('[data-tab="conversations"]');
-    expect(tabBtn).not.toBeNull();
-    await act(async () => { tabBtn!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+  // The click-through path, for the handful of tests whose subject IS the
+  // view switcher itself. Everything else should call seedLatestView() before
+  // rendering instead (see its own comment).
+  async function showLatestView() {
+    const viewBtn = container.querySelector<HTMLButtonElement>(".view-btn");
+    expect(viewBtn).not.toBeNull();
+    await act(async () => { viewBtn!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const latestItem = Array.from(container.querySelectorAll<HTMLButtonElement>(".view-item"))
+      .find((b) => b.textContent?.includes("Latest updated"));
+    expect(latestItem).not.toBeUndefined();
+    await act(async () => { latestItem!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
   }
 
   // 16 recents: one past RECENT_LIMIT, so the collapsed cut and "See more" are
@@ -120,6 +135,10 @@ describe("Sidebar recent conversations", () => {
   }
 
   test("shows the latest RECENT_LIMIT sessions in a Recent section", async () => {
+    // Isolated from current-folder history, which now shares this same list:
+    // this test's subject is the recents-cache cap, not the merge.
+    getHistory.mockResolvedValue([]);
+    seedLatestView();
     await seedRecentSessions(sixteenRecents());
     await renderSidebar();
 
@@ -133,6 +152,8 @@ describe("Sidebar recent conversations", () => {
   });
 
   test("reveals the rest of the recents when See more is clicked", async () => {
+    getHistory.mockResolvedValue([]);
+    seedLatestView();
     await seedRecentSessions(sixteenRecents());
     await renderSidebar();
 
@@ -141,7 +162,8 @@ describe("Sidebar recent conversations", () => {
     expect(recent!.querySelectorAll(".sess-item")).toHaveLength(15);
     expect(recent!.textContent).not.toContain("Folder browser polish");
 
-    const seeMore = recent!.querySelector<HTMLButtonElement>(".see-more");
+    // .see-more is a sibling of .recent-section, not nested inside it.
+    const seeMore = container.querySelector<HTMLButtonElement>(".see-more");
     expect(seeMore).not.toBeNull();
     await act(async () => {
       seeMore!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -149,12 +171,13 @@ describe("Sidebar recent conversations", () => {
 
     expect(recent!.querySelectorAll(".sess-item")).toHaveLength(16);
     expect(recent!.textContent).toContain("Folder browser polish");
-    expect(recent!.textContent).toContain("Show less");
+    expect(container.textContent).toContain("Show less");
   });
 
   test("a current-folder recent mirrors the Conversations title, not its stale cached one", async () => {
     // s-busy carries a stale, slash-command-derived title in localStorage, while
     // the gateway history serves the real (renamed) title. The two lists must agree.
+    seedLatestView();
     await seedRecentSessions([
       { agentName: "claude", cwd: "/repo", sessionId: "s-busy", title: "<local-command-caveat>do the thing", lastActiveAt: "2026-06-10T03:00:00.000Z" },
       { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "Cross folder work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
@@ -175,6 +198,7 @@ describe("Sidebar recent conversations", () => {
     // The rename was made from another device/folder, so this browser's recents row
     // still holds the title from when it last touched the conversation. Discovery
     // spans folders and carries renames, so it — not the snapshot — is the answer.
+    seedLatestView();
     getDiscoveredHistory.mockResolvedValue([
       { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "My renamed chat", updatedAt: "2026-06-10T03:59:00.000Z", source: "claude-cli" },
     ]);
@@ -192,6 +216,8 @@ describe("Sidebar recent conversations", () => {
   });
 
   test("folds discovered Claude CLI sessions into Recent (no separate section) and opens them with their recovered cwd", async () => {
+    getHistory.mockResolvedValue([]);
+    seedLatestView();
     getDiscoveredHistory.mockResolvedValue([
       { agentName: "claude", cwd: "/already", sessionId: "already-recent", title: "Already recent CLI", updatedAt: "2026-06-10T03:59:00.000Z", source: "claude-cli" },
       { agentName: "claude", cwd: "/cli-repo", sessionId: "cli-only", title: "CLI only work", updatedAt: "2026-06-10T03:30:00.000Z", source: "claude-cli" },
@@ -265,28 +291,26 @@ describe("Sidebar recent conversations", () => {
     expect(getDiscoveredHistory.mock.calls.map((c) => c[0])).toEqual(["claude"]);
   });
 
-  test("limits Conversations to the last two days until See more is clicked", async () => {
+  test("limits current-folder history to the last two days until See more is clicked", async () => {
     await renderSidebar();
-    await clickConversationsTab();
 
-    const conversations = container.querySelector(".all-section");
-    expect(conversations).not.toBeNull();
-    expect(conversations!.textContent).toContain("Text size preference menu");
-    expect(conversations!.textContent).not.toContain("Share link deep-link testing");
-    expect(conversations!.textContent).toContain("See more");
+    expect(container.textContent).toContain("Text size preference menu");
+    expect(container.textContent).not.toContain("Share link deep-link testing");
+    expect(container.textContent).toContain("See more");
 
-    const seeMore = conversations!.querySelector<HTMLButtonElement>(".see-more");
+    const seeMore = container.querySelector<HTMLButtonElement>(".see-more");
     expect(seeMore).not.toBeNull();
     await act(async () => {
       seeMore!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(conversations!.textContent).toContain("Share link deep-link testing");
-    expect(conversations!.textContent).toContain("Folder browser polish");
-    expect(conversations!.textContent).toContain("Show recent only");
+    expect(container.textContent).toContain("Share link deep-link testing");
+    expect(container.textContent).toContain("Folder browser polish");
+    expect(container.textContent).toContain("Show less");
   });
 
   test("opens a recent conversation without bumping recent activity", async () => {
+    seedLatestView();
     await seedRecentSessions([
       { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "Cross folder work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
     ]);
@@ -370,11 +394,12 @@ describe("Sidebar recent conversations", () => {
       await flush();
     });
 
-    await clickConversationsTab();
     expect(getHistory).toHaveBeenCalledWith("codex", "/repo");
-    expect(container.querySelector(".recent-section")).toBeNull();
+    expect(container.querySelector(".sess-item")).toBeNull();
     expect(container.textContent).not.toContain("Live Codex work");
-    expect(container.textContent).toContain("No conversations in this folder yet.");
+    // history is empty and recents are hidden, so nothing feeds the merged
+    // list — the non-search empty state applies, not the search one.
+    expect(container.textContent).toContain("No recent conversations yet.");
   });
 
   test("shows in-memory current sessions for agents without session/load support", async () => {
@@ -408,10 +433,11 @@ describe("Sidebar recent conversations", () => {
       await flush();
     });
 
-    const current = container.querySelector(".current-section");
-    expect(current).not.toBeNull();
-    expect(current!.textContent).toContain("Current");
-    expect(current!.textContent).toContain("Live Codex work");
+    // No dedicated "Current" section any more — the in-memory fallback session
+    // rides in the same merged list as everything else (lowest merge priority).
+    const row = Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"))
+      .find((el) => el.textContent?.includes("Live Codex work"));
+    expect(row).not.toBeUndefined();
     expect(openHistorySession).not.toHaveBeenCalled();
   });
 
@@ -451,14 +477,18 @@ describe("Sidebar recent conversations", () => {
     expect(marked[0].textContent).toContain("Recent conversation sidebar");
     expect(marked[0].getAttribute("aria-current")).toBe("true");
 
-    // Same in the Conversations tab, which renders the same sessions from history.
-    await clickConversationsTab();
+    // Same after switching views — a view change regroups the same rows, and
+    // must not duplicate or drop the marker while doing it.
+    await showLatestView();
     const markedAll = container.querySelectorAll(".sess-item.active");
     expect(markedAll).toHaveLength(1);
     expect(markedAll[0].textContent).toContain("Recent conversation sidebar");
   });
 
   test("marks a running conversation with a pulsing dot", async () => {
+    // Folder view also puts an aggregated dot on the folder header itself;
+    // latest view keeps this test to the one dot on the row.
+    seedLatestView();
     const { Sidebar } = await import("./Sidebar.tsx");
     const { useStore } = await import("../store/store.ts");
     const { makeSession } = await import("../store/reducers.ts");
@@ -480,7 +510,6 @@ describe("Sidebar recent conversations", () => {
       await flush();
     });
 
-    await clickConversationsTab();
     const dots = container.querySelectorAll(".run-dot");
     expect(dots.length).toBe(1);
     expect(dots[0].classList.contains("awaiting")).toBe(true);
@@ -493,6 +522,7 @@ describe("Sidebar recent conversations", () => {
     // run-a is the most-recently-active recent, so an activity sort would float it
     // to the top; the Running section must instead follow the /running array order
     // (run-b first) so concurrent streams don't make the list flap.
+    seedLatestView();
     await seedRecentSessions([
       { agentName: "claude", cwd: "/repo", sessionId: "run-a", title: "Task A", lastActiveAt: "2026-06-10T03:59:00.000Z" },
       { agentName: "claude", cwd: "/repo", sessionId: "idle-1", title: "Idle One", lastActiveAt: "2026-06-10T03:00:00.000Z" },
@@ -532,9 +562,16 @@ describe("Sidebar recent conversations", () => {
     expect(recent!.textContent).not.toContain("Task A");
   });
 
+  // KNOWN FAILING — encodes intended behavior, not a stale assertion. Sidebar.tsx:531
+  // pushes cooling tasks with running=false, so sessionGroups.ts's latestWithPinned
+  // (pins only needsYou||running) drops the cooling row out of .running-section and
+  // into the plain recency list — contradicting Sidebar.tsx's own comment a few lines
+  // up ("Keeping both [active and cooling] OUT of the recency-sorted list below").
+  // See the task report for the fix pointer; do not weaken this test to hide it.
   test("keeps a just-finished session in Running (cooling) for the grace window, deduped from Recent", async () => {
     // run-a is no longer live (not in runningTasks) but was seen running 1 min ago
     // — inside the 2-min grace window — so it lingers in Running as "cooling".
+    seedLatestView();
     await seedRecentSessions([
       { agentName: "claude", cwd: "/repo", sessionId: "run-a", title: "Task A", lastActiveAt: "2026-06-10T03:59:00.000Z" },
       { agentName: "claude", cwd: "/repo", sessionId: "idle-1", title: "Idle One", lastActiveAt: "2026-06-10T03:00:00.000Z" },
@@ -577,6 +614,7 @@ describe("Sidebar recent conversations", () => {
   });
 
   test("drops a session from Running once it's been idle past the grace window", async () => {
+    seedLatestView();
     await seedRecentSessions([
       { agentName: "claude", cwd: "/repo", sessionId: "run-a", title: "Task A", lastActiveAt: "2026-06-10T03:59:00.000Z" },
     ]);
@@ -606,6 +644,7 @@ describe("Sidebar recent conversations", () => {
   });
 
   test("shows the Running section and suppresses the empty state when only running tasks exist", async () => {
+    seedLatestView();
     const { Sidebar } = await import("./Sidebar.tsx");
     const { useStore } = await import("../store/store.ts");
     useStore.setState({
@@ -632,6 +671,7 @@ describe("Sidebar recent conversations", () => {
     // once by the gateway. The rename landed in the titles sidecar, which only the
     // listings read back — so the fetched list has to reach the Running row, and a
     // working conversation is drawn ONLY there (it's excluded from Recent below).
+    seedLatestView();
     getHistory.mockResolvedValue([
       { sessionId: "run-r", title: "My renamed chat", updatedAt: "2026-06-10T03:59:00.000Z" },
     ]);
@@ -659,6 +699,7 @@ describe("Sidebar recent conversations", () => {
   });
 
   test("clicking a running task jumps to it and closes the panel", async () => {
+    seedLatestView();
     const jumpToTask = vi.fn();
     const onClose = vi.fn();
     const { Sidebar } = await import("./Sidebar.tsx");
@@ -692,6 +733,7 @@ describe("Sidebar recent conversations", () => {
       fsRoot: "/",
     });
     getHistory.mockResolvedValue([]);
+    seedLatestView();
     await seedRecentSessions([
       { agentName: "codex", cwd: "/repo", sessionId: "cx1", title: "Codex thread", lastActiveAt: "2026-06-10T03:59:00.000Z" },
       { agentName: "claude", cwd: "/repo", sessionId: "cl1", title: "Claude thread", lastActiveAt: "2026-06-10T03:00:00.000Z" },
@@ -719,7 +761,7 @@ describe("Sidebar recent conversations", () => {
     expect(recent!.querySelector(".mark.claude")).not.toBeNull();
   });
 
-  test("merges Conversations across every history-capable agent for the folder", async () => {
+  test("merges current-folder history across every history-capable agent", async () => {
     document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
       wsPath: "/acp", token: "test-token", defaultAgent: "claude",
       agents: [
@@ -746,12 +788,10 @@ describe("Sidebar recent conversations", () => {
       await flush();
     });
 
-    await clickConversationsTab();
     expect(getHistory).toHaveBeenCalledWith("claude", "/repo");
     expect(getHistory).toHaveBeenCalledWith("codex", "/repo");
-    const all = container.querySelector(".all-section");
-    expect(all!.textContent).toContain("Claude conversation");
-    expect(all!.textContent).toContain("Codex conversation");
+    expect(container.textContent).toContain("Claude conversation");
+    expect(container.textContent).toContain("Codex conversation");
   });
 
   test("clicking a foreign-agent conversation opens it under its own agent", async () => {
@@ -781,8 +821,7 @@ describe("Sidebar recent conversations", () => {
       await flush();
     });
 
-    await clickConversationsTab();
-    const row = Array.from(container.querySelectorAll<HTMLButtonElement>(".all-section .sess-item"))
+    const row = Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"))
       .find((el) => el.textContent?.includes("Codex conversation"));
     expect(row).toBeDefined();
     await act(async () => { row!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
@@ -807,19 +846,17 @@ describe("Sidebar recent conversations", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  test("defaults to the Recent tab and hides the Conversations list", async () => {
+  test("defaults to the folder view and hides the search results list", async () => {
     await renderSidebar();
-    const recentTab = container.querySelector('[data-tab="recent"]');
-    const convTab = container.querySelector('[data-tab="conversations"]');
-    expect(recentTab?.getAttribute("aria-selected")).toBe("true");
-    expect(convTab?.getAttribute("aria-selected")).toBe("false");
+    expect(container.querySelector(".view-btn .vlabel")?.textContent).toBe("folder");
+    expect(container.querySelector(".folder-group")).not.toBeNull();
     expect(container.querySelector(".all-section")).toBeNull();
   });
 
-  test("shows the search box on both tabs", async () => {
+  test("shows the search box in both views", async () => {
     await renderSidebar();
     expect(container.querySelector(".search")).not.toBeNull();
-    await clickConversationsTab();
+    await showLatestView();
     expect(container.querySelector(".search")).not.toBeNull();
   });
 
@@ -835,12 +872,11 @@ describe("Sidebar recent conversations", () => {
     await act(async () => { vi.advanceTimersByTime(300); await flush(); });
   }
 
-  test("typing in the Conversations search box also queries the server", async () => {
+  test("typing in the search box also queries the server", async () => {
     searchSessions.mockResolvedValue({
       results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
     });
     await renderSidebar();
-    await clickConversationsTab();
 
     await typeInSearchBox("liquid");
 
@@ -855,7 +891,6 @@ describe("Sidebar recent conversations", () => {
       results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
     });
     await renderSidebar();
-    await clickConversationsTab();
 
     const box = container.querySelector<HTMLInputElement>(".search input")!;
     const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
@@ -874,7 +909,6 @@ describe("Sidebar recent conversations", () => {
 
   test("a one-character query does not reach the server", async () => {
     await renderSidebar();
-    await clickConversationsTab();
 
     await typeInSearchBox("l");
 
@@ -886,7 +920,6 @@ describe("Sidebar recent conversations", () => {
       results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
     });
     await renderSidebar();
-    await clickConversationsTab();
 
     await typeInSearchBox("liquid");
     expect(container.textContent).toContain("No messages match.");
@@ -907,7 +940,6 @@ describe("Sidebar recent conversations", () => {
       truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 1, ms: 1 },
     });
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
 
     const hit = container.querySelector<HTMLButtonElement>(".search-hit");
@@ -924,7 +956,6 @@ describe("Sidebar recent conversations", () => {
       results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
     });
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
 
     const folderOnly = container.querySelectorAll<HTMLInputElement>(".search-filters input[type=checkbox]")[0];
@@ -944,7 +975,6 @@ describe("Sidebar recent conversations", () => {
     });
     const folderOnly = () => container.querySelectorAll<HTMLInputElement>(".search-filters input[type=checkbox]")[0];
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
     await act(async () => { folderOnly().click(); });
     await act(async () => { vi.advanceTimersByTime(300); await flush(); });
@@ -995,7 +1025,6 @@ describe("Sidebar recent conversations", () => {
   test("a truncated default search offers to widen the window to everything", async () => {
     searchSessions.mockResolvedValue(truncatedPage());
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
 
     expect(container.querySelector(".search-more")!.textContent).toBe("搜尋全部");
@@ -1009,7 +1038,6 @@ describe("Sidebar recent conversations", () => {
   test("a truncated all-window search resumes from the cursor instead of re-running", async () => {
     searchSessions.mockResolvedValue(truncatedPage());
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
     await clickWindowChip("全部");
 
@@ -1033,7 +1061,6 @@ describe("Sidebar recent conversations", () => {
   test("a resumed page that lands after the query was erased is discarded", async () => {
     searchSessions.mockResolvedValue(truncatedPage());
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
     await clickWindowChip("全部");
 
@@ -1058,7 +1085,6 @@ describe("Sidebar recent conversations", () => {
   test("a resumed page that lands after a newer query cannot overwrite it", async () => {
     searchSessions.mockResolvedValue(truncatedPage());
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
     await clickWindowChip("全部");
 
@@ -1096,7 +1122,6 @@ describe("Sidebar recent conversations", () => {
       results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
     });
     await renderSidebar();
-    await clickConversationsTab();
     await typeInSearchBox("liquid");
 
     expect(container.textContent).toContain("No messages match.");
@@ -1139,7 +1164,6 @@ describe("Sidebar recent conversations", () => {
       truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 1, ms: 1 },
     });
     await renderSidebar();
-    await clickConversationsTab();
     // No local title matches "liquid" — the title filter's own list is empty.
     await typeInSearchBox("liquid");
 
@@ -1152,16 +1176,15 @@ describe("Sidebar recent conversations", () => {
     expect(container.querySelector(".list-new")).toBeNull();
   });
 
-  test("an empty Recent tab shows its empty state and does not fall back to Conversations", async () => {
+  test("an empty list shows its empty state and does not fall back to search results", async () => {
+    getHistory.mockResolvedValue([]);
     await renderSidebar();
-    const recentTab = container.querySelector('[data-tab="recent"]');
-    expect(recentTab?.getAttribute("aria-selected")).toBe("true");
     expect(container.textContent).toContain("No recent conversations yet.");
     expect(container.querySelector(".all-section")).toBeNull();
     expect(container.querySelector(".search")).not.toBeNull();
   });
 
-  test("typing from the Recent tab runs the server search and shows hits", async () => {
+  test("typing in the search box runs the server search and shows hits", async () => {
     searchSessions.mockResolvedValue({
       results: [{
         sessionId: "hit-1", source: "claude-cli", agentName: "claude", cwd: "/elsewhere",
@@ -1171,34 +1194,36 @@ describe("Sidebar recent conversations", () => {
       truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 1, ms: 1 },
     });
     await renderSidebar();
-    // No clickConversationsTab: the box is reachable straight from Recent.
+    // Reachable straight from the default view, no view switch needed.
     await typeInSearchBox("liquid");
 
     expect(searchSessions).toHaveBeenCalledWith("liquid", {});
     expect(container.textContent).toContain("Liquid glass timeline");
   });
 
-  test("a term replaces the tab strip; clearing it restores the previous tab", async () => {
+  test("a term replaces the sessions list; clearing it restores the previous list", async () => {
     searchSessions.mockResolvedValue({
       results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
     });
     await renderSidebar();
-    expect(container.querySelector(".sidebar-tabs")).not.toBeNull();
+    expect(container.querySelector(".sb-head")).not.toBeNull();
+    expect(container.querySelector(".all-section")).toBeNull();
 
     await typeInSearchBox("liquid");
-    expect(container.querySelector(".sidebar-tabs")).toBeNull();
+    expect(container.querySelector(".sb-head")).toBeNull();
     expect(container.querySelector(".all-section")).not.toBeNull();
 
     await typeInSearchBox("");
-    expect(container.querySelector(".sidebar-tabs")).not.toBeNull();
-    expect(container.querySelector('[data-tab="recent"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector(".sb-head")).not.toBeNull();
     expect(container.querySelector(".all-section")).toBeNull();
   });
 
-  test("reopening the panel resets to the Recent tab", async () => {
+  // The view is a saved preference, not transient UI state — unlike showMore/
+  // query/filters (see the `open` effect), reopening must NOT reset it.
+  test("reopening the panel keeps the chosen view", async () => {
     await renderSidebar();
-    await clickConversationsTab();
-    expect(container.querySelector('[data-tab="conversations"]')?.getAttribute("aria-selected")).toBe("true");
+    await showLatestView();
+    expect(container.querySelector(".view-btn .vlabel")?.textContent).toBe("latest");
     const { Sidebar } = await import("./Sidebar.tsx");
     await act(async () => {
       root!.render(React.createElement(Sidebar, { open: false, onClose: vi.fn(), onOpenPicker: vi.fn() }));
@@ -1208,7 +1233,7 @@ describe("Sidebar recent conversations", () => {
       root!.render(React.createElement(Sidebar, { open: true, onClose: vi.fn(), onOpenPicker: vi.fn() }));
       await flush();
     });
-    expect(container.querySelector('[data-tab="recent"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector(".view-btn .vlabel")?.textContent).toBe("latest");
   });
 
   test("a conversation row's trash asks for confirmation before deleting", async () => {
@@ -1216,7 +1241,6 @@ describe("Sidebar recent conversations", () => {
     await renderSidebar();
     const { useStore } = await import("../store/store.ts");
     useStore.setState({ deleteSession } as any);
-    await clickConversationsTab();
 
     const del = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-del");
     expect(del).not.toBeNull();
@@ -1238,21 +1262,27 @@ describe("Sidebar recent conversations", () => {
     expect(container.querySelector(".sess-confirm")).toBeNull();
   });
 
-  test("a running conversation's trash is disabled", async () => {
+  // The Running row shape (renderRunningItem) never renders a delete button at
+  // all now, unlike the old disabled-trash treatment: a running session's key
+  // is claimed by the running source before any other renderer sees it (the
+  // merge's dedup priority puts running ahead of recents/discovered/history).
+  test("a running conversation loses its delete affordance", async () => {
     await renderSidebar();
+    // Other rows (the default history fixture) keep their own delete buttons —
+    // check that exactly s-recent's disappears, not that every one does.
+    const before = container.querySelectorAll(".sess-del").length;
+    expect(before).toBeGreaterThan(0);
     const { useStore } = await import("../store/store.ts");
     await act(async () => {
       useStore.setState({
         runningTasks: [{ agentName: "claude", sessionId: "s-recent", state: "active", cwd: "/repo" }],
       } as any);
     });
-    await clickConversationsTab();
-    const del = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-del");
-    expect(del).not.toBeNull();
-    expect(del!.disabled).toBe(true);
+    expect(container.querySelectorAll(".sess-del").length).toBe(before - 1);
   });
 
   test("Running rows offer no delete affordance", async () => {
+    seedLatestView();
     await seedRecentSessions(sixteenRecents());
     await renderSidebar();
     const { useStore } = await import("../store/store.ts");
@@ -1273,7 +1303,6 @@ describe("Sidebar recent conversations", () => {
     await renderSidebar();
     const { useStore } = await import("../store/store.ts");
     useStore.setState({ deleteSession } as any);
-    await clickConversationsTab();
 
     const rowBtn = container.querySelector<HTMLButtonElement>(".sess-list .sess-row .sess-item")!;
     await act(async () => { rowBtn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
@@ -1303,6 +1332,7 @@ describe("Sidebar recent conversations", () => {
   // rename sidecar is per-cwd — so the row's OWN agent and folder have to travel
   // with it, not the active ones.
   test("renaming a Recent row posts that row's own agent and folder", async () => {
+    seedLatestView();
     await seedRecentSessions(sixteenRecents());
     await renderSidebar();
     const { useStore } = await import("../store/store.ts");
@@ -1390,5 +1420,65 @@ describe("Sidebar recent conversations", () => {
     // sheet's layout is the stylesheet's to own.
     expect(container.querySelector(".sb-resize")).toBeNull();
     expect(container.querySelector<HTMLElement>("#panel")!.style.width).toBe("");
+  });
+
+  test("the folder view groups rows under a folder header carrying the row count", async () => {
+    getHistory.mockResolvedValue([]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "o1", title: "Other repo work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/other-repo", sessionId: "o2", title: "Other repo work 2", lastActiveAt: "2026-06-10T03:50:00.000Z" },
+    ]);
+    await renderSidebar();
+
+    const group = Array.from(container.querySelectorAll(".folder-group"))
+      .find((g) => g.textContent?.includes("other-repo"));
+    expect(group).not.toBeUndefined();
+    expect(group!.querySelector(".fcount")?.textContent).toBe("2");
+  });
+
+  test("the folder you are in comes first, even when another folder is more recently active", async () => {
+    getHistory.mockResolvedValue([]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "o1", title: "Other repo work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/repo", sessionId: "r1", title: "Current repo work", lastActiveAt: "2026-06-10T02:00:00.000Z" },
+    ]);
+    await renderSidebar();
+
+    const groups = container.querySelectorAll(".folder-group");
+    expect(groups.length).toBeGreaterThan(1);
+    // /other-repo is the more recently active folder, but /repo is where the
+    // app is working right now, so it leads regardless of recency.
+    expect(groups[0].querySelector(".fname")?.textContent).toBe("repo");
+  });
+
+  test("a folder with nothing running starts collapsed, and clicking its header expands it", async () => {
+    getHistory.mockResolvedValue([]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "o1", title: "Other repo work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+    ]);
+    await renderSidebar();
+
+    const group = Array.from(container.querySelectorAll(".folder-group"))
+      .find((g) => g.textContent?.includes("other-repo"))!;
+    const header = group.querySelector<HTMLButtonElement>(".fgroup")!;
+    expect(header.classList.contains("closed")).toBe(true);
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(group.querySelector(".fkids")).toBeNull();
+
+    await act(async () => { header.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(header.classList.contains("closed")).toBe(false);
+    expect(header.getAttribute("aria-expanded")).toBe("true");
+    expect(group.querySelector(".fkids")).not.toBeNull();
+    expect(group.textContent).toContain("Other repo work");
+  });
+
+  test("the view choice persists to localStorage", async () => {
+    await renderSidebar();
+    expect(localStorage.getItem("acpg.sessionsView")).toBeNull();
+
+    await showLatestView();
+
+    expect(localStorage.getItem("acpg.sessionsView")).toBe("latest");
   });
 });
