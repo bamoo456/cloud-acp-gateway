@@ -3,7 +3,7 @@ import { getHistory, getDiscoveredHistory, searchSessions, type HistorySession, 
 import type { RecentSession } from "../lib/recentSessions.ts";
 import { resolveRunningTask, runningView } from "../lib/runningTask.ts";
 import { useStore } from "../store/store.ts";
-import { agentColor } from "./AgentPill.tsx";
+import { agentColor } from "../lib/identity.ts";
 import { SearchResults } from "./SearchResults.tsx";
 import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";

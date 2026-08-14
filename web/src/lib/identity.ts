@@ -12,7 +12,18 @@
 // localStorage rather than the gateway's cross-device prefs, for the same
 // reason the sessions view is local: it is a per-screen taste, not an account
 // setting.
+import type { AgentRef } from "../types.ts";
+
 export type Identity = "mono" | "dot" | "hue";
+
+// The one colour an agent still owns, for the 7px block and nothing else.
+// Skin first, because a Codex-skinned agent is a Codex whatever it is called.
+export function agentColor(agent?: AgentRef): string {
+  if (agent?.skin === "codex") return "var(--agent-codex)";
+  if (agent?.kind === "opencode") return "var(--agent-opencode)";
+  if (agent?.name === "claude") return "var(--agent-claude)";
+  return "var(--accent)";
+}
 
 export const IDENTITY_OPTIONS: Array<{ id: Identity; label: string; description: string }> = [
   { id: "mono", label: "Wordmark", description: "no brand colour anywhere" },
