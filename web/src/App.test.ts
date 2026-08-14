@@ -38,6 +38,9 @@ describe("App running-task polling", () => {
       listDir: vi.fn().mockResolvedValue({ root: "/", path: "/", parent: null, dirs: [] }),
       getPrefs: vi.fn().mockResolvedValue({ textSize: null, lock: null, recentSessions: [], recentFolders: [] }),
       putTextSize: vi.fn().mockResolvedValue(undefined),
+      // The status bar's diffstat: the file panel reads the checkout even
+      // while it is shut, so App-level renders touch this route too.
+      getWorkspaceChanges: vi.fn().mockResolvedValue({ repo: null, files: [], truncated: false }),
     }));
   });
 
@@ -96,5 +99,28 @@ describe("App running-task polling", () => {
     });
 
     expect(useStore.getState().inboxItems).toEqual([item]);
+  });
+
+  // Shares this block's mocks rather than standing up a second App harness.
+  test("the phone tab bar badges the changed files and the waiting prompts", async () => {
+    await render();
+    const { useStore } = await import("./store/store.ts");
+    act(() => {
+      useStore.setState({
+        changeStat: { files: 7, additions: 128, deletions: 35 },
+        inboxItems: [{
+          id: 1, type: "permission", agentName: "claude", sessionId: "other",
+          reqId: "99", title: "Edit", options: [], status: "pending", createdAt: "now",
+        }] as any,
+      });
+    });
+    const badge = (tab: string) =>
+      container.querySelector(`.tabbar button[data-t="${tab}"] .n`)?.textContent;
+
+    expect(badge("changes")).toBe("7");
+    expect(badge("sessions")).toBe("1"); // the badge P2 took off the crumb
+    // The same diffstat, said once more only because the bar is the other
+    // half of the phone's bottom edge (§1.4) — not a third copy elsewhere.
+    expect(container.querySelector(".statusbar")?.textContent).toContain("7 files");
   });
 });
