@@ -1,27 +1,27 @@
 import type { PlanEntry } from "../types.ts";
 import { IconPlan } from "../lib/icons.tsx";
 
-// The plan checkboxes are inlined verbatim from public/console.html:957-961 so the
-// stroke colors/weights and the `box`/`box spin` classes (sized by .plan li .box in
-// styles.css) match the legacy console exactly — the box svg is a direct child of
-// the <li>, not wrapped, which is what the CSS selector targets.
+// The `box` / `box spin` classes are sized by `.plan li .box` in styles.css, and
+// the svg must stay a direct child of the <li> — that is what the selector
+// targets. The strokes are currentColor so each row's own state colour reaches
+// them: done is muted, running is ink, neither is green or amber (§1.1).
 function PlanBox({ status }: { status?: string }) {
   if (status === "completed") {
     return (
-      <svg className="box" viewBox="0 0 24 24" fill="none" stroke="#3a9b5c" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
+      <svg className="box" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round">
         <path d="M20 6L9 17l-5-5" />
       </svg>
     );
   }
   if (status === "in_progress") {
     return (
-      <svg className="box spin" viewBox="0 0 24 24" fill="none" stroke="#c98a23" strokeWidth={2.4} strokeLinecap="round">
+      <svg className="box spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round">
         <path d="M21 12a9 9 0 11-6.2-8.5" />
       </svg>
     );
   }
   return (
-    <svg className="box" viewBox="0 0 24 24" fill="none" stroke="#b9b6af" strokeWidth={2} strokeLinecap="round">
+    <svg className="box" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" opacity={0.45}>
       <circle cx="12" cy="12" r="9" />
     </svg>
   );

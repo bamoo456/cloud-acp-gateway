@@ -2,7 +2,6 @@ import { useState } from "react";
 import type { ElicitationField, ThreadItem } from "../types.ts";
 import { answerElicitation } from "../store/store.ts";
 import { buildElicitationContent, summarizeElicitationAnswers, type ElicitationValues } from "../lib/elicitation.ts";
-import { IconQuestion } from "../lib/icons.tsx";
 
 type Elic = Extract<ThreadItem, { kind: "elicitation" }>;
 
@@ -39,8 +38,9 @@ export function ElicitationPrompt({ item }: { item: Elic }) {
 
   return (
     <div className={"perm elicit" + (resolved ? " resolved" : "")}>
-      <div className="ph"><IconQuestion /><span>The agent has a question</span></div>
-      <div className="sub">{item.message}</div>
+      {/* Same discipline as the permission card: the amber edge is the header. */}
+      <div className="q">{item.message}</div>
+      <div className="sub">needs you</div>
       {item.fields.map((f) => (
         <Field key={f.key} field={f} value={values[f.key]}
           onPick={f.multi ? toggleMulti : pickSingle} onText={setText} />

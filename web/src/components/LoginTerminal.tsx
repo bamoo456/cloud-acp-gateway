@@ -169,7 +169,7 @@ export function LoginTerminal({ agent, onClose }: { agent: AgentRef; onClose: ()
                 borderRadius: 8,
               }}
             >
-              <span style={{ flex: 1, fontFamily: "ui-monospace, monospace", fontSize: 18, fontWeight: 600, letterSpacing: 2, color: "var(--fg)" }}>
+              <span style={{ flex: 1, fontFamily: "var(--mono)", fontSize: 18, fontWeight: 600, letterSpacing: 2, color: "var(--fg)" }}>
                 {deviceCode}
               </span>
               <button

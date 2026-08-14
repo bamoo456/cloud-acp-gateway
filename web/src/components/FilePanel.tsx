@@ -106,6 +106,18 @@ function Section({ title, count, open, onToggle, children }: {
   );
 }
 
+// The one-line summary of the same read the panel does — null when the folder
+// is clean, so the status bar and the tab badge can drop out entirely rather
+// than saying "0 files".
+function diffstat(r: ChangesResult) {
+  if (!r.files.length) return null;
+  return {
+    files: r.files.length,
+    additions: r.files.reduce((n, f) => n + (f.additions ?? 0), 0),
+    deletions: r.files.reduce((n, f) => n + (f.deletions ?? 0), 0),
+  };
+}
+
 // One file row. Its lead glyph is the whole answer to "does git know about
 // this": a tracked-and-changed file gets git's own status letter, in git's own
 // colours, and everything else — a file outside the repo, one written and
@@ -164,6 +176,7 @@ export function FilePanel() {
   const clearFilePreview = useStore((s) => s.clearFilePreview);
   const openFilePreview = useStore((s) => s.openFilePreview);
   const attachFiles = useStore((s) => s.attachFiles);
+  const setChangeStat = useStore((s) => s.setChangeStat);
   // The same capability the composer's "@" button is gated on: file references
   // ride on embeddedContext, and an agent without it drops them on send.
   const canAttach = useStore((s) => !!s.promptCapabilities.embeddedContext);
@@ -209,8 +222,14 @@ export function FilePanel() {
     const mine = ++gen.current;
     setLoading(true);
     getWorkspaceChanges(cwd)
-      .then((r) => { if (mine === gen.current) { setChanges(r); setErr(null); } })
-      .catch((e: Error) => { if (mine === gen.current) { setChanges(null); setErr(e.message || "Couldn't read this folder's changes."); } })
+      .then((r) => {
+        if (mine !== gen.current) return;
+        setChanges(r); setErr(null);
+        // The status bar reports the same diffstat (§1.4) and has no reader of
+        // its own, so publish the total here rather than fetching it twice.
+        setChangeStat(diffstat(r));
+      })
+      .catch((e: Error) => { if (mine === gen.current) { setChanges(null); setChangeStat(null); setErr(e.message || "Couldn't read this folder's changes."); } })
       .finally(() => { if (mine === gen.current) setLoading(false); });
     // A separate request with a separate failure: a gateway too old to know the
     // route, or a folder that has since been deleted, must leave the git half of
@@ -228,13 +247,22 @@ export function FilePanel() {
       .catch(() => { if (mine === gen.current) setReviewCount(0); });
   }
 
-  // Fetched whenever the panel is open, because Outputs now depends on it: git
-  // is what supplies a row's status letter and line counts, and what surfaces
-  // the files an agent wrote through a shell (which name no path in any tool
-  // call). Still gated on `open` — with the panel shut, nobody is looking.
+  // With the panel shut, the count is still on screen — in the status bar, and
+  // on a phone as the Changes tab's badge (§3 P5) — so the checkout is still
+  // read, but only for that: no Outputs, no review draft, no file lists to
+  // build for a panel nobody is looking at.
+  function loadStat() {
+    const mine = ++gen.current;
+    getWorkspaceChanges(cwd)
+      .then((r) => { if (mine === gen.current) setChangeStat(diffstat(r)); })
+      .catch(() => { if (mine === gen.current) setChangeStat(null); });
+  }
+
+  // The open panel reads the checkout because Outputs is built from it: git is
+  // what supplies a row's status letter and line counts, and what surfaces the
+  // files an agent wrote through a shell (which name no path in any tool call).
   useEffect(() => {
-    if (!open) return;
-    loadChanges();
+    if (open) loadChanges(); else loadStat();
     // The panel is closed and reopened, not unmounted, so retire any in-flight
     // request on the way out rather than letting it repaint a stale list later.
     return () => { gen.current++; };
@@ -248,7 +276,7 @@ export function FilePanel() {
   useEffect(() => {
     const justFinished = wasWorking.current && !working;
     wasWorking.current = working;
-    if (justFinished && open) loadChanges();
+    if (justFinished) { if (open) loadChanges(); else loadStat(); }
   }, [working, open]);
 
   // Width is applied inline, so it must only exist in column mode — below the
@@ -313,6 +341,16 @@ export function FilePanel() {
   // The agent's current plan, if it has published one. The last plan update wins
   // — ACP re-sends the whole list every time an entry changes.
   const plan = [...(session?.items ?? [])].reverse().find((it) => it.kind === "plan");
+  // Read off `changes` rather than the store field: the store carries whichever
+  // folder the panel last read, and in Review mode this panel is looking at a
+  // revision the status bar knows nothing about.
+  const stat = changes?.files.length
+    ? {
+      files: changes.files.length,
+      additions: changes.files.reduce((n, f) => n + (f.additions ?? 0), 0),
+      deletions: changes.files.reduce((n, f) => n + (f.deletions ?? 0), 0),
+    }
+    : null;
 
   return (
     <>
@@ -333,8 +371,19 @@ export function FilePanel() {
           {/* Naming the folder is half of what the Project mode is for, and it
               is the only thing here that says WHICH checkout the lists describe
               when a session's cwd differs from the picker's. */}
+          {/* The summary folds into the header rather than taking a row of its
+              own (§1.3): "Files repo · 7 files +128 −35". */}
           <span className="wf-title" title={target ? target.abs : cwd}>
-            {target ? target.path : <>Files <span className="wf-cwd">{basename(cwd)}</span></>}
+            {target ? target.path : (
+              <>
+                Files <span className="wf-cwd">{basename(cwd)}</span>
+                {stat && <span className="wf-stat">
+                  {stat.files} file{stat.files === 1 ? "" : "s"}
+                  {stat.additions > 0 && <b className="add">+{stat.additions}</b>}
+                  {stat.deletions > 0 && <b className="del">−{stat.deletions}</b>}
+                </span>}
+              </>
+            )}
           </span>
           {!target && (
             <button className="icon-btn" title="Refresh" disabled={loading}

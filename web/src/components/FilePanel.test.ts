@@ -109,9 +109,15 @@ describe("FilePanel", () => {
     await act(async () => { await flush(); });
   }
 
-  test("stays shut and asks the gateway for nothing until it is opened", async () => {
+  test("stays shut and reads only the diffstat the status bar shows", async () => {
+    // The count is on screen with the panel closed — status bar, and the phone's
+    // Changes badge — so the checkout is read; the lists nobody is looking at
+    // are not built.
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ cwd: "/repo" });
     await render();
-    expect(getWorkspaceChanges).not.toHaveBeenCalled();
+    expect(getWorkspaceChanges).toHaveBeenCalledWith("/repo");
+    expect(getWorkspaceOutputs).not.toHaveBeenCalled();
     expect(container.querySelector("#files")?.className).not.toContain("open");
   });
 

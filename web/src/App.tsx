@@ -6,6 +6,7 @@ import { Sidebar } from "./components/Sidebar.tsx";
 import { FilePanel } from "./components/FilePanel.tsx";
 import { Thread } from "./components/Thread.tsx";
 import { Composer } from "./components/Composer.tsx";
+import { EngineDock } from "./components/EngineDock.tsx";
 import { FolderPicker } from "./components/FolderPicker.tsx";
 import { LockScreen } from "./components/LockScreen.tsx";
 import { LoginTerminal } from "./components/LoginTerminal.tsx";
@@ -25,8 +26,19 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 // gracefully; no test fails).
 import { Terminal } from "./components/Terminal.tsx";
 import { UsageStrip } from "./components/UsageStrip.tsx";
-import { IconTerminal } from "./lib/icons.tsx";
+import { IconTerminal, IconChat, IconBranch, IconClock } from "./lib/icons.tsx";
 import type { AgentRef } from "./types.ts";
+
+// The phone's four panes. A bottom tab bar rather than the desktop's three
+// columns squeezed narrow (§3 P5) — one pane at a time is what a 392px screen
+// can actually show.
+type MobileTab = "chat" | "changes" | "sessions" | "term";
+const TABS: Array<{ id: MobileTab; label: string; icon: () => JSX.Element }> = [
+  { id: "chat", label: "Chat", icon: () => <IconChat /> },
+  { id: "changes", label: "Changes", icon: () => <IconBranch /> },
+  { id: "sessions", label: "Sessions", icon: () => <IconClock /> },
+  { id: "term", label: "Term", icon: () => <IconTerminal /> },
+];
 
 export function App() {
   const bootstrap = useStore((s) => s.bootstrap);
@@ -37,15 +49,29 @@ export function App() {
   const locked = useStore((s) => s.locked);
   const cwd = useStore((s) => s.cwd);
   const terminalEnabled = useStore((s) => s.cfg.terminalEnabled);
-  // The strip is shared: it docks the terminal toggle and the usage gauge, and
-  // either one alone is reason enough to show it.
-  const hasUsage = useStore((s) =>
-    !!(s.activeId && s.sessions[s.activeId]?.contextSize) || Object.keys(s.rateLimits).length > 0);
+  const conn = useStore((s) => s.conn);
+  const filesOpen = useStore((s) => s.filesOpen);
+  const toggleFiles = useStore((s) => s.toggleFiles);
+  // Cross-agent prompts waiting on an answer. The mobile Sessions tab carries
+  // the count the crumb used to (§3 P5) — the sessions list itself pins them.
+  const pendingCount = useStore((s) =>
+    s.inboxItems.filter((it) => it.reqId != null && it.sessionId !== s.activeId).length);
+  // Machine-layer facts, in one row along the bottom edge (§1.4): the
+  // transport, the folder's diffstat, the context window, the account's quota
+  // and the terminal. Not the agent — the crumb and the dock already name it.
+  const changeStat = useStore((s) => s.changeStat);
   const [panel, setPanel] = useState(false);
   const [picker, setPicker] = useState(false);
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
   useEffect(() => { bootstrap(); }, [bootstrap]);
+  // Derived, never stored: whichever sheet is open IS the current tab.
+  const mobileTab: MobileTab = terminalOpen ? "term" : filesOpen ? "changes" : panel ? "sessions" : "chat";
+  const pickTab = (t: MobileTab) => {
+    setPanel(t === "sessions");
+    if ((t === "changes") !== filesOpen) toggleFiles();
+    setTerminalOpen(t === "term");
+  };
   // Ctrl-` toggles the terminal, the shortcut the strip advertises. Capture
   // phase and stopPropagation because xterm listens on its own textarea: once
   // the panel has focus, a bubbling handler would reach us only after the
@@ -135,8 +161,11 @@ export function App() {
       <div className="app-row">
         <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)} />
         <div className="content">
-          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} onOpenLogin={(a) => setLoginAgent(a)} />
+          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} />
           <main id="main"><Thread session={sess} agentReady={agentReady} loading={joining} /></main>
+          {/* Between the thread and the input, right-aligned: what is answering
+              and on what, plus the control that changes it (§3 P3). */}
+          <EngineDock onOpenLogin={(a) => setLoginAgent(a)} />
           <Composer />
         </div>
         {/* Right of the chat column on desktop, an overlay on mobile. Always
@@ -150,25 +179,51 @@ export function App() {
       {/* Status strip + terminal are siblings of .app-row, not inside it — they
           dock full-width below the sidebar/chat/files row (like DevTools), so
           they have to be direct #root flex children to stack under that row
-          instead of becoming a 4th column inside it. The strip is always
-          present when the gateway offers a terminal: it is the only affordance
-          that opens the panel, and it doubles as the panel's title bar. It also
-          appears on a terminal-less gateway once there is usage to report. */}
-      {(terminalEnabled || hasUsage) && (
-        <div className="statusbar">
-          {terminalEnabled && (
-            <>
-              <button className={"sb-chip" + (terminalOpen ? " on" : "")} aria-pressed={terminalOpen}
-                onClick={() => setTerminalOpen((v) => !v)}>
-                <IconTerminal />Terminal
-              </button>
-              <span className="sb-hint">or <kbd>⌃`</kbd></span>
-            </>
-          )}
-          <UsageStrip />
-        </div>
-      )}
+          instead of becoming a 4th column inside it. Unlike before, the strip
+          is always present: it is the app's bottom edge and it owns the
+          home-indicator inset, and the connection is a fact it always has. */}
+      <div className="statusbar">
+        {/* Silent when healthy (§1.1): muted text, no green dot; only a broken
+            connection speaks up. */}
+        <span className={"sb-seg conn" + (conn === "offline" ? " off" : "")}>
+          {conn === "connected" ? "connected" : conn === "offline" ? "offline" : "connecting"}
+        </span>
+        {changeStat && changeStat.files > 0 && (
+          <span className="sb-seg" title={`${changeStat.files} changed file${changeStat.files === 1 ? "" : "s"} in this folder`}>
+            {changeStat.files} file{changeStat.files === 1 ? "" : "s"}
+            {changeStat.additions > 0 && <b className="add">+{changeStat.additions}</b>}
+            {changeStat.deletions > 0 && <b className="del">−{changeStat.deletions}</b>}
+          </span>
+        )}
+        <span className="sb-sp" />
+        <UsageStrip />
+        {terminalEnabled && (
+          <button className={"sb-seg sb-term" + (terminalOpen ? " on" : "")} aria-pressed={terminalOpen}
+            title="Toggle the terminal" onClick={() => setTerminalOpen((v) => !v)}>
+            <IconTerminal />term <kbd>⌃`</kbd>
+          </button>
+        )}
+      </div>
       {terminalEnabled && terminalOpen && <Terminal cwd={cwd} onEmpty={() => setTerminalOpen(false)} />}
+      {/* Phone only (CSS). Below the desktop breakpoint the sidebar and the file
+          panel are sheets over the chat, which is the same "one pane at a time"
+          the tab bar makes explicit — so the tab is DERIVED from the state those
+          sheets already use rather than being a fourth source of truth that
+          could disagree with them. */}
+      <nav className="tabbar">
+        {TABS.map((t) => {
+          if (t.id === "term" && !terminalEnabled) return null;
+          const on = mobileTab === t.id;
+          const n = t.id === "changes" ? changeStat?.files ?? 0 : t.id === "sessions" ? pendingCount : 0;
+          return (
+            <button key={t.id} className={on ? "on" : ""} aria-pressed={on} data-t={t.id}
+              onClick={() => pickTab(t.id)}>
+              {t.icon()}{t.label}
+              {n > 0 && <span className="n">{n}</span>}
+            </button>
+          );
+        })}
+      </nav>
       {locked && <LockScreen />}
     </>
   );

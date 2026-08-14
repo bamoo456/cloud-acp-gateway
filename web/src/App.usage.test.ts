@@ -42,6 +42,9 @@ describe("App usage strip", () => {
       listDir: vi.fn().mockResolvedValue({ root: "/", path: "/", parent: null, dirs: [] }),
       getPrefs: vi.fn().mockResolvedValue({ textSize: null, lock: null, recentSessions: [], recentFolders: [] }),
       putTextSize: vi.fn().mockResolvedValue(undefined),
+      // The status bar's diffstat: the file panel reads the checkout even
+      // while it is shut, so App-level renders touch this route too.
+      getWorkspaceChanges: vi.fn().mockResolvedValue({ repo: null, files: [], truncated: false }),
     }));
   });
 
@@ -79,7 +82,10 @@ describe("App usage strip", () => {
 
   test("a live usage_update makes the strip appear on a terminal-less gateway", async () => {
     const ws = await mountAndConnect();
-    expect(container.querySelector(".statusbar")).toBeNull(); // nothing to report yet
+    // The status bar is the app's bottom edge now, so it is always mounted —
+    // but the usage segments still wait for an agent to report something.
+    expect(container.querySelector(".statusbar")).not.toBeNull();
+    expect(container.querySelector(".usage-strip")).toBeNull(); // nothing to report yet
 
     await act(async () => {
       ws.recv(LIVE_FRAME);
@@ -88,7 +94,7 @@ describe("App usage strip", () => {
 
     const strip = container.querySelector(".statusbar .usage-strip");
     expect(strip).not.toBeNull();
-    expect(strip!.textContent).toBe("87%context");
+    expect(strip!.textContent).toBe("ctx87%");
   });
 
   test("the quota poll fills the strip with no session usage at all", async () => {
@@ -105,7 +111,7 @@ describe("App usage strip", () => {
     // Percentages and labels only: the countdown text is a function of the wall
     // clock, and formatUntil already has exact coverage in format.test.ts.
     expect([...container.querySelectorAll(".u-seg b")].map((e) => e.textContent)).toEqual(["13%", "59%", "10%"]);
-    expect([...container.querySelectorAll(".u-seg .lb")].map((e) => e.textContent)).toEqual(["5h", "7d", "Fable"]);
+    expect([...container.querySelectorAll(".u-seg .lb")].map((e) => e.textContent)).toEqual(["5h", "wk", "Fable"]);
   });
 
   test("a gateway that can't report quota leaves the strip alone", async () => {
