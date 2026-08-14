@@ -1839,3 +1839,17 @@
     /* body.resizing lives in the 860px block with the sidebar handle — the
        earliest breakpoint at which anything is draggable. */
   }
+
+  /* ---- 16px floor for anything a phone can focus ----
+     iOS zooms the page in on a focused field under 16px and never zooms back
+     out, so the composer, the search box and the panels' own fields all take
+     a 16px floor on a phone. Two fields already carried their own 16px for
+     exactly this reason (.sess-confirm .rename-input, .amenu .pin-field) —
+     this is that rule stated once, in one place, for the rest of them. Placed
+     last so it wins on source order at equal specificity; max() so the
+     text-size setting can still scale the composer above the floor. */
+  @media (max-width: 640px) {
+    .composer .cm-editor { font-size: max(16px, var(--chat-user-size)); }
+    .search input, .amenu .rename-input, .rv-cmt textarea,
+    .search-filter-row input[type=date], .search-filter-row select { font-size: 16px; }
+  }

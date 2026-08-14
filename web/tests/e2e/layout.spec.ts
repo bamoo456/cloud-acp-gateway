@@ -405,6 +405,35 @@ test("the quota windows stay on screen on a phone, behind a big diffstat", async
   await expect(page.locator(".statusbar .conn")).toHaveText("connected");
 });
 
+// iOS zooms the page in when a field under 16px takes focus, and never zooms
+// back out — so on a phone the composer and every panel field have a 16px
+// floor. The composer sat at 15.5px (14px on the "small" text size) and the
+// search box at 15px, which meant tapping either one left the layout zoomed.
+test("no field a phone can focus sits under 16px", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route(/\/history\?/, (r) => r.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ sessions: [{ sessionId: "sess-1", title: "A chat", updatedAt: new Date().toISOString() }] }),
+  }));
+  await page.addInitScript(SEED_SSE(1));
+  await page.goto("/");
+  await expect(page.locator(".composer .cm-content")).toBeVisible();
+  await page.click("button.sessions-btn"); // mounts the sidebar's search field
+
+  const fields = await page.evaluate(() =>
+    [...document.querySelectorAll("input:not([type=file]), textarea, .cm-content")].map((el) => ({
+      what: el.getAttribute("placeholder") || el.className || el.tagName,
+      size: parseFloat(getComputedStyle(el).fontSize),
+    })));
+  expect(fields.length, "the composer and the search field must both be mounted").toBeGreaterThanOrEqual(2);
+  for (const f of fields) expect(f.size, `${f.what} is below the iOS zoom threshold`).toBeGreaterThanOrEqual(16);
+
+  // Desktop keeps its own smaller sizes — the floor is a phone rule only.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const composer = await page.locator(".composer .cm-content").evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
+  expect(composer).toBeLessThan(16);
+});
+
 test("slash-command menu dismisses on an outside click", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
