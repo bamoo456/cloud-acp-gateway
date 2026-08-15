@@ -2490,6 +2490,47 @@ function controlSnapshot(result: unknown): {
 // rest is applied on top of the settled list instead of against it.
 const controlRank = (configId: string): number => (configId === "model" ? 0 : configId === "mode" ? 1 : 2);
 
+// A model id/option value broken into the parts that actually decide a match:
+// "claude-opus-5[1m]" -> family "opus", version "5", tag true. "opus[1m]" (an
+// account's version-agnostic alias for "whatever Opus is current") -> family
+// "opus", version "" (empty), tag true.
+function normalizeModelId(id: string): { family: string; version: string; tag: boolean } {
+  const tag = /\[[^\]]*\]$/.test(id);
+  const stripped = id.replace(/\[[^\]]*\]$/, "").replace(/^claude-/, "");
+  const [family, ...rest] = stripped.split("-");
+  return { family, version: rest.join("-"), tag };
+}
+
+// Map the model id a Claude Code SDK "system init" message reports to the config
+// option value EngineDock understands. A straight prefix match is wrong: real
+// accounts list the same family at different granularities — e.g. "opus[1m]"
+// (no version, any Opus) alongside a version-pinned "claude-fable-5[1m]" — so
+// prefix either misses the unversioned alias or, worse, can't tell "opus-4-7"
+// from a version-5 option and would silently overwrite an already-correct pin.
+// Matching order:
+//   1. exact string match
+//   2. same family AND (the option carries no version, or both do and agree)
+//   3. of rule 2's candidates, prefer the one whose [...]-tag agrees (an account
+//      can have both "opus" and "opus[1m]")
+//   4. nothing matched → the raw id; the UI renders an unrecognized value as-is
+function resolveModelValue(modelOptions: unknown, modelId: string): string {
+  const flat = Array.isArray(modelOptions)
+    ? modelOptions.flatMap((c) => {
+        const g = c as { options?: unknown };
+        return Array.isArray(g.options) ? g.options : [c];
+      })
+    : [];
+  const values = flat.map((c) => (c as { value?: unknown }).value).filter((v): v is string => typeof v === "string");
+  if (values.includes(modelId)) return modelId;
+  const want = normalizeModelId(modelId);
+  const candidates = values.filter((v) => {
+    const got = normalizeModelId(v);
+    return got.family === want.family && (got.version === "" || got.version === want.version);
+  });
+  if (!candidates.length) return modelId;
+  return candidates.find((v) => normalizeModelId(v).tag === want.tag) ?? candidates[0];
+}
+
 type PromptRequestMethod = "session/request_permission" | "elicitation/create";
 type PendingPrompt = {
   sid: string;
@@ -2537,6 +2578,14 @@ class Channel {
   // that carries a cwd. Surfaced in running() so cross-device tasks show the
   // correct folder and jump precisely. Cleared with tasks on agent exit.
   private sessionCwd = new Map<string, string>();
+  // sessionId -> the last configOptions snapshot the gateway has seen for it
+  // (session/new + session/load responses, and the agent's own
+  // config_option_update notifications). The only reader is handleSdkMessage,
+  // which needs the `model` option's real `options[]` to correct its
+  // currentValue against what a resumed session is actually running — see the
+  // _claude/sdkMessage interception in fromAgent. Cleared alongside sessionCwd:
+  // same per-session lifetime, and a revive's session/load response repopulates it.
+  private sessionConfigOptions = new Map<string, unknown[]>();
   // sessionId -> the text of its first prompt, used as the running-task label so
   // concurrent tasks in the same folder don't all collapse to a short id.
   private sessionTitle = new Map<string, string>();
@@ -2650,6 +2699,7 @@ class Channel {
     this.promptReq.clear();
     this.promptsInFlight.clear();
     this.sessionCwd.clear();
+    this.sessionConfigOptions.clear();
     this.sessionTitle.clear();
     // The agent process is gone, so the requests it was blocking on can never be
     // answered — mark its still-pending inbox prompts expired (the in-memory
@@ -2824,6 +2874,7 @@ class Channel {
     this.forgetPromptsFor(sid);
     this.sessionTitle.delete(sid);
     this.sessionCwd.delete(sid);
+    this.sessionConfigOptions.delete(sid);
     const gid = this.idmux.outbound(CLOSE_SENTINEL, `close:${sid}`, "session/close", sid);
     this.agent.send(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: gid, method: "session/close", params: { sessionId: sid } })));
     console.log(`channel ${this.name}: reaped session ${sid.slice(0, 8)}… (${reason}; ${this.liveSessions.size} live)`);
@@ -2940,6 +2991,28 @@ class Channel {
     this.sendTo(connId, this.ledger.headSeq(), frame);
   }
 
+  // Whether the shared agent process is claude-agent-acp: only its initialize
+  // response advertises agentCapabilities._meta.claudeCode (codex-acp / opencode
+  // don't), and only it understands the emitRawSDKMessages _meta flag below.
+  private isClaudeAdapter(): boolean {
+    const caps = (this.initResult as { agentCapabilities?: { _meta?: { claudeCode?: unknown } } } | null)?.agentCapabilities;
+    return !!caps?._meta?.claudeCode;
+  }
+
+  // Merge the raw-SDK-message opt-in into `_meta.claudeCode`, preserving whatever
+  // else the caller already put there (a client's own `_meta`, on a forwarded
+  // session/new or session/load). Only claude-agent-acp understands this flag —
+  // callers gate on isClaudeAdapter() before using it.
+  private withEmitRawSDKMessages(params: unknown): Record<string, unknown> {
+    const p = (params ?? {}) as Record<string, unknown>;
+    const meta = (p._meta ?? {}) as Record<string, unknown>;
+    const claudeCode = (meta.claudeCode ?? {}) as Record<string, unknown>;
+    return {
+      ...p,
+      _meta: { ...meta, claudeCode: { ...claudeCode, emitRawSDKMessages: [{ type: "system", subtype: "init" }] } },
+    };
+  }
+
   // agent stdout -> client(s)
   private fromAgent(line: Buffer): void {
     const f = parse(line);
@@ -3028,6 +3101,10 @@ class Channel {
           if (origin.cwd) this.sessionCwd.set(sid, origin.cwd);
           // A new session has a fresh backing CLI — start tracking it for reaping.
           this.touchSession(sid, origin.cwd);
+          // Cache configOptions so a later _claude/sdkMessage can correct just the
+          // model entry against the real option list (see handleSdkMessage).
+          const configOptions = (f.result as { configOptions?: unknown } | undefined)?.configOptions;
+          if (Array.isArray(configOptions)) this.sessionConfigOptions.set(sid, configOptions);
         }
       }
       // session/load finished → stop gating that session's replay, resume broadcast
@@ -3044,6 +3121,11 @@ class Channel {
         for (const p of this.pendingPerms.values()) {
           if (p.sid === loaded) this.sendTo(origin.connId, p.seq, p.frame);
         }
+        // Cache configOptions here too — closeSession drops it (alongside
+        // sessionCwd) when a session is reaped, and this is what repopulates it
+        // once a revive's session/load response comes back.
+        const loadedConfigOptions = (f.result as { configOptions?: unknown } | undefined)?.configOptions;
+        if (Array.isArray(loadedConfigOptions)) this.sessionConfigOptions.set(loaded, loadedConfigOptions);
         // This load may have rebuilt the session from disk, which resets every
         // control to its default — the result is the only place that says what it
         // came back as. Put the client's choices back first: a prompt parked behind
@@ -3126,6 +3208,21 @@ class Channel {
     // Exception: while a session is being loaded, its replay goes only to the
     // loading connection so other devices don't duplicate history they already show.
     const nsid = sessionIdOf(f);
+    // Raw SDK messages (the emitRawSDKMessages _meta flag injected in
+    // forwardClientRequest / reviveThenForward) are gateway-internal
+    // instrumentation, not ACP transcript — a single hook_response frame from this
+    // stream measured 11KB, and one arrives on every turn. Handled and dropped
+    // here, before ANYTHING below (including the append a few lines down) can see
+    // it; see handleSdkMessage for what it's actually used for.
+    if (f.method === "_claude/sdkMessage") { this.handleSdkMessage(f.params); return; }
+    // A genuine config_option_update keeps the model-correction cache (see
+    // handleSdkMessage) in step with whatever the agent reports on its own.
+    if (nsid && f.method === "session/update") {
+      const upd = (f.params as { update?: { sessionUpdate?: unknown; configOptions?: unknown } } | undefined)?.update;
+      if (upd?.sessionUpdate === "config_option_update" && Array.isArray(upd.configOptions)) {
+        this.sessionConfigOptions.set(nsid, upd.configOptions);
+      }
+    }
     // Heartbeat an in-flight task: each agent frame for the session proves it is
     // still working (and resumes "active" after an awaiting-input pause). Only
     // refresh existing tasks — a session/load replay must not look like a new run.
@@ -3287,7 +3384,12 @@ class Channel {
     // has to be brought back to.
     const ctl = controlOf(method, f.params);
     if (ctl && sid) this.controlReq.set(gatewayId, { sid, ...ctl });
-    const out = Buffer.from(JSON.stringify({ ...f, id: gatewayId }));
+    // Ask claude-agent-acp for the resumed session's real model (see
+    // handleSdkMessage) on exactly the two requests that can start a session.
+    const params = (method === "session/new" || method === "session/load") && this.isClaudeAdapter()
+      ? this.withEmitRawSDKMessages(f.params)
+      : f.params;
+    const out = Buffer.from(JSON.stringify({ ...f, id: gatewayId, params }));
     // Gate this session's replay to the loader until the load response returns.
     if (method === "session/load" && sid) {
       this.loadGate.set(sid, conn.id); this.loadReq.set(gatewayId, sid);
@@ -3315,7 +3417,9 @@ class Channel {
     const gid = this.idmux.outbound(REVIVE_SENTINEL, `revive:${sid}`, "session/load", sid, loadCwd || undefined);
     this.loadGate.set(sid, REVIVE_SENTINEL);
     this.loadReq.set(gid, sid);
-    const out = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: gid, method: "session/load", params: { sessionId: sid, cwd: loadCwd, mcpServers: [] } }));
+    const reviveParams = { sessionId: sid, cwd: loadCwd, mcpServers: [] };
+    const params = this.isClaudeAdapter() ? this.withEmitRawSDKMessages(reviveParams) : reviveParams;
+    const out = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: gid, method: "session/load", params }));
     if (this.isCodex) { void this.loadCodexWithRepair(sid, out); return; }
     this.agent.send(out);
   }
@@ -3430,6 +3534,34 @@ class Channel {
       this.controlAck.set(gid, (f) => { clearTimeout(timer); resolve(f); });
       this.agent.send(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: gid, method, params })));
     });
+  }
+
+  // The only raw SDK message subtype the gateway asks for (see the _meta
+  // injection in forwardClientRequest / reviveThenForward): Claude's "system
+  // init" message, the one place the model a RESUMED session actually runs is
+  // observable — the adapter's getAvailableModels() only resolves the static
+  // ANTHROPIC_MODEL / settings.json / models[0] guess, never what a resume
+  // landed on. Corrects just the cached `model` option's currentValue and
+  // re-broadcasts, and only when that value actually changed — a fresh one of
+  // these arrives on every prompt, and re-broadcasting unchanged config on every
+  // turn would spam clients for no reason.
+  private handleSdkMessage(params: unknown): void {
+    const p = params as { sessionId?: unknown; message?: unknown } | undefined;
+    const sid = p?.sessionId;
+    const m = p?.message as { type?: unknown; subtype?: unknown; model?: unknown } | undefined;
+    if (typeof sid !== "string" || m?.type !== "system" || m?.subtype !== "init" || typeof m.model !== "string") return;
+    const configOptions = this.sessionConfigOptions.get(sid);
+    if (!Array.isArray(configOptions)) return;
+    const modelOption = configOptions.find((o) => (o as { id?: unknown }).id === "model") as
+      | { currentValue?: unknown; options?: unknown }
+      | undefined;
+    if (!modelOption) return;
+    const resolved = resolveModelValue(modelOption.options, m.model);
+    if (modelOption.currentValue === resolved) return;
+    const updated = configOptions.map((o) =>
+      (o as { id?: unknown }).id === "model" ? { ...(o as Record<string, unknown>), currentValue: resolved } : o);
+    this.sessionConfigOptions.set(sid, updated);
+    this.broadcastConfigOptions(sid, { configOptions: updated });
   }
 
   // Tell every client what the re-applied controls now are. Necessary because the
