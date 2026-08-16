@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { getWorkspaceTree, findWorkspaceFiles, type TreeEntry, type FoundFile } from "../lib/api.ts";
+import { getWorkspaceTree, findWorkspaceFiles, grepWorkspace, type TreeEntry, type FoundFile, type GrepFile } from "../lib/api.ts";
 import { fileKind } from "../lib/fileKind.ts";
 import { formatBytes } from "../lib/format.ts";
 import { IconFolder, IconChevronDown, IconChevronRight, fileIcon } from "../lib/icons.tsx";
@@ -18,6 +18,12 @@ import { useRowMenu } from "./FileMenu.tsx";
 
 // Depth is indentation only; the fetch cares about the path.
 const INDENT_PX = 12;
+// Which of the two searches the box is running. Names answers from a cached
+// index; Contents runs `git grep` on the gateway, so it waits for the typing to
+// settle and refuses a term short enough to match every file in the project.
+type Scope = "name" | "text";
+const GREP_DEBOUNCE_MS = 300;
+const MIN_GREP_LEN = 2;
 
 function Row({ entry, depth, open, onClick, onMenu }: {
   entry: TreeEntry; depth: number; open?: boolean; onClick: () => void;
@@ -178,6 +184,100 @@ function Results({ cwd, query, onOpenFile, onMenu }: {
   );
 }
 
+// One file's matching lines. The whole block is the button — a header row plus
+// its hits — so a match is as easy to hit with a thumb as a file row is, and so
+// the long-press menu covers the lines too. Opening lands at the top of the
+// file: the preview is one <pre>, with no per-line anchor to scroll to yet.
+function HitRow({ file, onOpen, onMenu }: {
+  file: GrepFile; onOpen: () => void; onMenu: (x: number, y: number) => void;
+}) {
+  const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+  const dir = file.path.slice(0, file.path.length - name.length - 1);
+  const menu = useRowMenu(onMenu);
+  return (
+    <button className="wf-row wf-hit" onClick={onOpen} {...menu} title={file.path}>
+      <span className="wf-hit-head">
+        <span className="wf-mark wf-kind">{fileIcon(fileKind(name).icon)}</span>
+        <span className="wf-name">
+          <span className="wf-nm">{name}</span>
+          {dir && <span className="wf-dir">{dir}</span>}
+        </span>
+      </span>
+      {file.matches.map((m) => (
+        <span className="wf-hit-line" key={m.line}>
+          <span className="ln">{m.line}</span>
+          <span className="tx">{m.text}</span>
+        </span>
+      ))}
+      {file.more > 0 && <span className="wf-hit-more">+{file.more} more in this file</span>}
+    </button>
+  );
+}
+
+// Content search. Its own component (and its own debounce) rather than a branch
+// inside Results: this one costs a git process per query, where the name search
+// answers from an in-memory index.
+function TextResults({ cwd, query, onOpenFile, onMenu }: {
+  cwd: string; query: string; onOpenFile: (e: { abs: string; name: string }) => void;
+  onMenu: (e: { abs: string; name: string }, x: number, y: number) => void;
+}) {
+  const [res, setRes] = useState<GrepFile[] | null>(null);
+  const [meta, setMeta] = useState<{ truncated: boolean; fromGit: boolean; total: number }>(
+    { truncated: false, fromGit: true, total: 0 });
+  const [err, setErr] = useState<string | null>(null);
+  // Same guard as Results: only the newest query may paint.
+  const gen = useRef(0);
+
+  useEffect(() => {
+    const mine = ++gen.current;
+    setRes(null);
+    const t = window.setTimeout(() => {
+      grepWorkspace(cwd, query)
+        .then((r) => { if (mine === gen.current) { setRes(r.files); setMeta(r); setErr(null); } })
+        .catch((e: Error) => { if (mine === gen.current) { setRes([]); setErr(e.message || "Couldn't search this folder."); } });
+    }, GREP_DEBOUNCE_MS);
+    return () => { window.clearTimeout(t); gen.current++; };
+  }, [cwd, query]);
+
+  if (err) return <div className="wf-empty">{err}</div>;
+  if (!res) return <div className="wf-empty">Searching…</div>;
+  if (!meta.fromGit) {
+    return (
+      <div className="wf-empty">
+        This folder isn't a git checkout, so its contents can't be searched.
+        <div className="wf-sub">Search by name instead, or open the file from the tree.</div>
+      </div>
+    );
+  }
+  if (res.length === 0) {
+    return (
+      <div className="wf-empty">
+        Nothing in this project matches.
+        <div className="wf-sub">Files git ignores aren't searched — open them from the tree instead.</div>
+      </div>
+    );
+  }
+  return (
+    <>
+      {res.map((f) => {
+        const found = { abs: f.abs, name: f.path.slice(f.path.lastIndexOf("/") + 1) };
+        return (
+          <HitRow key={f.abs} file={f}
+            onOpen={() => onOpenFile(found)}
+            onMenu={(x, y) => onMenu(found, x, y)} />
+        );
+      })}
+      {/* The count is what was READ before the cap stopped the search, not what
+          exists — so the note must not claim to know the total. */}
+      {meta.truncated && (
+        <div className="wf-note">
+          Showing the first {meta.total} matching lines — there are more. Narrow the search to see them.
+        </div>
+      )}
+    </>
+  );
+}
+
 export function FileTree({ cwd, reloadKey, onOpenFile, onMenu }: {
   cwd: string;
   // Bumped by the panel's Refresh button. The tree does not re-fetch on its own
@@ -190,8 +290,11 @@ export function FileTree({ cwd, reloadKey, onOpenFile, onMenu }: {
   onMenu: (file: { abs: string; name: string; isDir?: boolean }, x: number, y: number) => void;
 }) {
   const [query, setQuery] = useState("");
-  // A new folder is a new tree: dropping the old one's expansions is the point.
-  useEffect(() => { setQuery(""); }, [cwd]);
+  const [scope, setScope] = useState<Scope>("name");
+  // A new folder is a new tree: dropping the old one's expansions is the point,
+  // and a new project is browsed before it is grepped.
+  useEffect(() => { setQuery(""); setScope("name"); }, [cwd]);
+  const q = query.trim();
 
   // The find box is pinned and the rows scroll under it: this fills the panel
   // below the mode switch, so a deep tree must not push the box off the top.
@@ -200,18 +303,31 @@ export function FileTree({ cwd, reloadKey, onOpenFile, onMenu }: {
       <div className="wf-find">
         <input
           type="search"
-          placeholder="Find files"
+          placeholder={scope === "text" ? "Search in files" : "Find files"}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          aria-label="Find files by name"
+          aria-label={scope === "text" ? "Search file contents" : "Find files by name"}
         />
+        {/* Two searches, one box: the same words are how you look for a file
+            and how you look for what is written in one, and which of those you
+            meant is a choice, not something to guess from the term. */}
+        <div className="wf-find-scope" role="tablist" aria-label="What to search">
+          <button role="tab" aria-selected={scope === "name"} className={scope === "name" ? "active" : ""}
+            onClick={() => setScope("name")}>Names</button>
+          <button role="tab" aria-selected={scope === "text"} className={scope === "text" ? "active" : ""}
+            onClick={() => setScope("text")}>Contents</button>
+        </div>
       </div>
       <div className="wf-body">
-        {query.trim()
-          ? <Results cwd={cwd} query={query.trim()} onOpenFile={onOpenFile} onMenu={onMenu} />
-          : <Level key={cwd + ":" + reloadKey} cwd={cwd} depth={0}
+        {!q
+          ? <Level key={cwd + ":" + reloadKey} cwd={cwd} depth={0}
               onOpenFile={(e) => onOpenFile({ abs: e.abs, name: e.name })}
-              onMenu={(e, x, y) => onMenu({ abs: e.abs, name: e.name, isDir: e.dir }, x, y)} />}
+              onMenu={(e, x, y) => onMenu({ abs: e.abs, name: e.name, isDir: e.dir }, x, y)} />
+          : scope === "name"
+            ? <Results cwd={cwd} query={q} onOpenFile={onOpenFile} onMenu={onMenu} />
+            : q.length < MIN_GREP_LEN
+              ? <div className="wf-empty">Type at least {MIN_GREP_LEN} characters to search file contents.</div>
+              : <TextResults cwd={cwd} query={q} onOpenFile={onOpenFile} onMenu={onMenu} />}
       </div>
     </>
   );

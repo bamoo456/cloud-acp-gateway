@@ -46,7 +46,8 @@ import { handleUpload } from "./uploads.ts";
 import { usageLimits, codexUsageLimits } from "./usage-limits.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
-  tree as workspaceTree, find as workspaceFind, outputFolder as workspaceOutputFolder,
+  tree as workspaceTree, find as workspaceFind, grep as workspaceGrep,
+  outputFolder as workspaceOutputFolder,
   revChanges as workspaceRevChanges, commits as workspaceCommits,
   inlineImageType, repoRoot, validRev, MAX_RAW_BYTES, MAX_COMMITS, type RevSpec,
 } from "./workspace.ts";
@@ -4413,6 +4414,21 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       .then((target) => {
         if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
         return workspaceFind(target.cwd, target.abs, q.get("q") ?? "").then((r) => {
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify(r));
+        });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Lines matching ?q= inside the files under the tree's root — the other half
+  // of Project search, where /workspace/find only reads names.
+  if (consoleEnabled && pathname === "/workspace/grep") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    resolveWorkspaceTarget(q, true)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        return workspaceGrep(target.cwd, target.abs, q.get("q") ?? "").then((r) => {
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
         });
