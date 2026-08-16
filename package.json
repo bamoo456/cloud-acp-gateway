@@ -14,7 +14,7 @@
     "test": "ACPG_NO_LISTEN=1 ACPG_AUTH_USER=test-user ACPG_AUTH_TOKEN=test-token ACPG_TERMINAL=off ACPG_LEDGER_DIR=\"$(mktemp -d)\" ACPG_AGENTS_FILE=agents.test.json CLAUDE_CONFIG_DIR=\"$(mktemp -d)\" CODEX_HOME=\"$(mktemp -d)\" node --import tsx --test src/*.test.ts"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "^0.48.0",
+    "@agentclientprotocol/claude-agent-acp": "^0.58.1",
     "@agentclientprotocol/codex-acp": "^1.1.2",
     "node-pty": "npm:@homebridge/node-pty-prebuilt-multiarch@0.13.1"
   },
