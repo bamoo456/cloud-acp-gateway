@@ -5,10 +5,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  changes, fileDiff, find, preview, repoRoot, outputFolder,
+  changes, fileDiff, find, grep, parseGrepZ, preview, repoRoot, outputFolder,
   revChanges, commits, validRev, parseCommitLog, parseNameStatusZ,
   parseStatusZ, parseNumstatZ, looksBinary, inlineImageType, sortTreeEntries,
-  MAX_TEXT_BYTES, MAX_OUTPUT_FILES, type TreeEntry,
+  MAX_TEXT_BYTES, MAX_OUTPUT_FILES, MAX_GREP_FILES, MAX_GREP_PER_FILE, MAX_GREP_LINE_CHARS,
+  type TreeEntry,
 } from "./workspace.ts";
 import { fileIndex } from "./file-index.ts";
 
@@ -488,6 +489,102 @@ describe("find", () => {
     assert.deepEqual(r.files.map((f) => f.path), ["note-outside.txt"]);
     assert.equal(r.files[0].abs, path.join(outside, "note-outside.txt"));
     assert.equal(r.fromGit, false);
+  });
+});
+
+describe("parseGrepZ", () => {
+  const rec = (p: string, n: number, text: string) => p + "\0" + n + "\0" + text;
+
+  test("splits on the first two NULs only — a path or a line may hold anything else", () => {
+    const { files, total } = parseGrepZ([
+      rec("src/a:b.ts", 12, "const x = { a: 1 };"),
+    ], "/repo");
+    assert.equal(total, 1);
+    assert.deepEqual(files, [{
+      path: "src/a:b.ts", abs: "/repo/src/a:b.ts", more: 0,
+      matches: [{ line: 12, text: "const x = { a: 1 };" }],
+    }]);
+  });
+
+  test("groups by file, trims indentation, and caps both the lines and their length", () => {
+    const records = [
+      rec("a.ts", 1, "    indented"),
+      ...Array.from({ length: MAX_GREP_PER_FILE + 4 }, (_v, i) => rec("a.ts", i + 2, "hit")),
+      rec("b.ts", 9, "x".repeat(MAX_GREP_LINE_CHARS + 50)),
+    ];
+    const { files, total } = parseGrepZ(records, "/repo");
+    assert.equal(total, records.length);
+    assert.deepEqual(files.map((f) => f.path), ["a.ts", "b.ts"]);
+    assert.equal(files[0].matches[0].text, "indented");
+    assert.equal(files[0].matches.length, MAX_GREP_PER_FILE);
+    assert.equal(files[0].more, 5); // the indented one + 4 past the cap
+    assert.equal(files[1].matches[0].text.length, MAX_GREP_LINE_CHARS);
+  });
+
+  test("past the file cap the rest are still counted, not listed", () => {
+    const records = Array.from({ length: MAX_GREP_FILES + 7 }, (_v, i) => rec(`f${i}.ts`, 1, "hit"));
+    const { files, total, moreFiles } = parseGrepZ(records, "/repo");
+    assert.equal(files.length, MAX_GREP_FILES);
+    assert.equal(total, records.length);
+    assert.equal(moreFiles, true);
+  });
+
+  test("a record with no line number is dropped rather than rendered as NaN", () => {
+    assert.deepEqual(parseGrepZ(["no-separators-at-all", "a.ts\0notanumber\0hit"], "/repo").files, []);
+  });
+});
+
+describe("grep", () => {
+  test("finds lines in tracked and untracked files, relative to the search root", async () => {
+    const dir = makeRepo();
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "src/tracked.ts"), "const needle = 1;\nother\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "pipe" });
+    fs.writeFileSync(path.join(dir, "src/fresh.ts"), "// NEEDLE in an uncommitted file\n");
+    const r = await grep(dir, path.join(dir, "src"), "needle");
+    assert.equal(r.fromGit, true);
+    assert.deepEqual(r.files.map((f) => f.path).sort(), ["fresh.ts", "tracked.ts"]);
+    const tracked = r.files.find((f) => f.path === "tracked.ts")!;
+    assert.deepEqual(tracked.matches, [{ line: 1, text: "const needle = 1;" }]);
+    assert.equal(tracked.abs, path.join(dir, "src", "tracked.ts"));
+    // Case-insensitive, so the uncommitted file's shout matches too.
+    assert.equal(r.total, 2);
+  });
+
+  test("ignored files are not searched", async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, ".gitignore"), "secret.txt\n");
+    fs.writeFileSync(path.join(dir, "secret.txt"), "needle\n");
+    const r = await grep(dir, dir, "needle");
+    assert.deepEqual(r.files.map((f) => f.path), []);
+    assert.equal(r.fromGit, true, "the search ran — it just skipped the ignored file");
+  });
+
+  test("no matches is a result, not a failure (git grep exits 1)", async () => {
+    const dir = makeRepo();
+    const r = await grep(dir, dir, "nothing-here-at-all");
+    assert.deepEqual(r, { files: [], truncated: false, fromGit: true, total: 0 });
+  });
+
+  test("a folder git knows nothing about reports fromGit:false, not 'no matches'", async () => {
+    const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-nongit-grep-")));
+    fs.writeFileSync(path.join(dir, "notes.md"), "needle\n");
+    const r = await grep(dir, dir, "needle");
+    assert.equal(r.fromGit, false);
+    assert.deepEqual(r.files, []);
+  });
+
+  test("a one-character term never reaches git", async () => {
+    const dir = makeRepo();
+    assert.deepEqual(await grep(dir, dir, "o"), { files: [], truncated: false, fromGit: false, total: 0 });
+  });
+
+  test("a literal search: regex metacharacters match themselves", async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, "re.txt"), "a.c\nabc\n");
+    execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "pipe" });
+    const r = await grep(dir, dir, "a.c");
+    assert.deepEqual(r.files[0].matches, [{ line: 1, text: "a.c" }]);
   });
 });
 

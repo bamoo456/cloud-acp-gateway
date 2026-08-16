@@ -273,10 +273,47 @@ test("/workspace/find matches on the whole relative path, dotfiles included, and
   }
 });
 
+test("/workspace/grep searches file contents, scoped to the folder it is asked about", async () => {
+  const { get, close } = await startHttpServer();
+  type GrepBody = {
+    files: Array<{ path: string; abs: string; matches: Array<{ line: number; text: string }>; more: number }>;
+    fromGit: boolean; total: number; truncated: boolean;
+  };
+  try {
+    const hit = async (query: string, cwd = TREE) => {
+      const r = await get(q("/workspace/grep", { cwd, q: query }));
+      assert.equal(r.status, 200);
+      return await r.json() as GrepBody;
+    };
+
+    const all = await hit("export const");
+    assert.deepEqual(all.files.map((f) => f.path).sort(), ["src/app.ts", "src/deep/nested.ts"]);
+    assert.deepEqual(all.files.find((f) => f.path === "src/app.ts")!.matches,
+      [{ line: 1, text: "export const a = 1;" }]);
+
+    // Ignored files are not searched — the same claim /workspace/find makes,
+    // and the reason the client offers the tree as the way to open them.
+    const ignored = await hit("noise");
+    assert.deepEqual(ignored.files, []);
+    assert.equal(ignored.fromGit, true, "the search ran, it just skipped what git ignores");
+
+    // A conversation running in a subdirectory searches from THERE, and rows are
+    // named relative to it — the same contract /workspace/find keeps.
+    const sub = await hit("const b", path.join(TREE, "src"));
+    assert.deepEqual(sub.files.map((f) => f.path), ["deep/nested.ts"]);
+    assert.equal(sub.files[0].abs, path.join(TREE, "src", "deep", "nested.ts"));
+
+    // A one-character term is refused before git is asked.
+    assert.deepEqual((await hit("a")).files, []);
+  } finally {
+    await close();
+  }
+});
+
 test("a path outside the project and outside ACPG_PREVIEW_ROOTS is refused, however it is spelled", async () => {
   const { get, close } = await startHttpServer();
   try {
-    for (const route of ["/workspace/file", "/workspace/diff", "/workspace/raw", "/workspace/tree", "/workspace/find"]) {
+    for (const route of ["/workspace/file", "/workspace/diff", "/workspace/raw", "/workspace/tree", "/workspace/find", "/workspace/grep"]) {
       assert.equal((await get(q(route, { cwd: REPO, path: "/etc/passwd" }))).status, 400, route + " absolute");
       assert.equal((await get(q(route, { cwd: REPO, path: "../../../../etc/passwd" }))).status, 400, route + " traversal");
       // cwd is not the client's to choose freely either — otherwise cwd=/ would

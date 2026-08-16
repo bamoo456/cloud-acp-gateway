@@ -27,3 +27,5 @@ public/vendor/
 test-results/
 playwright-report/
 .playwright/
+
+.claude

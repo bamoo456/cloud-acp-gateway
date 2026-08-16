@@ -10,6 +10,8 @@ const flush = async () => {
 // The find box debounces at 60ms; these tests wait it out rather than faking
 // timers, because the debounce is the behaviour under test in one of them.
 const settle = () => new Promise((r) => setTimeout(r, 120));
+// Contents search costs a git process on the gateway, so it waits 300ms.
+const settleGrep = () => new Promise((r) => setTimeout(r, 360));
 
 const ROOT: TreeEntry[] = [
   { name: "src", abs: "/repo/src", dir: true },
@@ -24,6 +26,7 @@ describe("FileTree", () => {
   let container: HTMLDivElement;
   let getWorkspaceTree: ReturnType<typeof vi.fn>;
   let findWorkspaceFiles: ReturnType<typeof vi.fn>;
+  let grepWorkspace: ReturnType<typeof vi.fn>;
   let onOpenFile: ReturnType<typeof vi.fn>;
   let onMenu: ReturnType<typeof vi.fn>;
 
@@ -42,7 +45,14 @@ describe("FileTree", () => {
     findWorkspaceFiles = vi.fn().mockResolvedValue({
       files: [{ path: "src/app.ts", abs: "/repo/src/app.ts" }], truncated: false, fromGit: true, total: 1,
     });
-    vi.doMock("../lib/api.ts", () => ({ getWorkspaceTree, findWorkspaceFiles }));
+    grepWorkspace = vi.fn().mockResolvedValue({
+      files: [{
+        path: "src/app.ts", abs: "/repo/src/app.ts", more: 0,
+        matches: [{ line: 3, text: "export const a = 1;" }],
+      }],
+      truncated: false, fromGit: true, total: 1,
+    });
+    vi.doMock("../lib/api.ts", () => ({ getWorkspaceTree, findWorkspaceFiles, grepWorkspace }));
   });
 
   afterEach(() => {
@@ -198,6 +208,70 @@ describe("FileTree", () => {
     // dist is visible in the tree but unsearchable, which reads as a bug
     // unless the panel says which rule is in play.
     expect(container.textContent).toContain("Files git ignores aren't searched");
+  });
+
+  // ---- Contents: the same box, searching what is written in the files ----
+  const type = async (value: string) => {
+    const input = container.querySelector<HTMLInputElement>(".wf-find input")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+  const pickScope = async (label: string) => {
+    const btn = [...container.querySelectorAll<HTMLElement>(".wf-find-scope button")]
+      .find((b) => b.textContent === label);
+    await act(async () => { btn?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+  };
+
+  test("Contents searches the files, and shows the lines that matched", async () => {
+    await render();
+    await pickScope("Contents");
+    await type("export const");
+    await act(async () => { await settleGrep(); });
+
+    expect(grepWorkspace).toHaveBeenCalledTimes(1);
+    expect(grepWorkspace).toHaveBeenCalledWith("/repo", "export const");
+    // The name search is not also run — they are two searches, not one blended.
+    expect(findWorkspaceFiles).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("export const a = 1;");
+    expect(container.textContent).toContain("3");
+
+    // The whole block is the button, so a tap anywhere in it opens the file.
+    await click(container.querySelector<HTMLElement>("button.wf-hit")!);
+    expect(onOpenFile).toHaveBeenCalledWith({ abs: "/repo/src/app.ts", name: "app.ts" });
+  });
+
+  test("a one-character term never reaches the gateway", async () => {
+    await render();
+    await pickScope("Contents");
+    await type("e");
+    await act(async () => { await settleGrep(); });
+    expect(grepWorkspace).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Type at least 2 characters");
+  });
+
+  test("a folder git knows nothing about says so rather than reporting no matches", async () => {
+    grepWorkspace.mockResolvedValue({ files: [], truncated: false, fromGit: false, total: 0 });
+    await render();
+    await pickScope("Contents");
+    await type("needle");
+    await act(async () => { await settleGrep(); });
+    expect(container.textContent).toContain("isn't a git checkout");
+  });
+
+  test("switching back to Names searches names again, with the term kept", async () => {
+    await render();
+    await pickScope("Contents");
+    await type("app");
+    await act(async () => { await settleGrep(); });
+    expect(grepWorkspace).toHaveBeenCalledTimes(1);
+
+    await pickScope("Names");
+    await act(async () => { await settle(); });
+    expect(findWorkspaceFiles).toHaveBeenCalledWith("/repo", "app");
+    expect(rowNamed("app.ts")).toBeDefined();
   });
 
   test("Refresh re-lists the tree; nothing else does", async () => {

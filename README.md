@@ -249,18 +249,27 @@ session to find a file again.
 turn finishes; without a git checkout the list falls back to the other two
 sources and says so.
 
-It reads through eight authenticated endpoints (`/workspace/changes`,
+It reads through nine authenticated endpoints (`/workspace/changes`,
 `/workspace/diff`, `/workspace/file`, `/workspace/raw`, `/workspace/tree`,
-`/workspace/find`, `/workspace/outputs`, `/workspace/render`) — see *What the
-preview can reach* above for their boundary, which is deliberately the same one
-for all eight: a tree that listed more than the viewer can open would offer rows
-it then refuses. Listing changed files requires `git` on the gateway host; a
+`/workspace/find`, `/workspace/grep`, `/workspace/outputs`, `/workspace/render`)
+— see *What the preview can reach* above for their boundary, which is
+deliberately the same one for all nine: a tree that listed more than the viewer
+can open would offer rows it then refuses. Listing changed files requires `git` on the gateway host; a
 folder that isn't a checkout simply shows nothing to compare.
 
 Find files asks `git` for the file list, so it never walks into `node_modules`
 and never misses a dotfile — the same rule that dims a row in the tree decides
 whether it is a search candidate. Without a checkout it falls back to a bounded
 walk that folds away the usual build and dependency directories by name.
+
+The same box also searches what is *written* in those files — the Contents half
+of the switch next to it. That one is `git grep` (`/workspace/grep`): literal,
+case-insensitive, skipping binaries and anything git ignores, and including
+files that aren't committed yet. Results are grouped by file with the matching
+lines under each, capped so one file's hundreds of hits can't bury every other
+file. A folder that isn't a checkout says so rather than reporting "no matches"
+— there is no fallback walk here, because reading a project's files through the
+gateway on every keystroke is a different thing from listing their names.
 
 ### Previewing an `.html` an agent wrote
 
