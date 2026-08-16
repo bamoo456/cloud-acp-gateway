@@ -29,7 +29,7 @@
 // get written, but never into the checkout's own files — see review.ts.)
 import fs from "node:fs";
 import path from "node:path";
-import { git, gitStdin } from "./git-exec.ts";
+import { git, gitStdin, gitTokens } from "./git-exec.ts";
 import { fileIndex } from "./file-index.ts";
 import { parseFindQuery, matchPath, TopK, compareRanked, type RankedFile } from "./fuzzy.ts";
 
@@ -48,6 +48,17 @@ export const MAX_RAW_BYTES = 25 * 1024 * 1024;
 export const MAX_TREE_ENTRIES = 500;
 // Filename matches per query. The box is a jump-to, not a report.
 export const MAX_FIND_RESULTS = 200;
+// Content search caps. Match lines are read from git in stream order, so the
+// line cap is what bounds the work; the other three bound what the panel has to
+// render — one file's 900 hits must not bury every other file, and a minified
+// bundle's single line must not become the response.
+export const MAX_GREP_LINES = 400;
+export const MAX_GREP_FILES = 50;
+export const MAX_GREP_PER_FILE = 10;
+export const MAX_GREP_LINE_CHARS = 300;
+// A one-character content search matches everything, so it is refused here as
+// well as in the box — this one costs a git process, not a memory scan.
+export const MIN_GREP_QUERY = 2;
 // An output folder is listed WHOLE, so it is capped harder than the tree: it
 // appears inside a list of files, not as something you navigated into, and a
 // scratch directory holding thousands of frames must not become the panel.
@@ -193,6 +204,28 @@ export interface FindResult {
   total: number;        // every match seen, including beyond the K kept
   pending?: boolean;    // untracked half not indexed yet (first query in a repo)
   limited?: boolean;    // the corpus itself was capped (walk depth/size, MAX_INDEX_PATHS)
+}
+
+export interface GrepMatch {
+  line: number;  // 1-based, as git reports it
+  text: string;
+}
+
+export interface GrepFile {
+  path: string;  // relative to the search root, POSIX
+  abs: string;
+  matches: GrepMatch[];
+  more: number;  // matches in this file beyond the ones listed
+}
+
+export interface GrepResult {
+  files: GrepFile[];
+  truncated: boolean;  // more match lines (or files) existed than were returned
+  // False means nothing was searched — the folder is not a git checkout, or
+  // git isn't there. Without it "no matches" would be indistinguishable from
+  // "couldn't look".
+  fromGit: boolean;
+  total: number;       // match lines seen, including ones not listed
 }
 
 export type PreviewKind = "text" | "image" | "binary";
@@ -847,4 +880,72 @@ export async function find(cwd: string, abs: string, query: string): Promise<Fin
     ...(corpus.pending ? { pending: true } : {}),
     ...(corpus.limited ? { limited: true } : {}),
   };
+}
+
+// `git grep -z -n` writes one record per matching line, newline-separated:
+//
+//   path\0line\0the matching line's text
+//
+// Only the first two NULs are separators — everything after them is the file's
+// own text and is not inspected. Pure, so the awkward halves (a path holding a
+// colon, a 5MB minified line, one file owning every match) are unit-testable
+// without a repo that contains them.
+export function parseGrepZ(records: string[], abs: string): {
+  files: GrepFile[]; total: number; moreFiles: boolean;
+} {
+  const byPath = new Map<string, GrepFile>();
+  let total = 0;
+  let moreFiles = false;
+  for (const rec of records) {
+    const p = rec.indexOf("\0");
+    if (p < 0) continue;
+    const n = rec.indexOf("\0", p + 1);
+    if (n < 0) continue;
+    const line = Number(rec.slice(p + 1, n));
+    if (!Number.isInteger(line)) continue;
+    const rel = rec.slice(0, p);
+    let file = byPath.get(rel);
+    if (!file) {
+      // Past the file cap the rest of the records are still counted — "50 of
+      // 300 files" is the honest report — but no more rows are built.
+      if (byPath.size >= MAX_GREP_FILES) { moreFiles = true; total++; continue; }
+      file = { path: rel, abs: path.join(abs, rel), matches: [], more: 0 };
+      byPath.set(rel, file);
+    }
+    total++;
+    if (file.matches.length >= MAX_GREP_PER_FILE) { file.more++; continue; }
+    // Leading indentation is dead width in a 440px column, and one minified
+    // bundle line would otherwise be the whole response.
+    // trimEnd too: a CRLF checkout ends every line with a \r that is invisible
+    // in the panel and eats into the slice below.
+    file.matches.push({ line, text: rec.slice(n + 1).trim().slice(0, MAX_GREP_LINE_CHARS) });
+  }
+  return { files: [...byPath.values()], total, moreFiles };
+}
+
+// Lines matching `query` in the files under `abs` — the other half of the
+// panel's Project search, where find() only reads names.
+//
+// `git grep` rather than a read of the corpus find() already holds: git skips
+// ignored and binary files by itself, searches in C across every core, and
+// keeps the gateway from pulling a project's worth of bytes through node on
+// every keystroke. The cost is that a folder git knows nothing about cannot be
+// searched at all — reported as fromGit:false rather than as "no matches".
+export async function grep(cwd: string, abs: string, query: string): Promise<GrepResult> {
+  const q = query.trim();
+  if (q.length < MIN_GREP_QUERY) return { files: [], truncated: false, fromGit: false, total: 0 };
+  // Run IN `abs`: git grep searches the tree from its working directory down
+  // and prints paths relative to it, which is find()'s contract too. The
+  // pattern is an argv element and --fixed-strings keeps it literal, so
+  // nothing here can be read as a flag, a regex bomb, or a shell word.
+  const r = await gitTokens(abs, [
+    "grep", "--no-color", "--untracked", "-I", "-n", "-z", "-i", "--fixed-strings", "-e", q,
+  ], MAX_GREP_LINES, "\n");
+  // 1 is git grep's "no matches" — the search ran and found nothing, which is a
+  // result. Anything else (128: not a repository, -1: no git binary or a
+  // timeout) means nothing was searched, and saying "no matches" to that would
+  // be the panel lying.
+  if (r.failed || (r.code !== 0 && r.code !== 1)) return { files: [], truncated: false, fromGit: false, total: 0 };
+  const { files, total, moreFiles } = parseGrepZ(r.tokens, abs);
+  return { files, truncated: r.truncated || moreFiles, fromGit: true, total };
 }

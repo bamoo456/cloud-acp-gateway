@@ -907,6 +907,27 @@ describe("Sidebar recent conversations", () => {
     expect(searchSessions).toHaveBeenCalledWith("liquid", {});
   });
 
+  test("the clear button drops the term and hands the panel back to the list", async () => {
+    searchSessions.mockResolvedValue({
+      results: [], truncated: false, cursor: null, skipped: [], scanned: { files: 0, bytes: 0, ms: 0 },
+    });
+    await renderSidebar();
+    // Absent with an empty box: nothing to clear.
+    expect(container.querySelector(".search-clear")).toBeNull();
+
+    await typeInSearchBox("liquid");
+    const clear = container.querySelector<HTMLButtonElement>(".search-clear")!;
+    expect(clear).not.toBeNull();
+
+    await act(async () => { clear.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { vi.advanceTimersByTime(300); await flush(); });
+
+    expect(container.querySelector<HTMLInputElement>(".search input")!.value).toBe("");
+    expect(container.querySelector(".search-clear")).toBeNull();
+    // The results list gives way to the sessions list again.
+    expect(container.querySelector(".sb-head")).not.toBeNull();
+  });
+
   test("a one-character query does not reach the server", async () => {
     await renderSidebar();
 
