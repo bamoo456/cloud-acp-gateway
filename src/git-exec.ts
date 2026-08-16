@@ -73,16 +73,19 @@ export function gitStdin(cwd: string, args: string[], input: string): Promise<Gi
   });
 }
 
-// `git`, but with stdout streamed and split on NUL as it arrives instead of
+// `git`, but with stdout streamed and split on `sep` as it arrives instead of
 // buffered whole. execFile's maxBuffer turns a big listing into a silent
 // failure — a 147k-file monorepo's ls-files output already sits within 2% of
 // the 16MB cap, and blowing it degrades find() to a worse walk without telling
 // anyone. A stream has no such cliff; maxTokens is the explicit memory bound
 // that replaces it, and hitting it kills the child and reports the cut.
+// `sep` is NUL for the -z listings and "\n" for `grep -z -n`, whose records are
+// lines (the NULs inside one separate the path and line number).
 export function gitTokens(
   cwd: string,
   args: string[],
   maxTokens: number,
+  sep = "\0",
 ): Promise<{ code: number; tokens: string[]; truncated: boolean; failed: boolean }> {
   return new Promise((resolve) => {
     const child = spawn("git", ["--no-optional-locks", "-c", "core.fsmonitor=", ...args], {
@@ -99,7 +102,7 @@ export function gitTokens(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      // The tail token has no trailing NUL; -z output ends with one, so a
+      // The tail token has no trailing separator; -z output ends with one, so a
       // non-empty leftover only exists when the stream was cut mid-token.
       if (leftover && !truncated && tokens.length < maxTokens) tokens.push(leftover);
       resolve({ code, tokens, truncated, failed });
@@ -108,7 +111,7 @@ export function gitTokens(
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (truncated) return;
-      const parts = (leftover + chunk).split("\0");
+      const parts = (leftover + chunk).split(sep);
       leftover = parts.pop() ?? "";
       for (const t of parts) {
         if (!t) continue;

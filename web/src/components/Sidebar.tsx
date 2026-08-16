@@ -11,7 +11,7 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, WorkingDots,
+import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, WorkingDots,
   Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { homeFrom } from "../lib/folderKey.ts";
@@ -171,6 +171,9 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // was erased (resurrecting results under an empty box), after a newer query
   // resolved (overwriting it with the old term's pages), or after unmount.
   const searchGen = useRef(0);
+  // Only so clearing the box can hand focus back to it — a clear that also
+  // dismisses the keyboard costs a second tap to type the next term.
+  const searchRef = useRef<HTMLInputElement>(null);
   // The gateway marks agents with no native history reader as history:false.
   // Missing flag (dev fallback, older gateway) = supported.
   const agentByName = new Map(s.cfg.agents.map((a) => [a.name, a] as const));
@@ -577,7 +580,14 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
           <>
             {/* Above the tabs so searching is reachable from both of them. */}
             <div className="search">
-              <input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
+              <input ref={searchRef} placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
+              {/* Backspacing out a term is the other way back to the list, and
+                  on a phone it is a dozen taps on the key that also dismisses
+                  nothing. */}
+              {q && (
+                <button type="button" className="search-clear" title="Clear search" aria-label="Clear search"
+                  onClick={() => { setQ(""); searchRef.current?.focus(); }}><IconX /></button>
+              )}
             </div>
             {searchOpen && (
               <SearchFilters value={filters} agents={s.cfg.agents.map((a) => a.name)} onChange={setFilters} />

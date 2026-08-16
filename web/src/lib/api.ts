@@ -253,6 +253,18 @@ export interface FindResult {
   total: number; pending?: boolean; limited?: boolean;
 }
 
+// The same folder searched by content instead of by name. `more` is how many
+// further matches that one file holds, and `fromGit` false means nothing was
+// searched at all — the folder isn't a checkout — rather than "no matches".
+export interface GrepFile {
+  path: string; abs: string;
+  matches: Array<{ line: number; text: string }>;
+  more: number;
+}
+export interface GrepResult {
+  files: GrepFile[]; truncated: boolean; fromGit: boolean; total: number;
+}
+
 // `dir` omitted lists the conversation's own folder — the tree's root.
 export async function getWorkspaceTree(cwd: string, dir?: string): Promise<TreeResult> {
   const url = base() + "/workspace/tree?cwd=" + encodeURIComponent(cwd)
@@ -404,6 +416,25 @@ export async function findWorkspaceFiles(cwd: string, query: string): Promise<Fi
     total: typeof r?.total === "number" ? r.total : files.length,
     pending: !!r?.pending,
     limited: !!r?.limited,
+  };
+}
+
+export async function grepWorkspace(cwd: string, query: string): Promise<GrepResult> {
+  const url = base() + "/workspace/grep?cwd=" + encodeURIComponent(cwd) + "&q=" + encodeURIComponent(query);
+  const r = await readJson(await fetch(url), "Couldn't search this folder.");
+  const files: GrepFile[] = (Array.isArray(r?.files) ? r.files : []).map((f: GrepFile) => ({
+    path: String(f?.path ?? ""),
+    abs: String(f?.abs ?? ""),
+    matches: Array.isArray(f?.matches) ? f.matches : [],
+    more: typeof f?.more === "number" ? f.more : 0,
+  }));
+  return {
+    files,
+    truncated: !!r?.truncated,
+    // A gateway too old to know this route can't answer at all, so there is no
+    // older-gateway shape to fall back to here — only the fields' own defaults.
+    fromGit: !!r?.fromGit,
+    total: typeof r?.total === "number" ? r.total : files.length,
   };
 }
 
