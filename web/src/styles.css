@@ -52,9 +52,13 @@
     /* Two faces, and only two: the page's own sans, and one mono for machine
        text (paths, diffs, counts, labels). Tokens rather than 45 copies of the
        same stack — that is how three of them had already drifted, one of them
-       dropping the CJK fallbacks so Chinese rendered in a different face. */
-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang TC", "Microsoft JhengHei", sans-serif;
-    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+       dropping the CJK fallbacks so Chinese rendered in a different face.
+       Latin is shipped with the app (main.tsx imports the two @fontsource
+       faces) so a mac and a Linux box draw the same page; CJK stays on the
+       system's face — a Traditional Chinese webfont is megabytes, and PingFang
+       / Noto Sans CJK are already the right answer on each. */
+    --sans: "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang TC", "Microsoft JhengHei", sans-serif;
+    --mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 16px;
   }
   :root[data-text-size="small"] {
