@@ -1006,9 +1006,12 @@
   .composer .cm-line { padding: 0; font-family: inherit; }
   .composer .cm-cursor, .composer .cm-dropCursor { border-left-color: var(--text); }
   .composer .cm-placeholder { color: var(--muted); }
+  /* No drawSelection extension is loaded, so the browser paints the selection
+     natively and ::selection is the rule that actually fires — it must not be
+     the composer's own background, or the highlight is invisible. */
   .composer .cm-selectionBackground,
-  .composer .cm-content ::selection { background: var(--surface-2); }
-  .composer .cm-editor.cm-focused .cm-selectionBackground { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  .composer .cm-content::selection,
+  .composer .cm-content ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
   /* markdown rendering: inline code, fenced blocks, links, markers */
   .composer .cm-md-code { font-family: var(--mono);
     font-size: var(--chat-code-size); background: var(--surface-2); border-radius: 4px; padding: 0 3px; }
