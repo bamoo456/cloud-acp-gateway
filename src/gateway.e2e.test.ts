@@ -65,6 +65,26 @@ test("the SPA index is served no-store, so a deploy can't be pinned by a cached 
   }
 });
 
+test("the shipped webfont is served as a font, not as a byte blob", async () => {
+  // The console carries its own latin faces (Inter, JetBrains Mono) so a mac
+  // and a Linux box draw the same page; they only arrive if /assets/*.woff2
+  // is served at all, and a font/woff2 type keeps a strict client from
+  // refusing it.
+  const dir = path.join(process.cwd(), "web", "dist", "assets");
+  const font = fs.readdirSync(dir).find((f) => f.endsWith(".woff2"));
+  assert.ok(font, "no woff2 in web/dist/assets — run 'npm run build' first");
+
+  const { authed, close } = await startHttpServer();
+  try {
+    const r = await authed(`/assets/${font}`);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("content-type"), "font/woff2");
+    await r.arrayBuffer();
+  } finally {
+    await close();
+  }
+});
+
 test("SSE connection requires account credentials for remote clients", async () => {
   const { port, close } = await makeTestServer();
   try {
