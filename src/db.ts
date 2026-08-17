@@ -144,7 +144,7 @@ export class Db {
     // which is also the whole migration story — a pre-`entrypoint` row would
     // never be refreshed on its own (the head is only re-read when the cached
     // title is missing), so an added column would stay NULL forever.
-    const cols = this.db.prepare("SELECT name FROM pragma_table_info('transcript_meta')").all() as Array<{ name: string }>;
+    const cols = this.db.prepare("PRAGMA table_info(transcript_meta)").all() as Array<{ name: string }>;
     if (cols.length && !cols.some((c) => c.name === "entrypoint")) this.db.exec(`DROP TABLE transcript_meta`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS transcript_meta (
       session_id       TEXT PRIMARY KEY,
