@@ -197,6 +197,21 @@ describe("global styles", () => {
     expect(offenders).toEqual([]);
   });
 
+  test("your message reads as a tinted block, not as the reply", () => {
+    const rule = cssRule(".turn.user");
+
+    // One mix that works in both themes: 8% of the text colour over the page.
+    expect(rule).toMatch(/background:\s*color-mix\(in srgb,\s*var\(--text\) 8%,\s*var\(--bg\)\)/);
+    expect(rule).toMatch(/border-radius:\s*10px/);
+    // No frame — a border is what marks a machine artefact (§1.3).
+    expect(rule).not.toMatch(/border\s*:/);
+    expect(cssRule(".turn.user .body")).toMatch(/color:\s*var\(--muted\)/);
+  });
+
+  test("a hairline separates the prompt from the reply", () => {
+    expect(cssRule(".turn.user::after")).toMatch(/border-top:\s*1px solid var\(--border\)/);
+  });
+
   test("a finished tool call is silent — no badge, no colour", () => {
     expect(cssRule(".tool .tstatus.completed")).toMatch(/display\s*:\s*none/);
     // Amber is "needs you"; a running tool is ink.
