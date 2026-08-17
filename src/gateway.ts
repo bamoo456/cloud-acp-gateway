@@ -1030,17 +1030,22 @@ function normalizeContent(content: unknown): ViewBlock[] {
   return out;
 }
 
-async function claudeTranscriptSummary(file: string): Promise<{ cwd: string | null; title: string | null }> {
+async function claudeTranscriptSummary(file: string): Promise<{ cwd: string | null; title: string | null; entrypoint: string | null }> {
   const rl = createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
   let cwd: string | null = null;
   let title: string | null = null;
+  let entrypoint: string | null = null;
   try {
     for await (const line of rl) {
       const t = line.trim();
       if (!t) continue;
-      let e: { type?: string; isSidechain?: boolean; cwd?: unknown; message?: { content?: unknown } };
+      let e: { type?: string; isSidechain?: boolean; cwd?: unknown; entrypoint?: unknown; message?: { content?: unknown } };
       try { e = JSON.parse(t); } catch { continue; }
       if (!cwd && typeof e.cwd === "string" && e.cwd) cwd = e.cwd;
+      // Rides along with cwd (the CLI writes both on the same entries) and is
+      // deliberately NOT part of the exit condition below: transcripts written
+      // before the CLI recorded it would then be streamed to EOF every time.
+      if (!entrypoint && typeof e.entrypoint === "string" && e.entrypoint) entrypoint = e.entrypoint;
       if (!title && e.type === "user" && !e.isSidechain) {
         const blocks = normalizeContent(e.message?.content);
         const txt = blocks.find((b) => b.type === "text")?.text;
@@ -1054,7 +1059,7 @@ async function claudeTranscriptSummary(file: string): Promise<{ cwd: string | nu
   } catch {
     /* ignore */
   }
-  return { cwd, title };
+  return { cwd, title, entrypoint };
 }
 
 // A transcript's recency must come from its CONTENT, not its file mtime. Claude
@@ -1123,7 +1128,7 @@ function transcriptStore(injected?: Db): Db | null {
   try { return db(); } catch { return null; }
 }
 
-type ClaudeTranscriptMeta = { cwd: string | null; title: string | null; lastActivityAt: string | null };
+type ClaudeTranscriptMeta = { cwd: string | null; title: string | null; lastActivityAt: string | null; entrypoint: string | null };
 
 // One transcript's metadata, re-deriving only what can have changed. An unchanged
 // (file, size, mtime) triple is a full hit: no file is opened at all. Otherwise
@@ -1138,16 +1143,19 @@ async function claudeTranscriptMeta(
   try { row = store?.transcriptMeta(sessionId) ?? null; } catch { /* cache miss */ }
   const sameFile = !!row && row.file === file;
   if (row && sameFile && row.size === size && row.mtimeMs === mtimeMs) {
-    return { cwd: row.cwd || null, title: row.title || null, lastActivityAt: row.lastActivityAt };
+    return { cwd: row.cwd || null, title: row.title || null, lastActivityAt: row.lastActivityAt, entrypoint: row.entrypoint || null };
   }
   const head = row && sameFile && row.title !== null
-    ? { cwd: row.cwd, title: row.title }
+    ? { cwd: row.cwd, title: row.title, entrypoint: row.entrypoint }
     : await claudeTranscriptSummary(file);
   const lastActivityAt = await claudeLastActivityAt(file, size);
   try {
-    store?.saveTranscriptMeta({ sessionId, file, cwd: head.cwd ?? "", title: head.title ?? "", lastActivityAt, size, mtimeMs });
+    store?.saveTranscriptMeta({
+      sessionId, file, cwd: head.cwd ?? "", title: head.title ?? "",
+      entrypoint: head.entrypoint ?? "", lastActivityAt, size, mtimeMs,
+    });
   } catch { /* the cache is an optimization, never a hard dependency */ }
-  return { cwd: head.cwd || null, title: head.title || null, lastActivityAt };
+  return { cwd: head.cwd || null, title: head.title || null, lastActivityAt, entrypoint: head.entrypoint || null };
 }
 
 // The newer of two ISO instants, either of which may be missing or unparseable.
@@ -1203,6 +1211,22 @@ type TranscriptCandidate = {
   recencyAt: string | null; mtime: number; source: "claude-cli" | "codex-cli";
 };
 
+// A `claude -p` run writes a transcript per invocation, so a cron job that
+// summarizes ten podcasts leaves ten one-shot conversations — each in its own
+// throwaway cwd, each its own folder in the sidebar. That is machine traffic, not
+// something anyone had a conversation in, so the listings skip it by default;
+// ACPG_HISTORY_HEADLESS=on lists it like any other session.
+//
+// "sdk-cli" is exactly the `-p` entrypoint. The interactive CLI writes "cli", and
+// the SDK — including the ACP adapter the gateway itself drives — writes
+// "sdk-ts", so a headless SDK script is indistinguishable from the gateway's own
+// sessions and stays visible. A transcript with no entrypoint at all (written
+// before the CLI recorded it) is likewise kept: unknown is not headless.
+const isHeadlessEntrypoint = (entrypoint: string | null) => entrypoint === "sdk-cli";
+// Read per call, not once at import: tests toggle it, and it costs nothing.
+const headlessIncluded = () =>
+  ["1", "on", "true"].includes((process.env.ACPG_HISTORY_HEADLESS ?? "").trim().toLowerCase());
+
 async function claudeTranscriptCandidates(projectsRoot: string, store: Db | null): Promise<TranscriptCandidate[]> {
   let projects: fs.Dirent[];
   try { projects = await fs.promises.readdir(projectsRoot, { withFileTypes: true }); } catch { return []; }
@@ -1224,9 +1248,11 @@ async function claudeTranscriptCandidates(projectsRoot: string, store: Db | null
   }
 
   const messaged = lastMessageAts(store);
+  const includeHeadless = headlessIncluded();
   const out: TranscriptCandidate[] = [];
   for (const f of files) {
     const meta = await claudeTranscriptMeta(f.sessionId, f.file, f.size, f.mtime, store);
+    if (!includeHeadless && isHeadlessEntrypoint(meta.entrypoint)) continue;
     out.push({
       sessionId: f.sessionId, file: f.file, cwd: meta.cwd, title: meta.title,
       recencyAt: laterIso(meta.lastActivityAt, messaged.get(f.sessionId) ?? null),
@@ -1285,6 +1311,7 @@ async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: stri
   try { files = await fs.promises.readdir(dir); } catch { return []; }
   const cache = transcriptStore(store);
   const messaged = lastMessageAts(cache);
+  const includeHeadless = headlessIncluded();
   const sess = files.filter((f) => f.endsWith(".jsonl") && !f.startsWith("agent-"));
   const metas = (await Promise.all(
     sess.map(async (f) => {
@@ -1296,7 +1323,8 @@ async function listClaudeHistory(cwd: string, limit: number, projectsRoot?: stri
       const meta = await claudeTranscriptMeta(sessionId, fp, st.size, mtime, cache);
       return { sessionId, mtime, ...meta, recencyAt: laterIso(meta.lastActivityAt, messaged.get(sessionId) ?? null) };
     }),
-  )).filter((m): m is NonNullable<typeof m> => !!m);
+  )).filter((m): m is NonNullable<typeof m> => !!m)
+    .filter((m) => includeHeadless || !isHeadlessEntrypoint(m.entrypoint));
   const top = metas.sort(byClaudeRecency).slice(0, limit);
   const custom = await readTitles(cwd, projectsRoot); // custom (renamed) titles override the derived one
   return top.map((m) => ({

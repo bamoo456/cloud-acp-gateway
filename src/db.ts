@@ -44,13 +44,16 @@ export interface RecentFolder { path: string; lastUsedAt: string; }
 // once from the head); `last_activity_at` is the timestamp of the last real turn
 // INSIDE the transcript and is re-derived whenever (size, mtime_ms) move. `file`
 // is part of the freshness check: the same session id can appear under two
-// project dirs when the CLI truncates a long encoded name.
+// project dirs when the CLI truncates a long encoded name. `entrypoint` is the
+// CLI's own record of how the session was started ("cli", "sdk-ts", "sdk-cli"),
+// read from the head with cwd/title and used to hide headless runs from history.
 export interface TranscriptMeta {
   sessionId: string;
   file: string;
   cwd: string;
   title: string | null;
   lastActivityAt: string | null;
+  entrypoint: string | null;
   size: number;
   mtimeMs: number;
 }
@@ -137,13 +140,19 @@ export class Db {
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox(status)`);
     this.db.exec(`CREATE INDEX IF NOT EXISTS idx_inbox_lookup ON inbox(agent_name, req_id, status)`);
     // Derived metadata for the Claude CLI transcripts, keyed by session id — see
-    // TranscriptMeta. Purely a cache: dropping the table only costs a re-derive.
+    // TranscriptMeta. Purely a cache: dropping the table only costs a re-derive,
+    // which is also the whole migration story — a pre-`entrypoint` row would
+    // never be refreshed on its own (the head is only re-read when the cached
+    // title is missing), so an added column would stay NULL forever.
+    const cols = this.db.prepare("SELECT name FROM pragma_table_info('transcript_meta')").all() as Array<{ name: string }>;
+    if (cols.length && !cols.some((c) => c.name === "entrypoint")) this.db.exec(`DROP TABLE transcript_meta`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS transcript_meta (
       session_id       TEXT PRIMARY KEY,
       file             TEXT NOT NULL,
       cwd              TEXT NOT NULL,
       title            TEXT,
       last_activity_at TEXT,
+      entrypoint       TEXT,
       size             INTEGER NOT NULL,
       mtime_ms         INTEGER NOT NULL
     )`);
@@ -316,24 +325,26 @@ export class Db {
 
   transcriptMeta(sessionId: string): TranscriptMeta | null {
     const row = this.db
-      .prepare("SELECT session_id, file, cwd, title, last_activity_at, size, mtime_ms FROM transcript_meta WHERE session_id = ?")
+      .prepare("SELECT session_id, file, cwd, title, last_activity_at, entrypoint, size, mtime_ms FROM transcript_meta WHERE session_id = ?")
       .get(sessionId) as
-        | { session_id: string; file: string; cwd: string; title: string | null; last_activity_at: string | null; size: number; mtime_ms: number }
+        | { session_id: string; file: string; cwd: string; title: string | null; last_activity_at: string | null; entrypoint: string | null; size: number; mtime_ms: number }
         | undefined;
     if (!row) return null;
     return {
       sessionId: row.session_id, file: row.file, cwd: row.cwd, title: row.title,
-      lastActivityAt: row.last_activity_at, size: Number(row.size), mtimeMs: Number(row.mtime_ms),
+      lastActivityAt: row.last_activity_at, entrypoint: row.entrypoint,
+      size: Number(row.size), mtimeMs: Number(row.mtime_ms),
     };
   }
 
   saveTranscriptMeta(m: TranscriptMeta): void {
     this.db
-      .prepare(`INSERT INTO transcript_meta (session_id, file, cwd, title, last_activity_at, size, mtime_ms)
-        VALUES (@sessionId, @file, @cwd, @title, @lastActivityAt, @size, @mtimeMs)
+      .prepare(`INSERT INTO transcript_meta (session_id, file, cwd, title, last_activity_at, entrypoint, size, mtime_ms)
+        VALUES (@sessionId, @file, @cwd, @title, @lastActivityAt, @entrypoint, @size, @mtimeMs)
         ON CONFLICT(session_id) DO UPDATE SET
           file = excluded.file, cwd = excluded.cwd, title = excluded.title,
-          last_activity_at = excluded.last_activity_at, size = excluded.size, mtime_ms = excluded.mtime_ms`)
+          last_activity_at = excluded.last_activity_at, entrypoint = excluded.entrypoint,
+          size = excluded.size, mtime_ms = excluded.mtime_ms`)
       .run({ ...m }); // spread to a plain literal: node:sqlite wants Record<string, …>
   }
 

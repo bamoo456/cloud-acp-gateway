@@ -114,6 +114,7 @@ Common optional settings:
 | `ACPG_FS_ROOT` | user home | Directory root the web UI may browse for folders and `@` file references. |
 | `ACPG_PREVIEW_ROOTS` | _(none)_ | Extra directories the file preview panel may read, colon-separated (e.g. `/tmp`). By default it sees only the conversation's own project — see [What the preview can reach](#what-the-preview-can-reach). |
 | `ACPG_PREVIEW_FILTER_ENABLED` | `1` | Set `0` to let the preview panel read **any** file on the host, ignoring the rules above. Convenient on a machine you own; makes the gateway credential a read-any-file capability. |
+| `ACPG_HISTORY_HEADLESS` | `off` | Set `on` to list headless Claude Code runs (`claude -p`) alongside real conversations. Off by default: a scripted or cron-driven run writes one transcript per invocation, usually in a throwaway cwd, so a nightly job buries your own sessions under its folders. The interactive CLI and SDK/ACP sessions (including the gateway's own) are always listed. |
 | `CODEX_HOME` | `~/.codex` | Codex login/session state. |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude login/session state and history. |
 
