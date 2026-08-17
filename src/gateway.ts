@@ -1206,17 +1206,18 @@ type TranscriptCandidate = {
   recencyAt: string | null; mtime: number; source: "claude-cli" | "codex-cli";
 };
 
-// A `claude -p` run writes a transcript per invocation, so a cron job that
-// summarizes ten podcasts leaves ten one-shot conversations — each in its own
-// throwaway cwd, each its own folder in the sidebar. That is machine traffic, not
-// something anyone had a conversation in, so the listings skip it by default;
-// ACPG_HISTORY_HEADLESS=on lists it like any other session.
+// A `claude -p` (or `codex exec`) run writes a transcript per invocation, so a
+// cron job that summarizes ten podcasts leaves ten one-shot conversations — each
+// in its own throwaway cwd, each its own folder in the sidebar. That is machine
+// traffic, not something anyone had a conversation in, so the listings skip it by
+// default; ACPG_HISTORY_HEADLESS=on lists it like any other session.
 //
 // "sdk-cli" is exactly the `-p` entrypoint. The interactive CLI writes "cli", and
 // the SDK — including the ACP adapter the gateway itself drives — writes
 // "sdk-ts", so a headless SDK script is indistinguishable from the gateway's own
 // sessions and stays visible. A transcript with no entrypoint at all (written
 // before the CLI recorded it) is likewise kept: unknown is not headless.
+// codexMetaFromLine reads codex's counterpart off its own head line.
 const isHeadlessEntrypoint = (entrypoint: string | null) => entrypoint === "sdk-cli";
 // Read per call, not once at import: tests toggle it, and it costs nothing.
 const headlessIncluded = () =>
@@ -1373,7 +1374,7 @@ export async function readClaudeHistoryMessages(file: string, sessionId: string,
 }
 
 type CodexIndexEntry = { id: string; thread_name?: string; updated_at?: string };
-type CodexSessionFile = { id: string; cwd: string; file: string; updatedAt: string; isSubagent: boolean };
+type CodexSessionFile = { id: string; cwd: string; file: string; updatedAt: string; isSubagent: boolean; isHeadless: boolean };
 
 async function readCodexIndex(): Promise<Map<string, CodexIndexEntry>> {
   const out = new Map<string, CodexIndexEntry>();
@@ -1409,12 +1410,23 @@ function isSubagentCodexPayload(payload: Record<string, unknown>): boolean {
   return legacyMarker || payload.thread_source === "subagent";
 }
 
-function codexMetaFromLine(line: Record<string, unknown> | null): { id: string; cwd: string; timestamp?: string; isSubagent: boolean } | null {
+function codexMetaFromLine(line: Record<string, unknown> | null): { id: string; cwd: string; timestamp?: string; isSubagent: boolean; isHeadless: boolean } | null {
   const payload = line?.payload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const p = payload as Record<string, unknown>;
   return typeof p.id === "string" && typeof p.cwd === "string"
-    ? { id: p.id, cwd: p.cwd, timestamp: typeof p.timestamp === "string" ? p.timestamp : undefined, isSubagent: isSubagentCodexPayload(p) }
+    ? {
+      id: p.id,
+      cwd: p.cwd,
+      timestamp: typeof p.timestamp === "string" ? p.timestamp : undefined,
+      isSubagent: isSubagentCodexPayload(p),
+      // `codex exec` — codex's `claude -p`. The TUI writes "cli" and the ACP
+      // adapter the gateway drives writes "vscode", so neither is caught; a
+      // rollout whose `source` is the object form (the subagent shape
+      // isSubagentCodexPayload reads) or missing entirely counts as
+      // not-headless, same as Claude's.
+      isHeadless: p.source === "exec",
+    }
     : null;
 }
 
@@ -1440,7 +1452,10 @@ async function codexSessionFileFromPath(file: string): Promise<CodexSessionFile 
   if (!meta) return null;
   let mtime = "";
   try { mtime = new Date((await fs.promises.stat(file)).mtimeMs).toISOString(); } catch { /* ignore */ }
-  return { id: meta.id, cwd: meta.cwd, file, updatedAt: mtime || meta.timestamp || "", isSubagent: meta.isSubagent };
+  return {
+    id: meta.id, cwd: meta.cwd, file, updatedAt: mtime || meta.timestamp || "",
+    isSubagent: meta.isSubagent, isHeadless: meta.isHeadless,
+  };
 }
 
 async function listCodexArchivedSessions(): Promise<CodexSessionFile[]> {
@@ -1472,13 +1487,21 @@ async function listCodexSessionFiles(): Promise<CodexSessionFile[]> {
       continue;
     }
     const newer = dateValue(s.updatedAt) >= dateValue(existing.updatedAt) ? s : existing;
-    byId.set(s.id, { ...newer, isSubagent: existing.isSubagent || s.isSubagent });
+    byId.set(s.id, {
+      ...newer,
+      isSubagent: existing.isSubagent || s.isSubagent,
+      isHeadless: existing.isHeadless || s.isHeadless,
+    });
   }
   return [...byId.values()];
 }
 
+// The one gate both codex listings route through — the per-folder list and the
+// discovery/search walk — so the headless cut lands in the same place the
+// subagent cut already does.
 function isUserVisibleCodexSession(session: CodexSessionFile): boolean {
-  return !session.isSubagent;
+  if (session.isSubagent) return false;
+  return !session.isHeadless || headlessIncluded();
 }
 
 function sameCwd(a: string, b: string): boolean {

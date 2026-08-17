@@ -626,6 +626,37 @@ test("headless (`claude -p`) transcripts stay out of both listings unless ACPG_H
   store.close();
 });
 
+// Codex's half of the same rule, off its own head line: `codex exec` writes
+// source "exec", the TUI writes "cli", and the ACP adapter the gateway drives
+// writes "vscode".
+test("headless (`codex exec`) rollouts stay out of both listings unless ACPG_HISTORY_HEADLESS is on", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-root-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codexhome-"));
+  const cwd = path.join(fsRoot, "repo");
+  fs.mkdirSync(cwd, { recursive: true });
+  const timestamp = "2026-07-20T10:00:00.000Z";
+  writeCodexRollout(home, "EXEC", { id: "CDX-EXEC", cwd, timestamp, source: "exec" }, "summarize the podcast");
+  writeCodexRollout(home, "TUI", { id: "CDX-TUI", cwd, timestamp, source: "cli" }, "a real conversation");
+  writeCodexRollout(home, "ACP", { id: "CDX-ACP", cwd, timestamp, source: "vscode" }, "driven through the gateway");
+  writeCodexRollout(home, "LEGACY", { id: "CDX-LEGACY", cwd, timestamp }, "no source recorded at all");
+
+  await withCodexHome(home, async () => {
+    const listed = async () => [
+      (await listAgentHistory(CODEX_CMD, cwd, 20)).map((s) => s.sessionId).sort(),
+      (await discoverCodexHistory({ fsRoot, limit: 20 })).map((s) => s.sessionId).sort(),
+    ];
+    const prev = process.env.ACPG_HISTORY_HEADLESS;
+    try {
+      delete process.env.ACPG_HISTORY_HEADLESS;
+      for (const ids of await listed()) assert.deepEqual(ids, ["CDX-ACP", "CDX-LEGACY", "CDX-TUI"], "the exec run is hidden by default");
+      process.env.ACPG_HISTORY_HEADLESS = "on";
+      for (const ids of await listed()) assert.deepEqual(ids, ["CDX-ACP", "CDX-EXEC", "CDX-LEGACY", "CDX-TUI"], "the env var lists it again");
+    } finally {
+      if (prev === undefined) delete process.env.ACPG_HISTORY_HEADLESS; else process.env.ACPG_HISTORY_HEADLESS = prev;
+    }
+  });
+});
+
 // A rename is stored in a per-folder sidecar, and discovery — the walk behind the
 // sidebar's cross-folder Recent list — used to ignore it entirely: the renamed
 // conversation listed under the first-prompt title it had been renamed away from,
