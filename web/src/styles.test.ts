@@ -133,8 +133,10 @@ describe("global styles", () => {
       .filter((line) => !/var\(--(mono|sans)\)|font-family\s*:\s*inherit/.test(line));
 
     expect(literals).toEqual([]);
-    expect(cssRule(":root")).toMatch(/--sans\s*:\s*-apple-system[^;]*PingFang TC/);
-    expect(cssRule(":root")).toMatch(/--mono\s*:\s*ui-monospace, SFMono-Regular, Menlo, monospace/);
+    // The shipped faces lead, so every platform draws latin identically; the
+    // system stack stays behind them as the CJK answer and the offline one.
+    expect(cssRule(":root")).toMatch(/--sans\s*:\s*"Inter Variable", -apple-system[^;]*PingFang TC/);
+    expect(cssRule(":root")).toMatch(/--mono\s*:\s*"JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace/);
   });
 
   test("every theme redefines the whole neutral ramp, in both modes", () => {

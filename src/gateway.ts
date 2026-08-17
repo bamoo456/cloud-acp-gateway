@@ -4807,6 +4807,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       const ext = path.extname(file);
       const ct = ext === ".css" ? "text/css; charset=utf-8"
         : ext === ".js" ? "application/javascript; charset=utf-8"
+        : ext === ".woff2" ? "font/woff2"
         : "application/octet-stream";
       res.writeHead(200, { "content-type": ct, "cache-control": "max-age=31536000, immutable" });
       res.end(fs.readFileSync(file));
