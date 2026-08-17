@@ -94,7 +94,7 @@ test("deleting a conversation drops its recency rows under every agent and cwd",
   db.touchRecentSession(mk("claude", "/private/tmp/repo", "s1"));
   db.touchRecentSession(mk("claude-infra", "/tmp/repo", "s1"));
   db.touchRecentSession(mk("claude", "/tmp/repo", "s2")); // a different conversation
-  db.saveTranscriptMeta({ sessionId: "s1", file: "/t/s1.jsonl", cwd: "/repo", title: "t", lastActivityAt: null, size: 1, mtimeMs: 1 });
+  db.saveTranscriptMeta({ sessionId: "s1", file: "/t/s1.jsonl", cwd: "/repo", title: "t", lastActivityAt: null, entrypoint: "cli", size: 1, mtimeMs: 1 });
 
   const left = db.deleteRecentSession("s1");
   assert.deepEqual(left.map((r) => r.sessionId), ["s2"], "every row for the id goes; other conversations stay");
