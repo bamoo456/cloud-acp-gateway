@@ -795,15 +795,27 @@
   .lbl:has(details.think[open]) { align-items: flex-start; }
   /* per-message "copy" button under the text. Subtle by default, brightens on
      hover/focus. */
-  .msg-copy {
+  .msg-copy, .reply-fold {
     display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
     padding: 3px 8px; border: 0; border-radius: 8px; background: transparent;
     color: var(--muted); font-size: 12px; cursor: pointer; opacity: .6;
     transition: opacity .12s, background .12s, color .12s; -webkit-tap-highlight-color: transparent;
   }
-  .msg-copy:hover, .msg-copy:focus-visible { opacity: 1; background: var(--surface-2); color: var(--text); }
+  .msg-copy:hover, .msg-copy:focus-visible,
+  .reply-fold:hover, .reply-fold:focus-visible { opacity: 1; background: var(--surface-2); color: var(--text); }
   .msg-copy.copied { opacity: 1; color: var(--text); }
-  .msg-copy > svg { width: 14px; height: 14px; flex: 0 0 auto; }
+  .msg-copy > svg, .reply-fold > svg { width: 14px; height: 14px; flex: 0 0 auto; }
+  /* A long finished reply is cut to a dozen lines and faded out at the cut, so a
+     verbose turn cannot bury the prompt that follows it. The mask does the fade
+     in one declaration and needs no colour, so it holds in both themes. */
+  .turn.agent .replies.folded {
+    /* Keep in step with REPLY_FOLD_PX in Thread.tsx — that is what decides
+       whether this class goes on at all. */
+    max-height: 320px; overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent);
+  }
+  .reply-fold[aria-expanded="true"] > svg { transform: rotate(180deg); }
   .msg-copy-label { line-height: 1; }
   @media (hover: none) { .msg-copy { opacity: .8; } }
 
