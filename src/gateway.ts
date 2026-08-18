@@ -4897,11 +4897,19 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     const sid = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
     const { limit, from, to } = historyPageParams(q);
     if (!cwd || !sid) { res.writeHead(400); res.end(); return; }
+    const agentName = q.get("agent") ?? cfg.defaultAgent;
     readAgentHistoryMessages(prof?.cmd ?? "", cwd, sid, limit, { from, to })
       .then((r) => {
         if (!r) { res.writeHead(404); res.end(); return; }
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify(r));
+        // What this conversation last ran on. Rides along because this is the only
+        // request an unresumed conversation makes: the agent holds no session for it
+        // yet, so nothing else can say what its model and thinking level were.
+        // transcriptStore() rather than db(): an unopenable store degrades to no
+        // controls, which is what a conversation from before this was tracked
+        // reports anyway — never a 500 on the page of messages.
+        const controls = Object.fromEntries(transcriptStore()?.sessionControls(agentName, sid) ?? []);
+        res.end(JSON.stringify({ ...r, controls }));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;

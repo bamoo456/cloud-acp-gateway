@@ -72,6 +72,27 @@ describe("engineReadout", () => {
   });
 });
 
+describe("lastRanOn", () => {
+  test("names the model and thinking level a saved conversation used, whatever the agent calls them", async () => {
+    const { lastRanOn } = await import("../lib/engine.ts");
+
+    expect(lastRanOn({ model: "opus[1m]", effort: "high", mode: "auto" })).toBe("last ran on opus[1m] · high");
+    // codex spells the same two differently, and `mode` is never part of the line.
+    expect(lastRanOn({ mode: "plan", reasoning_effort: "xhigh", model: "gpt-5.5" })).toBe("last ran on gpt-5.5 · xhigh");
+    expect(lastRanOn({ model: "sonnet" })).toBe("last ran on sonnet");
+  });
+
+  test("says nothing when there is nothing recorded", async () => {
+    const { lastRanOn } = await import("../lib/engine.ts");
+
+    // A conversation older than the tracking, or a gateway too old to report it:
+    // the note must read as it always did rather than trail off after a dash.
+    expect(lastRanOn({})).toBe("");
+    expect(lastRanOn(undefined)).toBe("");
+    expect(lastRanOn({ mode: "plan" })).toBe("");
+  });
+});
+
 describe("EngineDock", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;

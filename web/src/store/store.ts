@@ -7,6 +7,7 @@ import { readRecentSessions, touchRecentSession, removeRecentSession, renameRece
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
 import { isLockEnabled, hydrateLock } from "../lib/lock.ts";
 import { basename } from "../lib/format.ts";
+import { lastRanOn } from "../lib/engine.ts";
 import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import {
@@ -497,8 +498,13 @@ export const useStore = create<State>((set, get) => {
           items: [...cur.items, {
             id: cur.id + ":" + seq,
             kind: "note",
+            // The engine readout is blank until the reply resumes this session (the
+            // store's model/effort belong to whichever session is live), so the
+            // note carries what it last ran on instead. Only on the resume path:
+            // replying to an agent that can't load forks a FRESH session, which
+            // will not come back on these values.
             text: agentCanLoadSession()
-              ? "· saved conversation — reply to resume the agent"
+              ? ["· saved conversation", lastRanOn(r.controls), "reply to resume the agent"].filter(Boolean).join(" — ")
               : "· saved conversation — reply to start a new session",
           }] };
         // Re-attach any still-outstanding permission prompt for this session — the

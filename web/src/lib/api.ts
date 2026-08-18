@@ -4,7 +4,13 @@ export interface HistorySession { sessionId: string; title: string | null; updat
 export interface DiscoveredHistorySession extends HistorySession { cwd: string; source: "claude-cli"; }
 export interface ViewBlock { type: "text" | "thought" | "tool" | "image"; text?: string; name?: string; toolCallId?: string; status?: string; output?: string; locations?: string[]; kind?: string; mimeType?: string; data?: string; uri?: string; }
 export interface ViewMessage { role: "user" | "assistant"; blocks: ViewBlock[]; }
-export interface MessagesResult { messages: ViewMessage[]; total: number; start: number; truncated: boolean; }
+export interface MessagesResult {
+  messages: ViewMessage[]; total: number; start: number; truncated: boolean;
+  // The controls (config option id -> value) this conversation was last running,
+  // as the gateway recorded them. Empty for a conversation older than that
+  // tracking, and from a gateway too old to send it.
+  controls: Record<string, string>;
+}
 export interface DirEntry { name: string; git: boolean; }
 export interface FsResult { root: string; path: string; parent: string | null; dirs: DirEntry[]; }
 
@@ -70,7 +76,10 @@ export async function getMessages(
   }
   const url = base() + "/history/messages?" + params.toString();
   const r = await readJson(await fetch(url), "Conversation history isn't available for this session yet.");
-  return { messages: r.messages || [], total: r.total || 0, start: r.start || 0, truncated: !!r.truncated };
+  return {
+    messages: r.messages || [], total: r.total || 0, start: r.start || 0, truncated: !!r.truncated,
+    controls: r.controls && typeof r.controls === "object" ? r.controls : {},
+  };
 }
 
 export async function renameSession(agent: string, cwd: string, session: string, title: string): Promise<void> {
