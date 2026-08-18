@@ -64,6 +64,15 @@ export function contentFile(c: ContentBlock | undefined): MessageFile | null {
   return null;
 }
 
+// A background-task-completion notification, synthesized by the agent CLI and
+// relayed as a plain `user_message_chunk` — not something the human typed. The
+// SDK tags these with `origin.kind === "task-notification"`, but the ACP
+// adapter between the CLI and this gateway drops that field before it reaches
+// us, so the wrapper tag in the text is the only signal left to catch it on.
+function isTaskNotification(text: string): boolean {
+  return /<task-notification>/.test(text);
+}
+
 function nextId(s: Session): [string, number] {
   const seq = s.seq + 1;
   return [s.id + ":" + seq, seq];
@@ -203,6 +212,7 @@ export function applyUpdate(s: Session, up: SessionUpdate): Session {
       const file = contentFile(up.content);
       if (file) return addUserBubble(s, "", undefined, [file]);
       const text = contentText(up.content);
+      if (isTaskNotification(text)) return s;
       return isDuplicateLocalPromptReplay(s, text) ? s : addUserBubble(s, text);
     }
     case "tool_call": return upsertTool(s, up, false);
@@ -247,7 +257,7 @@ export function applyHistoryMessages(s0: Session, messages: ViewMessage[]): Sess
       const images = m.blocks
         .filter((b) => b.type === "image" && (b.data || b.uri))
         .map((b) => ({ mimeType: b.mimeType || "image/png", data: b.data, uri: b.uri }));
-      if (txt || images.length) cur = addUserBubble(cur, txt, images.length ? images : undefined);
+      if ((txt || images.length) && !isTaskNotification(txt)) cur = addUserBubble(cur, txt, images.length ? images : undefined);
     } else {
       for (const b of m.blocks) {
         const seq = cur.seq + 1; const iid = cur.id + ":" + seq;

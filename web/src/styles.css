@@ -22,6 +22,15 @@
     --agent-claude: #d97757;
     --agent-codex: #10a37f;
     --agent-opencode: #5A5858;
+    /* The prompt's tint (below, .turn.user) — a fixed brand colour chosen from
+       mockup, not derived from --text or the active agent, so it stays put
+       across skins/agents. The mix % and radius are separate tokens (not
+       baked into the rule) because dark needs its own values below: the same
+       % that reads fine against the light --bg is almost invisible against
+       the near-black dark --bg, so dark compensates with a much higher mix. */
+    --prompt-tint: #5b8def;
+    --prompt-tint-mix: 3%;
+    --prompt-radius: 16px;
     /* Allow is a primary action, not an agent-specific concept, so it does not
        take the agent's hue — it is the same ink as Send and Review. */
     --permission-allow-bg: var(--accent);
@@ -90,6 +99,9 @@
       --bg: #1f1e1d; --surface: #292826; --surface-2: #211f1e; --text: #eeede9;
       --muted: #9a978f; --faint: #7d7a72; --border: #38362f; --border-strong: #46443c;
       --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+      --prompt-tint: #4a6fa5;
+      --prompt-tint-mix: 27%;
+      --prompt-radius: 10px;
     }
   }
   /* The skins are a palette shift, not a brand hue: they move the paper and the
@@ -724,9 +736,9 @@
 
   /* ---- turns ----
      The reply is text on the page, not a machine artefact, so it gets no
-     bubble, no panel and no title bar (§1.3). What names it is one mono label
-     line: "YOU" on one side, the agent's wordmark on the other. The prompt is
-     the one exception — see .turn.user below. */
+     bubble, no panel and no title bar (§1.3). What names it is one label
+     line: "YOU" on one side, the agent's glyph + wordmark on the other. The
+     prompt is the one exception — see .turn.user below. */
   .turn { margin: 0 0 22px; min-width: 0; max-width: 100%; }
   .lbl {
     display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
@@ -739,29 +751,44 @@
   .lbl .you { letter-spacing: .09em; text-transform: uppercase; }
   .lbl .who { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
   .lbl .wm { color: var(--muted); }
-  /* The one place the agent's brand colour is allowed to appear, and it is off
-     unless the reader asks for it (§1.2). */
+  /* Shared with the engine chip (.mchip .idot in EngineDock) — the turn label
+     itself now uses .chip below instead, since the icon already carries the
+     agent's colour. */
   .idot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto;
     background: var(--agent-color, var(--ink)); display: none; }
   :root[data-identity="dot"] .idot, :root[data-identity="hue"] .idot { display: block; }
+  /* Agent glyph, chipped the same way as the sidebar's row marker
+     (.sess-item .mark.who) — a small tinted badge rather than the bare wordmark,
+     so a turn reads as "whose answer" at a glance. */
+  .lbl .chip {
+    width: 18px; height: 18px; border-radius: 6px; flex: 0 0 auto;
+    display: grid; place-items: center;
+  }
+  .lbl .chip svg { width: 12px; height: 12px; }
+  /* Codex and opencode carry their own brand colours inside the SVG; claude's
+     glyph is drawn in currentColor, so without this one line it is the only
+     chip icon rendered in grey (mirrors .sess-item .mark.who.claude). */
+  .lbl .chip.claude { color: var(--agent-claude); background: color-mix(in srgb, var(--agent-claude) 16%, var(--surface)); }
+  .lbl .chip.codex { background: color-mix(in srgb, var(--agent-codex) 16%, var(--surface)); }
+  .lbl .chip.opencode { background: color-mix(in srgb, var(--agent-opencode) 16%, var(--surface)); }
   /* Your prompt takes a tint so a long thread can be skimmed for "where did I
-     ask something" — the one place a message carries a surface. It stays a
-     block of text, not a panel: no border, no shadow, and the tint is one
-     color-mix over the page, which lands right in both themes. The reply keeps
-     the bare column, so the answer is still the page's main voice. */
+     ask something" — the one place a message carries a surface. The tint is a
+     light color-mix over the page (works in both themes), with a hairline
+     border for a touch of card definition — still no shadow, so it never
+     competes with the reply's bare column below. */
   .turn.user {
     position: relative; margin-top: 30px;
-    background: color-mix(in srgb, var(--text) 8%, var(--bg));
-    padding: 12px 14px; border-radius: 10px;
+    background: color-mix(in srgb, var(--prompt-tint) var(--prompt-tint-mix), var(--bg));
+    border: 1px solid var(--border);
+    padding: 12px 14px; border-radius: var(--prompt-radius);
   }
   /* A hairline under the prompt, between what you asked and what came back. */
   .turn.user::after {
     content: ""; position: absolute; left: 0; right: 0; bottom: -15px;
     border-top: 1px solid var(--border);
   }
-  /* Your own words are the question, not the answer — quieter than the reply,
-     the way a quoted prompt reads. */
-  .turn.user .body { font-size: var(--chat-user-size); min-width: 0; overflow-wrap: anywhere; color: var(--muted); }
+  /* Your own words, in the page's own ink — legible at a glance, not quoted-quiet. */
+  .turn.user .body { font-size: var(--chat-user-size); min-width: 0; overflow-wrap: anywhere; color: var(--text); }
   .turn.user .body .md { font-size: var(--chat-user-size); }
   .turn .body > :last-child { margin-bottom: 0; }
   /* The reply is the page's own text, in the page's own face. It used to render
