@@ -212,15 +212,16 @@ describe("global styles", () => {
     expect(cssRule(".turn.user::after")).toMatch(/border-top:\s*1px solid var\(--border\)/);
   });
 
-  test("a folded reply is cut at the same height Thread.tsx measures", () => {
-    const rule = cssRule(".turn.agent .replies.folded");
-
-    expect(rule).toMatch(/max-height:\s*320px/);
-    expect(rule).toMatch(/overflow:\s*hidden/);
-    // The fade is a mask, so it needs no colour and holds in both themes.
-    expect(rule).toMatch(/mask-image:\s*linear-gradient/);
-    expect(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "components/Thread.tsx"), "utf8"))
-      .toMatch(/REPLY_FOLD_PX = 320/);
+  test("a folded reply is one quiet line that cannot wrap", () => {
+    expect(cssRule(".reply-peek")).toMatch(/color:\s*var\(--muted\)/);
+    // The opening line takes the width and is cut with an ellipsis — a folded
+    // reply that wrapped to three lines would not be folded.
+    const pk = cssRule(".reply-peek .pk");
+    expect(pk).toMatch(/white-space:\s*nowrap/);
+    expect(pk).toMatch(/text-overflow:\s*ellipsis/);
+    expect(pk).toMatch(/overflow:\s*hidden/);
+    // No height clamp survives — folding is now all-or-nothing.
+    expect(styles).not.toMatch(/\.replies\.folded/);
   });
 
   test("a finished tool call is silent — no badge, no colour", () => {
