@@ -137,6 +137,34 @@ used, then the gateway user's home directory.
 The gateway skips agent entries whose command does not exist, so one shared
 `agents.json` can include optional agents. It exits if no usable agents remain.
 
+### Default model and thinking level
+
+An agent's model and thinking level otherwise come from its CLI's own global
+config — `~/.claude/settings.json` for `claude-agent-acp` — which is the same file
+that CLI's `/model` picker writes when you use it in a terminal. `defaults` gives
+the gateway a starting point of its own that a terminal `/model` cannot move:
+
+```json
+{
+  "claude": {
+    "cmd": "node_modules/.bin/claude-agent-acp",
+    "cwd": "/workspace",
+    "defaults": { "model": "opus[1m]", "effort": "xhigh" }
+  }
+}
+```
+
+Keys are the agent's own config option ids (`model`, `effort`, `mode` for
+claude-agent-acp; `model`, `reasoning_effort`, `approval_policy` for codex-acp),
+values its option values — aliases the agent resolves itself, like `opus`, work
+too. Anything the session doesn't offer is dropped rather than pushed.
+
+These apply to sessions the gateway *creates*. A resumed conversation instead
+comes back to whatever it was last running: the gateway records each session's
+controls (`session_controls` in `state.sqlite`) and puts them back after a
+`session/load` rebuilds it at its defaults, so changing `defaults` — or the CLI's
+global config — never rewrites the model an existing conversation ran on.
+
 ## File Preview
 
 An agent working through the gateway writes real files on the gateway host —

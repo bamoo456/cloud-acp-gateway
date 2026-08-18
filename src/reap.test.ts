@@ -13,14 +13,20 @@ type Agent = { sent: string[]; emit: (b: Buffer) => void };
 // Open one ACP session over its own SSE stream: session/new, then make the fake
 // agent answer with `sid`. Pushes the stream into `streams` so the test can close
 // them all before tearing the server down (an open SSE conn blocks srv.close()).
-async function openSession(port: number, agent: () => Agent, sid: string, streams: Stream[]): Promise<{ conn: string; stream: Stream }> {
+// `options` are the controls the new session reports itself running, as
+// claude-agent-acp's session/new does — the gateway records them from here.
+async function openSession(
+  port: number, agent: () => Agent, sid: string, streams: Stream[], options?: unknown[],
+): Promise<{ conn: string; stream: Stream }> {
   const c = sse(port);
   streams.push(c);
   const conn = await c.conn;
   await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd: "/x" } });
   const fwd = agent().sent.map(parse).filter((o) => o.method === "session/new").at(-1)!;
-  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: fwd.id, result: { sessionId: sid } })));
+  const result = options ? { sessionId: sid, configOptions: options } : { sessionId: sid };
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: fwd.id, result })));
   await c.next((e) => !!e.data && parse(e.data).id === 1); // session is tracked once the response routes back
+  await new Promise((r) => setTimeout(r, 10)); // controls are recorded just after the response routes
   return { conn, stream: c };
 }
 
@@ -453,4 +459,91 @@ test("a silent adapter still releases the parked frame", async () => {
     if (previous === undefined) delete process.env.ACPG_CONTROL_ACK_TIMEOUT_MS;
     else process.env.ACPG_CONTROL_ACK_TIMEOUT_MS = previous;
   }
+});
+
+// --- what a session runs, remembered from its own start and across a restart ---
+// The controls a client sets are only half the story: a conversation nobody ever
+// switched by hand still ran on SOMETHING, and the adapter resolves that from its
+// CLI's global config (~/.claude/settings.json) at every session/new AND every
+// session/load. So a resumed conversation silently moves to whatever that config
+// says today unless the gateway records what the session itself reported.
+
+test("a session's own starting controls are put back on a rebuild, with nobody having set one", async () => {
+  const { port, agent, reap, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  const { conn } = await openSession(port, agent, "S1", streams, [option("effort", "xhigh", ["default", "high", "xhigh"])]);
+
+  reap(FAR_FUTURE);
+  agent().sent.length = 0;
+
+  // The rebuild reports `high` — the CLI's global config moved under us. What the
+  // conversation actually ran is xhigh, and that is what it must come back as.
+  await post(port, conn, { jsonrpc: "2.0", id: 9, method: "session/prompt", params: { sessionId: "S1", prompt: [{ type: "text", text: "again" }] } });
+  await answerLoad(agent, "S1", [option("effort", "high", ["default", "high", "xhigh"])]);
+
+  assert.deepEqual(controlsIn(agent().sent), [{ configId: "effort", value: "xhigh" }], "the session's own value, not the global default");
+  await shutdown(streams, close);
+});
+
+// The re-apply is sequential — each control waits for the adapter's answer before
+// the next goes out (switching model rebuilds the effort list) — so a test that
+// expects more than one put back has to play the adapter for each.
+async function ackControls(agent: () => Agent, rounds = 4): Promise<void> {
+  const answered = new Set<unknown>();
+  for (let i = 0; i < rounds; i++) {
+    const pending = agent().sent.map(parse)
+      .filter((o) => o.method === "session/set_config_option" && !answered.has(o.id));
+    if (!pending.length) return;
+    for (const req of pending) {
+      answered.add(req.id);
+      const p = req.params as { configId: string; value: string };
+      agent().emit(Buffer.from(JSON.stringify({
+        jsonrpc: "2.0", id: req.id, result: { configOptions: [option(p.configId, p.value)] },
+      })));
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+test("a session's controls survive a gateway restart", async () => {
+  const first = await makeTestServer();
+  const streams: Stream[] = [];
+  const { conn } = await openSession(first.port, first.agent, "S1", streams, [option("model", "opus", ["default", "opus", "sonnet"])]);
+  await setControl(first.port, first.agent, conn, "S1", "effort", "xhigh", 2);
+  await shutdown(streams, first.close);
+
+  // A redeploy: new process, new agent, every adapter session gone. The client
+  // reopens the conversation, which loads it from disk at the adapter's defaults.
+  const second = await makeTestServer({ ledgerDir: first.ledgerDir });
+  const streams2: Stream[] = [];
+  const c = sse(second.port);
+  streams2.push(c);
+  const conn2 = await c.conn;
+  await post(second.port, conn2, { jsonrpc: "2.0", id: 1, method: "session/load", params: { sessionId: "S1", cwd: "/x" } });
+  await answerLoad(second.agent, "S1", [
+    option("model", "sonnet", ["default", "opus", "sonnet"]),
+    option("effort", "high", ["default", "high", "xhigh"]),
+  ]);
+  await ackControls(second.agent);
+
+  assert.deepEqual(
+    controlsIn(second.agent().sent),
+    [{ configId: "model", value: "opus" }, { configId: "effort", value: "xhigh" }],
+    "the table outlived the process that recorded it",
+  );
+  await shutdown(streams2, second.close);
+});
+
+test("the agent's configured defaults are applied to a new session, and an unusable one is dropped", async () => {
+  const { port, agent, close } = await makeTestServer({ defaults: { model: "opus", effort: "max" } });
+  const streams: Stream[] = [];
+  await openSession(port, agent, "S1", streams, [
+    option("model", "sonnet", ["default", "opus", "sonnet"]),
+    // This session's adapter doesn't offer `max` — pushing it would just be a
+    // rejection on every session the gateway opens.
+    option("effort", "high", ["default", "high", "xhigh"]),
+  ]);
+
+  assert.deepEqual(controlsIn(agent().sent), [{ configId: "model", value: "opus" }], "the gateway's default replaces the CLI's, the unusable one is dropped");
+  await shutdown(streams, close);
 });
