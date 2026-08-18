@@ -805,16 +805,20 @@
   .reply-fold:hover, .reply-fold:focus-visible { opacity: 1; background: var(--surface-2); color: var(--text); }
   .msg-copy.copied { opacity: 1; color: var(--text); }
   .msg-copy > svg, .reply-fold > svg { width: 14px; height: 14px; flex: 0 0 auto; }
-  /* A long finished reply is cut to a dozen lines and faded out at the cut, so a
-     verbose turn cannot bury the prompt that follows it. The mask does the fade
-     in one declaration and needs no colour, so it holds in both themes. */
-  .turn.agent .replies.folded {
-    /* Keep in step with REPLY_FOLD_PX in Thread.tsx — that is what decides
-       whether this class goes on at all. */
-    max-height: 320px; overflow: hidden;
-    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent);
-    mask-image: linear-gradient(to bottom, #000 calc(100% - 72px), transparent);
+  /* A folded reply is one line: its opening sentence and how long it runs. The
+     row is the whole affordance — there is no separate expand button to hunt
+     for — and it is quiet, because a thread of these should read as a list of
+     questions rather than a stack of controls. */
+  .reply-peek {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 3px 0; border: 0; background: transparent; text-align: left;
+    color: var(--muted); font-family: inherit; font-size: var(--chat-user-size);
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
+  .reply-peek:hover, .reply-peek:focus-visible { color: var(--text); }
+  .reply-peek > svg { width: 14px; height: 14px; flex: 0 0 auto; color: var(--faint); transform: rotate(-90deg); }
+  .reply-peek .pk { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reply-peek .n { flex: 0 0 auto; font-family: var(--mono); font-size: 11px; color: var(--faint); }
   .reply-fold[aria-expanded="true"] > svg { transform: rotate(180deg); }
   .msg-copy-label { line-height: 1; }
   @media (hover: none) { .msg-copy { opacity: .8; } }
