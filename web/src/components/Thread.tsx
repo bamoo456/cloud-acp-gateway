@@ -342,15 +342,19 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
   const structuralSig = items
     .map((it) => (it.kind === "tool" ? `t${it.status}.${it.content.length}` : it.kind))
     .join("|");
-  // Which reply is open. One at a time — opening a second folds the first — and
-  // none by default, so a thread reads as its prompts until you choose an answer
-  // to sit with. Resets with the session.
-  const [openTurnId, setOpenTurnId] = useState<string | null>(null);
-  useEffect(() => { setOpenTurnId(null); }, [sid]);
+  // The newest turn in the window — the answer to the question you just asked,
+  // and so the one that is open unless you say otherwise.
+  const lastTurnId = rows.reduce<string | null>((last, r) => (r.row === "turn" ? r.id : last), null);
+  // Which reply is open, one at a time. `null` means "whichever is newest";
+  // picking a turn (or closing the open one) pins the choice until the next
+  // answer arrives, which takes focus back. Also resets with the session.
+  const [choice, setChoice] = useState<{ id: string | null } | null>(null);
+  const openTurnId = choice ? choice.id : lastTurnId;
+  useEffect(() => { setChoice(null); }, [sid, lastTurnId]);
   const working = !!session?.working;
-  // The turn currently being streamed into: the last one in the window, while
-  // the session is working. It is the one turn that must not fold.
-  const liveTurnId = working ? rows.reduce<string | null>((last, r) => (r.row === "turn" ? r.id : last), null) : null;
+  // The turn currently being streamed into. It is the one turn that must not
+  // fold, whatever is pinned.
+  const liveTurnId = working ? lastTurnId : null;
   useEffect(() => {
     const m = ref.current?.closest("main");
     if (m) forceRepaint(m as HTMLElement);
@@ -394,7 +398,7 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
             key={row.id} agentName={agentLabel} thoughts={row.thoughts} replies={row.replies}
             live={row.id === liveTurnId}
             expanded={row.id === openTurnId}
-            onToggle={() => setOpenTurnId((id) => (id === row.id ? null : row.id))}
+            onToggle={() => setChoice({ id: openTurnId === row.id ? null : row.id })}
           />
         );
         const it = row.item;
