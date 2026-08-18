@@ -89,8 +89,8 @@ function groupTurns(items: ThreadItem[]): Row[] {
 // line unless it is the open one. A thread reads as the questions you asked;
 // the answer you want is one tap away, and only one is ever unrolled (§1.3
 // still holds — no frame either way).
-function AgentTurn({ agentName, thoughts, replies, live, expanded, onToggle }: {
-  agentName: string; thoughts: Thought[]; replies: Reply[]; live: boolean;
+function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, onToggle }: {
+  agentName: string; agentKind: "claude" | "codex" | "opencode" | "mono"; thoughts: Thought[]; replies: Reply[]; live: boolean;
   expanded: boolean; onToggle: () => void;
 }) {
   const copyable = replies.map((r) => r.text).filter(Boolean).join("\n\n");
@@ -100,7 +100,14 @@ function AgentTurn({ agentName, thoughts, replies, live, expanded, onToggle }: {
   return (
     <div className="turn agent">
       <div className="lbl">
-        <span className="who"><span className="idot" /><span className="wm">{agentName}</span></span>
+        <span className="who">
+          {agentKind !== "mono" && (
+            <span className={"chip " + agentKind}>
+              {agentKind === "codex" ? <CodexMark /> : agentKind === "opencode" ? <OpencodeMark /> : <Robot />}
+            </span>
+          )}
+          <span className="wm">{agentName}</span>
+        </span>
         {thoughts.length > 0 && (
           <details className="think">
             <summary>· thought<IconChevronDown /></summary>
@@ -191,9 +198,11 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
   const hiddenRef = useRef(0);      // latest hidden count, read inside the (once-bound) scroll handler
   const anchorHeight = useRef(0);   // scrollHeight captured before a reveal, to compensate the prepend
   const agent = useStore((s) => s.cfg.agents.find((a) => a.name === s.agentName));
-  // Identity is a mono wordmark, not a hue (§1.2) — the agent's own name, as
-  // configured, is the label every turn wears.
+  // The agent's own name, as configured, is the label every turn wears —
+  // alongside its brand glyph (same classification Sidebar.tsx's mark() uses).
   const agentLabel = useStore((s) => s.agentName);
+  const agentKind = agent?.skin === "codex" ? "codex" : agent?.kind === "opencode" ? "opencode"
+    : agent?.name === "claude" ? "claude" : "mono";
   const [visible, setVisible] = useState(INITIAL_VISIBLE);
   // Show a "jump to latest" button whenever the user has scrolled up off the bottom,
   // so they can return to the live tail in one tap instead of a long manual scroll.
@@ -395,7 +404,7 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
       {rows.map((row) => {
         if (row.row === "turn") return (
           <AgentTurn
-            key={row.id} agentName={agentLabel} thoughts={row.thoughts} replies={row.replies}
+            key={row.id} agentName={agentLabel} agentKind={agentKind} thoughts={row.thoughts} replies={row.replies}
             live={row.id === liveTurnId}
             expanded={row.id === openTurnId}
             onToggle={() => setChoice({ id: openTurnId === row.id ? null : row.id })}
