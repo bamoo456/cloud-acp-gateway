@@ -17,7 +17,13 @@ function statusIcon(status: string) {
   return null;
 }
 export function ToolCall({ item }: { item: Tool }) {
-  const [open, setOpen] = useState(item.content.length > 0);
+  // Left alone, a card follows its status: open while the call is running (or
+  // if it failed — that is the one output you always want), closed once it is
+  // a completed record. Opening or closing one by hand overrides that for good,
+  // so a card you opened does not shut itself when the call finishes.
+  const [open, setOpen] = useState<boolean | null>(null);
+  const busy = item.status === "in_progress" || item.status === "pending";
+  const isOpen = open ?? (busy || item.status === "failed");
   const openFilePreview = useStore((s) => s.openFilePreview);
   // A file the agent WROTE gets a card — the produced thing, with its type and
   // a way to save it. A file it merely read stays one line of path: turning a
@@ -53,7 +59,7 @@ export function ToolCall({ item }: { item: Tool }) {
   };
   const icon = statusIcon(item.status);
   return (
-    <details className="tool" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+    <details className="tool" open={isOpen} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
       <summary>
         {icon && <span className="ticon">{icon}</span>}
         <span className="tkind">{item.toolKind || "tool"}</span>
