@@ -115,6 +115,20 @@ export class Db {
     if (!recentCols.some((c) => c.name === "last_message_at")) {
       this.db.exec("ALTER TABLE recent_sessions ADD COLUMN last_message_at TEXT");
     }
+    // What a session's controls (model / effort / mode / …) were last known to be.
+    // The adapter keeps them in memory only, so a gateway restart plus a later
+    // session/load rebuilds the session at its DEFAULTS with nothing left in
+    // memory to compare against — these rows are the only record of what the
+    // conversation was actually running. Keyed by agent too: two agents can share
+    // a transcript store but not a control vocabulary.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS session_controls (
+      agent_name TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      config_id TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (agent_name, session_id, config_id)
+    )`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS recent_folders (
       path TEXT PRIMARY KEY,
       last_used_at TEXT NOT NULL
@@ -240,6 +254,33 @@ export class Db {
   deleteRecentSession(sessionId: string): RecentSession[] {
     this.db.prepare("DELETE FROM recent_sessions WHERE session_id = ?").run(sessionId);
     return this.recentSessions();
+  }
+
+  // The controls a session was last known to be running, or an empty map when it
+  // has none recorded (a conversation from before this was tracked).
+  sessionControls(agentName: string, sessionId: string): Map<string, string> {
+    const rows = this.db
+      .prepare("SELECT config_id, value FROM session_controls WHERE agent_name = ? AND session_id = ?")
+      .all(agentName, sessionId) as Array<{ config_id: string; value: string }>;
+    return new Map(rows.map((r) => [r.config_id, r.value]));
+  }
+
+  // Record a session's controls. Replaces the whole set rather than merging: the
+  // caller tracks them as one snapshot, and an option the session has stopped
+  // reporting should not linger to be re-applied to a rebuild that lacks it.
+  setSessionControls(agentName: string, sessionId: string, values: Map<string, string>): void {
+    const at = new Date().toISOString();
+    this.db.prepare("DELETE FROM session_controls WHERE agent_name = ? AND session_id = ?").run(agentName, sessionId);
+    const stmt = this.db.prepare(
+      "INSERT OR REPLACE INTO session_controls (agent_name, session_id, config_id, value, updated_at) VALUES (?, ?, ?, ?, ?)",
+    );
+    for (const [configId, value] of values) stmt.run(agentName, sessionId, configId, value, at);
+  }
+
+  // Drop a deleted conversation's controls. Keyed on the id alone, like
+  // deleteRecentSession — the same conversation can be recorded under two agents.
+  deleteSessionControls(sessionId: string): void {
+    this.db.prepare("DELETE FROM session_controls WHERE session_id = ?").run(sessionId);
   }
 
   // Apply a rename to a conversation's recency rows. Keyed on the session id

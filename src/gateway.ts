@@ -111,7 +111,14 @@ for (const k of Object.keys(process.env)) {
 }
 
 // ---------------------------------------------------------------- config ----
-type AgentProfile = { cmd: string; args: string[]; cwd: string };
+// `defaults` are this agent's own starting controls (config option id -> value,
+// e.g. {"model": "opus[1m]", "effort": "xhigh"}), applied to every session the
+// gateway creates. They exist because the agent's own defaults come from its
+// CLI's global config (~/.claude/settings.json for claude-agent-acp), which the
+// user also changes for their terminal — the gateway needs a default of its own
+// that a terminal `/model` can't move. Values the session doesn't offer are
+// dropped, like any other control re-apply.
+type AgentProfile = { cmd: string; args: string[]; cwd: string; defaults?: Record<string, string> };
 
 function resolveCmd(cmd: string): string {
   // Relative agent commands resolve against the gateway's install dir, NOT the
@@ -154,6 +161,11 @@ export function loadAgents(): Record<string, AgentProfile> {
         cmd,
         args: p.args ?? [],
         cwd: p.cwd ?? defaultCwd,
+        // Only string values: every ACP select-type control takes a string, and a
+        // number/bool/null in the file would otherwise reach the adapter as one.
+        defaults: p.defaults && typeof p.defaults === "object"
+          ? Object.fromEntries(Object.entries(p.defaults).filter(([, v]) => typeof v === "string"))
+          : undefined,
       };
     }
     if (Object.keys(out).length === 0) {
@@ -2463,8 +2475,15 @@ const CONTROL_SENTINEL = "__gw_control__";
 // values it saw a client set and puts them back after a load, before anything
 // else reaches the rebuilt session.
 //
-// Held in memory only: a gateway restart takes the agent process — and every
-// session with it — so remembered values would have nothing to apply to.
+// Also persisted (session_controls in state.sqlite), because a gateway restart is
+// exactly when the memory is needed: it takes every adapter session with it, and
+// the next session/load rebuilds one from disk at its defaults — with the values
+// the conversation was running gone from memory, only the table still knows them.
+//
+// Recorded from the first control snapshot a session reports, not just from what a
+// client explicitly set: a conversation nobody ever switched by hand still ran on
+// SOMETHING, and resuming it onto whatever the CLI's global config now says is the
+// same silent change this whole mechanism exists to prevent.
 //
 // How long to wait for the adapter to acknowledge one re-applied control. A
 // re-apply holds that session's parked frames, and a prompt held forever is worse
@@ -2631,11 +2650,15 @@ class Channel {
   // Client frames parked behind an in-flight transparent re-load (sid → frames +
   // originating conn), flushed in order once the load response returns.
   private reviveQueue = new Map<string, Array<{ connId: string; line: Buffer }>>();
-  // sessionId -> the controls a client last successfully applied (config option id
-  // -> value; `mode` covers session/set_mode too). Put back after a load that
-  // shows the session came back at its defaults — see the section above. NOT
-  // cleared when the agent exits: surviving the restart is the point.
+  // sessionId -> the controls the session was last known to be running (config
+  // option id -> value; `mode` covers session/set_mode too). Put back after a load
+  // that shows the session came back at its defaults — see the section above. NOT
+  // cleared when the agent exits: surviving the restart is the point. An LRU cache
+  // in front of the session_controls table, so an eviction here costs a read, not
+  // the values.
   private sessionControls = new Map<string, Map<string, string>>();
+  // This agent's own default controls, applied to sessions the gateway creates.
+  private controlDefaults: Map<string, string>;
   // gateway req id -> the control a client is setting, so its response can be
   // attributed to a session and option (session/set_mode answers with `{}`).
   private controlReq = new Map<number, { sid: string; configId: string; value: string }>();
@@ -2664,6 +2687,7 @@ class Channel {
     // Force idle-session reaping on regardless of binary name (tests).
     reapAlways = false,
   ) {
+    this.controlDefaults = new Map(Object.entries(profile.defaults ?? {}));
     const provider = historyProviderFor(profile.cmd);
     this.isCodex = provider === "codex";
     this.reapable = reapAlways || provider === "claude" || provider === "codex";
@@ -3071,6 +3095,7 @@ class Channel {
         }
         this.initWaiters = [];
       }
+      let created: string | undefined;
       if (origin.method === "session/new") {
         const sid = (f.result as { sessionId?: unknown } | undefined)?.sessionId;
         if (typeof sid === "string") {
@@ -3080,12 +3105,18 @@ class Channel {
           if (origin.cwd) this.sessionCwd.set(sid, origin.cwd);
           // A new session has a fresh backing CLI — start tracking it for reaping.
           this.touchSession(sid, origin.cwd);
+          created = sid;
         }
       }
       // session/load finished → stop gating that session's replay, resume broadcast
       const loaded = this.loadReq.get(Number(f.id));
       if (loaded !== undefined) { this.loadGate.delete(loaded); this.loadReq.delete(Number(f.id)); }
       this.sendTo(origin.connId, seq, Buffer.from(JSON.stringify({ ...f, id: origin.clientId })));
+      // Record the session's starting controls and apply this agent's defaults over
+      // them. After the response, so the client renders the session it asked for and
+      // then hears the re-applied values through the usual config_option_update; the
+      // gate the re-apply takes parks the client's first prompt behind it.
+      if (created !== undefined) this.applyNewSessionControls(created, f.result);
       // A (re)load resubscribes this client to the session — re-deliver any permission
       // still outstanding for it, so a prompt that arrived before a drop (or before a
       // fresh page load) is shown again. Safe to repeat: permGate is first-reply-wins
@@ -3103,6 +3134,11 @@ class Channel {
         // off. The flush is deferred to the re-apply, which always performs it.
         // A re-apply already running for this session owns the queue (and will
         // flush it) — a second one racing it would fight over the same values.
+        // A session with nothing recorded (created before the gateway tracked
+        // controls, or by a different gateway) adopts this result as its values
+        // instead — there is nothing to put back, and the load itself is the first
+        // time we learn what it runs.
+        if (!this.controlGate.has(loaded)) this.seedControls(loaded, f.result);
         const diff = this.controlGate.has(loaded) ? [] : this.controlDiff(loaded, f.result);
         if (diff.length) void this.reapplyControls(loaded, diff);
         else if (!this.controlGate.has(loaded)) this.flushRevive(loaded);
@@ -3414,16 +3450,68 @@ class Channel {
         if (v !== undefined) tracked.set(id, v);
       }
     }
-    // Bound it (LRU, like rememberReaped) so a long-lived gateway doesn't keep one
-    // entry per session ever configured. Deliberately larger than
-    // MAX_LIVE_SESSIONS: these have to outlive the reaping that loses them.
-    this.sessionControls.delete(ctl.sid);
-    this.sessionControls.set(ctl.sid, tracked);
+    this.trackControls(ctl.sid, tracked);
+  }
+
+  // Cache a session's controls and persist them. Bounded (LRU, like rememberReaped)
+  // so a long-lived gateway doesn't keep one entry per session ever configured;
+  // the table is the real store, so an eviction only costs the next read.
+  private trackControls(sid: string, tracked: Map<string, string>): void {
+    this.sessionControls.delete(sid);
+    this.sessionControls.set(sid, tracked);
     while (this.sessionControls.size > 64) {
       const k = this.sessionControls.keys().next().value as string | undefined;
       if (k === undefined) break;
       this.sessionControls.delete(k);
     }
+    // Best-effort: losing a row costs one resume at the agent's defaults, which is
+    // strictly better than failing the response that carried the values.
+    try { this.store?.setSessionControls(this.name, sid, tracked); } catch { /* ignore */ }
+  }
+
+  // The controls this session is known to be running, from the cache or the table.
+  // Absent (rather than empty) when nothing was ever recorded for it — the caller
+  // distinguishes "nothing to put back" from "nothing recorded yet, seed it".
+  private trackedControls(sid: string): Map<string, string> | undefined {
+    const cached = this.sessionControls.get(sid);
+    if (cached) return cached;
+    let stored: Map<string, string> | undefined;
+    try { stored = this.store?.sessionControls(this.name, sid); } catch { return undefined; }
+    if (!stored?.size) return undefined;
+    this.trackControls(sid, stored);
+    return stored;
+  }
+
+  // First control snapshot we see for a session with no record: adopt it as what
+  // the session runs. This is what makes a conversation nobody ever switched by
+  // hand resume onto its own values instead of the CLI's current global config.
+  // A session that already has a record is left alone — on a load, the result IS
+  // the defaults we are about to correct.
+  private seedControls(sid: string, result: unknown): void {
+    if (this.trackedControls(sid)) return;
+    const snapshot = controlSnapshot(result);
+    if (!snapshot?.values.size) return;
+    this.trackControls(sid, new Map(snapshot.values));
+  }
+
+  // A session the gateway just created: record what it came up as, then put this
+  // agent's configured defaults on top and push whatever that changes. Reuses the
+  // load path's diff/re-apply wholesale, so a default the session doesn't offer is
+  // dropped exactly like a remembered value the rebuild no longer supports — and
+  // only what survived that filter joins the record, so an unusable default never
+  // becomes part of what we think this session runs.
+  private applyNewSessionControls(sid: string, result: unknown): void {
+    this.seedControls(sid, result);
+    const tracked = this.trackedControls(sid);
+    if (!tracked || !this.controlDefaults.size) return;
+    const wanted = new Map(tracked);
+    for (const [configId, value] of this.controlDefaults) wanted.set(configId, value);
+    const diff = this.controlDiff(sid, result, wanted);
+    if (!diff.length) return;
+    const next = new Map(tracked);
+    for (const c of diff) next.set(c.configId, c.value);
+    this.trackControls(sid, next);
+    void this.reapplyControls(sid, diff);
   }
 
   // What this load result would silently change about the session's controls, in
@@ -3431,8 +3519,13 @@ class Channel {
   // dropped rather than pushed: a session rebuilt by a newer adapter (or with a
   // different model) can legitimately have stopped supporting them, and a rejected
   // re-apply would just log noise on every load.
-  private controlDiff(sid: string, result: unknown): Array<{ configId: string; value: string; viaSetMode: boolean }> {
-    const tracked = this.sessionControls.get(sid);
+  private controlDiff(
+    sid: string,
+    result: unknown,
+    // The values to bring the session to. Defaults to what it is known to run; a
+    // new session passes its agent's configured defaults merged over that.
+    tracked = this.trackedControls(sid),
+  ): Array<{ configId: string; value: string; viaSetMode: boolean }> {
     if (!tracked?.size) return [];
     const snapshot = controlSnapshot(result);
     if (!snapshot) return [];
@@ -4776,6 +4869,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         // sharing a provider must not keep half its rows and resurrect.
         db().deleteRecentSession(sid);
         db().deleteTranscriptMeta(sid);
+        db().deleteSessionControls(sid);
         db().cancelInboxForSessionId(sid, new Date().toISOString());
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, deleted }));
@@ -4931,8 +5025,15 @@ export interface FakeAgentHandle {
   exit(): void;
 }
 
-export async function makeTestServer(): Promise<{
+export async function makeTestServer(opts?: {
+  // This agent's configured control defaults (agents.json `defaults`).
+  defaults?: Record<string, string>;
+  // Reuse an existing ledger dir — i.e. an existing state.sqlite, so a test can
+  // restart the gateway and assert on what survived.
+  ledgerDir?: string;
+}): Promise<{
   port: number;
+  ledgerDir: string;
   agent: () => FakeAgentHandle;
   running: (now?: number) => Array<{ agentName: string; sessionId: string; state: TaskState; cwd?: string; title?: string }>;
   renameSession: (sessionId: string, title: string) => void;
@@ -4945,11 +5046,11 @@ export async function makeTestServer(): Promise<{
   reap: (now?: number) => void;
   close: () => Promise<void>;
 }> {
-  const agents = { claude: { cmd: "x", args: [], cwd: process.cwd() } };
+  const agents = { claude: { cmd: "x", args: [], cwd: process.cwd(), defaults: opts?.defaults } };
   // A fresh ledger dir per server so tests are isolated — otherwise every test would
   // share (and accumulate seqs in) one ./data/ledger.claude.jsonl, breaking any test
-  // that asserts on replay content.
-  const ledgerDir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-test-"));
+  // that asserts on replay content. Passed in only to restart onto the same state.
+  const ledgerDir = opts?.ledgerDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "acpb-test-"));
   let fake: FakeAgentHandle & { send(f: Buffer): void; kill(): void; restart(): void };
   const b = new Gateway(
     agents as Record<string, AgentProfile>,
@@ -4991,6 +5092,7 @@ export async function makeTestServer(): Promise<{
   const { port } = srv.address() as import("node:net").AddressInfo;
   return {
     port,
+    ledgerDir,
     agent: () => fake,
     running: (now?: number) => b.running(now),
     renameSession: (sessionId: string, title: string) => b.renameSession(sessionId, title),
