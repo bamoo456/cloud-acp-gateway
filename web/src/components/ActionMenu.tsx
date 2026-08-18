@@ -72,7 +72,10 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   const dockOwned = new Set(
     [engine.model?.option?.id, engine.effort?.option.id, engine.mode?.option?.id].filter(Boolean),
   );
-  const configOptions = s.configOptions
+  // Same reason the dock reads out nothing here (see EMPTY_READOUT): on a saved
+  // conversation the agent hasn't resumed, these options describe another
+  // session and changing them fails.
+  const configOptions = (sess?.viewOnly ? [] : s.configOptions)
     .filter((o) => !dockOwned.has(o.id))
     .map((option, index) => ({ option, index }))
     .sort((a, b) => configRank(a.option) - configRank(b.option) || a.index - b.index)

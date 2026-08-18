@@ -44,6 +44,13 @@ export interface EngineReadout {
   mode: { name: string; option: ConfigOption | null } | null;
 }
 
+// What a saved conversation the agent hasn't resumed yet reads as: nothing.
+// configOptions/models/modes are store-global and only refreshed by session/new
+// or session/load, so they still describe the last LIVE session — showing them
+// on a view-only session both mislabels it and offers switches that fail
+// ("Session not found"), since the agent holds no such session yet.
+export const EMPTY_READOUT: EngineReadout = { model: null, effort: null, mode: null };
+
 export function engineReadout(
   configOptions: ConfigOption[],
   models: Model[],

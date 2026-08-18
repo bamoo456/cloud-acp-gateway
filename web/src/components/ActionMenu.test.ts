@@ -126,6 +126,30 @@ describe("ActionMenu config options", () => {
     },
   });
 
+  test("hides the engine settings on a saved conversation the agent hasn't resumed", async () => {
+    const { ActionMenu } = await import("./ActionMenu.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const AGENT_OPT = {
+      id: "agent", name: "Agent", type: "select" as const, category: "agent",
+      currentValue: "default", options: [{ value: "default", name: "Default" }],
+    };
+    const sessions = liveSession("saved", "Saved");
+    useStore.setState({
+      agentName: "codex", cwd: "/p", activeId: "saved", configOptions: [AGENT_OPT],
+      sessions: { saved: { ...sessions.saved, viewOnly: true } } as never,
+    });
+    root = createRoot(container);
+    act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
+
+    // The options belong to whichever session was live last — this one only
+    // becomes the agent's on the first reply, and changing them before that
+    // fails with "Session not found".
+    expect(menuRows()).not.toContain("Agent");
+
+    act(() => { useStore.setState({ sessions }); });
+    expect(menuRows()).toContain("Agent");
+  });
+
   const resumeRow = () =>
     [...container.querySelectorAll<HTMLButtonElement>(".amenu > .arow")]
       .find((b) => b.textContent?.includes("Copy resume command"));

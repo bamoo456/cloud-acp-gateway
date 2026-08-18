@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store/store.ts";
-import { engineReadout } from "../lib/engine.ts";
+import { EMPTY_READOUT, engineReadout } from "../lib/engine.ts";
 import { IconChevronDown, IconLogin } from "../lib/icons.tsx";
 import type { AgentRef } from "../types.ts";
 
@@ -40,7 +40,13 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
   // Read straight from the store on every render, never cached: changing model
   // rebuilds the effort options and can clamp the mode (see src/gateway.ts's
   // note on the same), so a memo here would serve a list the agent has dropped.
-  const { model, effort, mode } = engineReadout(s.configOptions, s.models, sess?.modelId, s.modes, sess?.mode);
+  // A saved conversation only becomes this agent's session on the first reply
+  // (send() calls session/load then), so until then the store's engine state
+  // belongs to another session — read out nothing rather than mislabel it.
+  const viewOnly = !!sess?.viewOnly;
+  const { model, effort, mode } = viewOnly
+    ? EMPTY_READOUT
+    : engineReadout(s.configOptions, s.models, sess?.modelId, s.modes, sess?.mode);
 
   useEffect(() => {
     if (!open && !modeOpen) return;
@@ -133,7 +139,7 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
             )}
             {model?.option
               ? <OptionGroup label={model.option.name} option={model.option} onPick={(v) => { s.setConfigOption(model.option!.id, v); setOpen(false); }} />
-              : s.models.length > 0 && (
+              : !viewOnly && s.models.length > 0 && (
                 <>
                   <div className="amenu-subhead">Model</div>
                   {s.models.map((m) => (
