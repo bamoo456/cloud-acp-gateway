@@ -477,6 +477,39 @@ describe("Thread turn grouping", () => {
     }
   });
 
+  test("opening one reply folds whichever was open before it", async () => {
+    const restore = stubReplyHeight(1200);
+    try {
+      await render([
+        { id: "a1", kind: "assistant", text: "first long answer" },
+        { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+        { id: "a2", kind: "assistant", text: "second long answer" },
+      ]);
+
+      const folded = () => main.querySelectorAll(".turn.agent .replies.folded").length;
+      const toggles = () => Array.from(main.querySelectorAll("button.reply-fold")) as HTMLButtonElement[];
+
+      // Both start folded — nothing is open until asked for.
+      expect(folded()).toBe(2);
+
+      await act(async () => { toggles()[0].click(); });
+      expect(folded()).toBe(1);
+      expect(toggles()[0].getAttribute("aria-expanded")).toBe("true");
+
+      // Opening the second closes the first.
+      await act(async () => { toggles()[1].click(); });
+      expect(folded()).toBe(1);
+      expect(toggles()[0].getAttribute("aria-expanded")).toBe("false");
+      expect(toggles()[1].getAttribute("aria-expanded")).toBe("true");
+
+      // Tapping the open one closes it again.
+      await act(async () => { toggles()[1].click(); });
+      expect(folded()).toBe(2);
+    } finally {
+      restore();
+    }
+  });
+
   test("a short reply is never folded", async () => {
     const restore = stubReplyHeight(80);
     try {
