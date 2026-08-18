@@ -333,3 +333,32 @@ test("touchSessionMessage records a gateway-driven session and bumps it in place
   assert.deepEqual(db.recentSessions().map((r) => r.sessionId), ["s1"]);
   db.close();
 });
+
+test("a session's controls round-trip, are replaced as a set, and go with the conversation", () => {
+  const db = new Db(":memory:");
+
+  const controls = (agent: string, sid: string) => Object.fromEntries(db.sessionControls(agent, sid));
+  assert.deepEqual(controls("claude", "s1"), {}, "nothing recorded reads as empty, not as a throw");
+
+  db.setSessionControls("claude", "s1", new Map([["model", "opus[1m]"], ["effort", "xhigh"]]));
+  // Compared as a set of pairs: the rows come back in the primary key's order, not
+  // the order they were written, and nothing downstream depends on either.
+  assert.deepEqual(controls("claude", "s1"), { model: "opus[1m]", effort: "xhigh" });
+
+  // Replaced, not merged: `effort` is gone from the session's option list (a model
+  // switch dropped it), and a lingering row would be re-applied to a rebuild that
+  // no longer has it.
+  db.setSessionControls("claude", "s1", new Map([["model", "sonnet"]]));
+  assert.deepEqual(controls("claude", "s1"), { model: "sonnet" });
+
+  // Same id under another agent is another session's record (two agents can share
+  // a transcript store but not a control vocabulary).
+  db.setSessionControls("codex", "s1", new Map([["reasoning_effort", "high"]]));
+  assert.deepEqual(controls("claude", "s1"), { model: "sonnet" });
+
+  // Deleting the conversation takes every agent's record of it, like its recency
+  // rows — otherwise a resurrected id would be re-applied stale values.
+  db.deleteSessionControls("s1");
+  assert.deepEqual(controls("claude", "s1"), {});
+  assert.deepEqual(controls("codex", "s1"), {});
+});

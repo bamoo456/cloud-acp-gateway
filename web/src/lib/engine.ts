@@ -44,6 +44,25 @@ export interface EngineReadout {
   mode: { name: string; option: ConfigOption | null } | null;
 }
 
+// "last ran on opus[1m] · high" — the model and thinking level a saved
+// conversation was using, for the note that offers to resume it. "" when the
+// gateway recorded neither.
+//
+// Raw values, not display names: the names live in the agent's own option list,
+// which an unresumed session has none of — and a client that cold-started straight
+// into a saved conversation has never seen one either, so there is nothing to
+// translate against in the case this exists for. Inside a sentence a raw value
+// reads fine, which is why this is a note and not a chip.
+export function lastRanOn(controls: Record<string, string> | undefined): string {
+  if (!controls) return "";
+  const at = (match: (id: string) => boolean) =>
+    Object.entries(controls).find(([id]) => match(id.toLowerCase()))?.[1];
+  const model = at((id) => id.includes("model"));
+  const effort = at((id) => id.includes("reason") || id.includes("thought") || id.includes("effort"));
+  const parts = [model, effort].filter(Boolean);
+  return parts.length ? "last ran on " + parts.join(" · ") : "";
+}
+
 // What a saved conversation the agent hasn't resumed yet reads as: nothing.
 // configOptions/models/modes are store-global and only refreshed by session/new
 // or session/load, so they still describe the last LIVE session — showing them
