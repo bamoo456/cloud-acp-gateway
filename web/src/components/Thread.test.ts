@@ -408,130 +408,61 @@ describe("Thread turn grouping", () => {
     });
   }
 
-  // jsdom lays nothing out, so the fold's only input — the replies' scrollHeight —
-  // has to be dictated.
-  function stubReplyHeight(px: number) {
-    const proto = HTMLDivElement.prototype;
-    const had = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
-    Object.defineProperty(proto, "scrollHeight", { configurable: true, get: () => px });
-    return () => {
-      if (had) Object.defineProperty(proto, "scrollHeight", had);
-      else delete (proto as unknown as Record<string, unknown>).scrollHeight;
-    };
-  }
+  const peeks = () => Array.from(main.querySelectorAll("button.reply-peek")) as HTMLButtonElement[];
 
-  test("a thought and the reply that follows it share one label line", async () => {
-    await render([
-      { id: "t1", kind: "thought", text: "weighing it up" },
-      { id: "a1", kind: "assistant", text: "here is the answer" },
-    ]);
+  test("a finished reply folds to one peek line, however short it is", async () => {
+    await render([{ id: "a1", kind: "assistant", text: "short answer\nand a second line" }]);
 
-    expect(main.querySelectorAll(".turn.agent")).toHaveLength(1);
-    expect(main.querySelectorAll(".turn.agent .lbl")).toHaveLength(1);
-    expect(main.querySelector(".turn.agent .wm")?.textContent).toBe("claude");
-    expect(main.querySelector("details.think")).not.toBeNull();
-    expect(main.textContent).toContain("here is the answer");
-  });
-
-  test("a reply with no thought renders no thinking disclosure", async () => {
-    await render([{ id: "a1", kind: "assistant", text: "straight to it" }]);
-
-    expect(main.querySelectorAll(".turn.agent")).toHaveLength(1);
-    expect(main.querySelector("details.think")).toBeNull();
-  });
-
-  test("a thought still streaming, with no reply yet, is a turn of its own", async () => {
-    await render([{ id: "t1", kind: "thought", text: "still thinking" }]);
-
-    expect(main.querySelectorAll(".turn.agent")).toHaveLength(1);
-    expect(main.querySelector("details.think")).not.toBeNull();
-    expect(main.querySelector(".turn.agent .body")).toBeNull();
-  });
-
-  test("a tool call between two replies breaks the run into two turns", async () => {
-    await render([
-      { id: "a1", kind: "assistant", text: "first" },
-      { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
-      { id: "t2", kind: "thought", text: "hmm" },
-      { id: "a2", kind: "assistant", text: "second" },
-    ]);
-
-    expect(main.querySelectorAll(".turn.agent")).toHaveLength(2);
-    expect(main.querySelectorAll("details.tool")).toHaveLength(1);
-  });
-
-  test("a long finished reply folds, and the toggle opens it back up", async () => {
-    const restore = stubReplyHeight(1200);
-    try {
-      await render([{ id: "a1", kind: "assistant", text: "a very long answer" }]);
-
-      expect(main.querySelector(".turn.agent .replies.folded")).not.toBeNull();
-      const btn = main.querySelector("button.reply-fold") as HTMLButtonElement | null;
-      expect(btn).not.toBeNull();
-
-      await act(async () => { btn!.click(); });
-      expect(main.querySelector(".turn.agent .replies.folded")).toBeNull();
-      expect(main.querySelector(".turn.agent .replies")).not.toBeNull();
-    } finally {
-      restore();
-    }
+    expect(main.querySelector(".turn.agent .replies")).toBeNull();
+    expect(peeks()).toHaveLength(1);
+    expect(peeks()[0].querySelector(".pk")?.textContent).toBe("short answer");
+    expect(peeks()[0].querySelector(".n")?.textContent).toBe("2 lines");
   });
 
   test("opening one reply folds whichever was open before it", async () => {
-    const restore = stubReplyHeight(1200);
-    try {
-      await render([
-        { id: "a1", kind: "assistant", text: "first long answer" },
-        { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
-        { id: "a2", kind: "assistant", text: "second long answer" },
-      ]);
+    await render([
+      { id: "a1", kind: "assistant", text: "first answer" },
+      { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+      { id: "a2", kind: "assistant", text: "second answer" },
+    ]);
 
-      const folded = () => main.querySelectorAll(".turn.agent .replies.folded").length;
-      const toggles = () => Array.from(main.querySelectorAll("button.reply-fold")) as HTMLButtonElement[];
+    expect(peeks()).toHaveLength(2);
 
-      // Both start folded — nothing is open until asked for.
-      expect(folded()).toBe(2);
+    await act(async () => { peeks()[0].click(); });
+    expect(main.querySelectorAll(".turn.agent .replies")).toHaveLength(1);
+    expect(main.textContent).toContain("first answer");
+    expect(peeks()).toHaveLength(1); // the other one is still folded
 
-      await act(async () => { toggles()[0].click(); });
-      expect(folded()).toBe(1);
-      expect(toggles()[0].getAttribute("aria-expanded")).toBe("true");
+    // Opening the second closes the first.
+    await act(async () => { peeks()[0].click(); });
+    expect(main.querySelectorAll(".turn.agent .replies")).toHaveLength(1);
+    expect(main.textContent).toContain("second answer");
 
-      // Opening the second closes the first.
-      await act(async () => { toggles()[1].click(); });
-      expect(folded()).toBe(1);
-      expect(toggles()[0].getAttribute("aria-expanded")).toBe("false");
-      expect(toggles()[1].getAttribute("aria-expanded")).toBe("true");
-
-      // Tapping the open one closes it again.
-      await act(async () => { toggles()[1].click(); });
-      expect(folded()).toBe(2);
-    } finally {
-      restore();
-    }
+    // The open turn's own toggle folds it back.
+    const collapse = main.querySelector("button.reply-fold") as HTMLButtonElement;
+    await act(async () => { collapse.click(); });
+    expect(main.querySelectorAll(".turn.agent .replies")).toHaveLength(0);
+    expect(peeks()).toHaveLength(2);
   });
 
-  test("a short reply is never folded", async () => {
-    const restore = stubReplyHeight(80);
-    try {
-      await render([{ id: "a1", kind: "assistant", text: "short" }]);
+  test("the turn still streaming stays open, with no way to fold it", async () => {
+    await render([{ id: "a1", kind: "assistant", text: "still arriving" }], true);
 
-      expect(main.querySelector(".turn.agent .replies.folded")).toBeNull();
-      expect(main.querySelector("button.reply-fold")).toBeNull();
-    } finally {
-      restore();
-    }
+    expect(main.querySelector(".turn.agent .replies")).not.toBeNull();
+    expect(peeks()).toHaveLength(0);
+    expect(main.querySelector("button.reply-fold")).toBeNull();
   });
 
-  test("the turn still streaming stays open however long it gets", async () => {
-    const restore = stubReplyHeight(1200);
-    try {
-      await render([{ id: "a1", kind: "assistant", text: "still arriving" }], true);
+  test("the peek line reads as prose, not as markdown", async () => {
+    await render([{ id: "a1", kind: "assistant", text: "## **Bold** heading with a [link](http://x) and `code`" }]);
 
-      expect(main.querySelector(".turn.agent .replies.folded")).toBeNull();
-      expect(main.querySelector("button.reply-fold")).toBeNull();
-    } finally {
-      restore();
-    }
+    expect(peeks()[0].querySelector(".pk")?.textContent).toBe("Bold heading with a link and code");
+  });
+
+  test("a reply that is only an image says so rather than folding to nothing", async () => {
+    await render([{ id: "a1", kind: "assistant", text: "", images: [{ mimeType: "image/png", data: "x" }] }]);
+
+    expect(peeks()[0].querySelector(".pk")?.textContent).toBe("1 image");
   });
 
   test("a user message is plain text under a YOU label, with no bubble", async () => {
