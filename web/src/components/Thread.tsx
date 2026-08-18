@@ -21,10 +21,6 @@ const INITIAL_VISIBLE = 10;
 const REVEAL_STEP = 20;
 const NEAR_TOP_PX = 300;
 
-// How much of a finished reply stays on the page before it folds — roughly a
-// dozen lines at the reading size, enough to tell what the answer was about.
-const REPLY_FOLD_PX = 320;
-
 // Inline images attached to a user or agent message. Click opens the full-size
 // image in a new tab (handy for screenshots/mockups).
 function MessageImages({ images }: { images: MessageImage[] }) {
@@ -89,28 +85,18 @@ function groupTurns(items: ThreadItem[]): Row[] {
   return rows;
 }
 
-// One agent turn: a mono label line, then the reply as plain text on the page.
-// No frame — a message is not a machine artefact (§1.3). Thinking folds into the
-// label rather than standing as its own strip.
+// One agent turn: a mono label line, then the reply — folded to a single peek
+// line unless it is the open one. A thread reads as the questions you asked;
+// the answer you want is one tap away, and only one is ever unrolled (§1.3
+// still holds — no frame either way).
 function AgentTurn({ agentName, thoughts, replies, live, expanded, onToggle }: {
   agentName: string; thoughts: Thought[]; replies: Reply[]; live: boolean;
   expanded: boolean; onToggle: () => void;
 }) {
   const copyable = replies.map((r) => r.text).filter(Boolean).join("\n\n");
-  const repliesRef = useRef<HTMLDivElement>(null);
-  const [tall, setTall] = useState(false);
-  // A finished reply taller than the fold is cut down to it, so one wall of text
-  // cannot push the rest of the thread off screen. A streaming one is left alone
-  // — you have to be able to watch the output arrive — and is measured once it
-  // stops. Measuring on the reply text (not a ResizeObserver) keeps this to one
-  // pass; a late-loading image can leave a reply unfolded, which is harmless.
-  const measured = replies.map((r) => r.text?.length ?? 0).join(",");
-  useLayoutEffect(() => {
-    const el = repliesRef.current;
-    if (!el || live) { setTall(false); return; }
-    setTall(el.scrollHeight > REPLY_FOLD_PX);
-  }, [live, measured]);
-  const folded = tall && !expanded;
+  // A streaming turn is never folded — you have to be able to watch the output
+  // arrive — and neither is one with nothing to fold yet (a thought on its own).
+  const open = expanded || live || replies.length === 0;
   return (
     <div className="turn agent">
       <div className="lbl">
@@ -123,26 +109,56 @@ function AgentTurn({ agentName, thoughts, replies, live, expanded, onToggle }: {
         )}
         <span className="sp" />
       </div>
-      <div className={folded ? "replies folded" : "replies"} ref={repliesRef}>
-        {replies.map((r) => (
-          <div className="body" key={r.id}>
-            {r.images && r.images.length > 0 && <MessageImages images={r.images} />}
-            {r.text && <Markdown text={r.text} />}
+      {open ? (
+        <>
+          <div className="replies">
+            {replies.map((r) => (
+              <div className="body" key={r.id}>
+                {r.images && r.images.length > 0 && <MessageImages images={r.images} />}
+                {r.text && <Markdown text={r.text} />}
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-      {tall && (
-        <button
-          type="button" className="msg-copy reply-fold" aria-expanded={expanded}
-          onClick={onToggle}
-        >
+          {!live && replies.length > 0 && (
+            <button type="button" className="msg-copy reply-fold" aria-expanded onClick={onToggle}>
+              <IconChevronDown />
+              <span className="msg-copy-label">Collapse reply</span>
+            </button>
+          )}
+          {copyable && <CopyButton text={copyable} label="Copy reply" />}
+        </>
+      ) : (
+        <button type="button" className="reply-peek" aria-expanded={false} onClick={onToggle}>
           <IconChevronDown />
-          <span className="msg-copy-label">{expanded ? "Collapse reply" : "Expand reply"}</span>
+          <span className="pk">{peek(replies)}</span>
+          <span className="n">{lineCount(replies)} lines</span>
         </button>
       )}
-      {copyable && <CopyButton text={copyable} label="Copy reply" />}
     </div>
   );
+}
+
+// The one line a folded reply shows: its opening line as prose. The markdown
+// that renders as weight or a link target is punctuation noise once it is a
+// single grey line, so the marks come out and the text stays. Truncation is
+// CSS's job.
+function peek(replies: Reply[]): string {
+  for (const r of replies) {
+    const line = (r.text ?? "").split("\n")
+      .map((l) => l
+        .replace(/^[#>\-*\s]+/, "")
+        .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+        .replace(/[*_`]/g, "")
+        .trim())
+      .find(Boolean);
+    if (line) return line;
+  }
+  const images = replies.reduce((n, r) => n + (r.images?.length ?? 0), 0);
+  return images ? `${images} image${images === 1 ? "" : "s"}` : "(empty reply)";
+}
+
+function lineCount(replies: Reply[]): number {
+  return replies.reduce((n, r) => n + (r.text ? r.text.trim().split("\n").length : 0), 0);
 }
 
 // Pin the scroll container to the bottom *instantly* — bypassing the container's
