@@ -92,10 +92,12 @@ function groupTurns(items: ThreadItem[]): Row[] {
 // One agent turn: a mono label line, then the reply as plain text on the page.
 // No frame — a message is not a machine artefact (§1.3). Thinking folds into the
 // label rather than standing as its own strip.
-function AgentTurn({ agentName, thoughts, replies, live }: { agentName: string; thoughts: Thought[]; replies: Reply[]; live: boolean }) {
+function AgentTurn({ agentName, thoughts, replies, live, expanded, onToggle }: {
+  agentName: string; thoughts: Thought[]; replies: Reply[]; live: boolean;
+  expanded: boolean; onToggle: () => void;
+}) {
   const copyable = replies.map((r) => r.text).filter(Boolean).join("\n\n");
   const repliesRef = useRef<HTMLDivElement>(null);
-  const [expanded, setExpanded] = useState(false);
   const [tall, setTall] = useState(false);
   // A finished reply taller than the fold is cut down to it, so one wall of text
   // cannot push the rest of the thread off screen. A streaming one is left alone
@@ -132,7 +134,7 @@ function AgentTurn({ agentName, thoughts, replies, live }: { agentName: string; 
       {tall && (
         <button
           type="button" className="msg-copy reply-fold" aria-expanded={expanded}
-          onClick={() => setExpanded((v) => !v)}
+          onClick={onToggle}
         >
           <IconChevronDown />
           <span className="msg-copy-label">{expanded ? "Collapse reply" : "Expand reply"}</span>
@@ -324,6 +326,11 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
   const structuralSig = items
     .map((it) => (it.kind === "tool" ? `t${it.status}.${it.content.length}` : it.kind))
     .join("|");
+  // Which reply is open. One at a time — opening a second folds the first — and
+  // none by default, so a thread reads as its prompts until you choose an answer
+  // to sit with. Resets with the session.
+  const [openTurnId, setOpenTurnId] = useState<string | null>(null);
+  useEffect(() => { setOpenTurnId(null); }, [sid]);
   const working = !!session?.working;
   // The turn currently being streamed into: the last one in the window, while
   // the session is working. It is the one turn that must not fold.
@@ -366,7 +373,14 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
         </div>
       )}
       {rows.map((row) => {
-        if (row.row === "turn") return <AgentTurn key={row.id} agentName={agentLabel} thoughts={row.thoughts} replies={row.replies} live={row.id === liveTurnId} />;
+        if (row.row === "turn") return (
+          <AgentTurn
+            key={row.id} agentName={agentLabel} thoughts={row.thoughts} replies={row.replies}
+            live={row.id === liveTurnId}
+            expanded={row.id === openTurnId}
+            onToggle={() => setOpenTurnId((id) => (id === row.id ? null : row.id))}
+          />
+        );
         const it = row.item;
         switch (it.kind) {
           case "user": return (
