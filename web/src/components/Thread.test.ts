@@ -408,15 +408,53 @@ describe("Thread turn grouping", () => {
     });
   }
 
+  // Re-render the same mounted Thread with more items, the way a streamed reply
+  // lands — component state (which turn is open) survives.
+  async function rerender(items: Session["items"], working = false) {
+    const { Thread } = await import("./Thread.tsx");
+    await act(async () => {
+      root?.render(React.createElement(Thread, { session: { ...session(items), working }, agentReady: true }));
+    });
+  }
+
   const peeks = () => Array.from(main.querySelectorAll("button.reply-peek")) as HTMLButtonElement[];
+  const openReplies = () => main.querySelectorAll(".turn.agent .replies");
 
-  test("a finished reply folds to one peek line, however short it is", async () => {
-    await render([{ id: "a1", kind: "assistant", text: "short answer\nand a second line" }]);
+  test("the newest turn is open and every turn before it is a peek line", async () => {
+    await render([
+      { id: "a1", kind: "assistant", text: "older answer\nand a second line" },
+      { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+      { id: "a2", kind: "assistant", text: "newest answer" },
+    ]);
 
-    expect(main.querySelector(".turn.agent .replies")).toBeNull();
+    expect(openReplies()).toHaveLength(1);
+    expect(main.textContent).toContain("newest answer");
     expect(peeks()).toHaveLength(1);
-    expect(peeks()[0].querySelector(".pk")?.textContent).toBe("short answer");
+    expect(peeks()[0].querySelector(".pk")?.textContent).toBe("older answer");
     expect(peeks()[0].querySelector(".n")?.textContent).toBe("2 lines");
+  });
+
+  test("a new answer takes focus back from an older turn you opened", async () => {
+    await render([
+      { id: "a1", kind: "assistant", text: "older answer" },
+      { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+      { id: "a2", kind: "assistant", text: "newest answer" },
+    ]);
+
+    // Pin the older one...
+    await act(async () => { peeks()[0].click(); });
+    expect(main.querySelector(".turn.agent .replies")?.textContent).toContain("older answer");
+
+    // ...then a reply arrives: the newest turn takes it back.
+    await rerender([
+      { id: "a1", kind: "assistant", text: "older answer" },
+      { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+      { id: "a2", kind: "assistant", text: "newest answer" },
+      { id: "x2", kind: "tool", toolCallId: "c2", title: "src/b.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+      { id: "a3", kind: "assistant", text: "newer still" },
+    ]);
+    expect(openReplies()).toHaveLength(1);
+    expect(main.querySelector(".turn.agent .replies")?.textContent).toContain("newer still");
   });
 
   test("opening one reply folds whichever was open before it", async () => {
@@ -426,22 +464,17 @@ describe("Thread turn grouping", () => {
       { id: "a2", kind: "assistant", text: "second answer" },
     ]);
 
-    expect(peeks()).toHaveLength(2);
+    // The newest is open, the older one is a peek.
+    expect(peeks()).toHaveLength(1);
 
     await act(async () => { peeks()[0].click(); });
-    expect(main.querySelectorAll(".turn.agent .replies")).toHaveLength(1);
-    expect(main.textContent).toContain("first answer");
-    expect(peeks()).toHaveLength(1); // the other one is still folded
+    expect(openReplies()).toHaveLength(1);
+    expect(main.querySelector(".turn.agent .replies")?.textContent).toContain("first answer");
 
-    // Opening the second closes the first.
-    await act(async () => { peeks()[0].click(); });
-    expect(main.querySelectorAll(".turn.agent .replies")).toHaveLength(1);
-    expect(main.textContent).toContain("second answer");
-
-    // The open turn's own toggle folds it back.
+    // The open turn's own toggle folds it — and now nothing is open.
     const collapse = main.querySelector("button.reply-fold") as HTMLButtonElement;
     await act(async () => { collapse.click(); });
-    expect(main.querySelectorAll(".turn.agent .replies")).toHaveLength(0);
+    expect(openReplies()).toHaveLength(0);
     expect(peeks()).toHaveLength(2);
   });
 
@@ -454,13 +487,21 @@ describe("Thread turn grouping", () => {
   });
 
   test("the peek line reads as prose, not as markdown", async () => {
-    await render([{ id: "a1", kind: "assistant", text: "## **Bold** heading with a [link](http://x) and `code`" }]);
+    await render([
+      { id: "a1", kind: "assistant", text: "## **Bold** heading with a [link](http://x) and `code`" },
+      { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+      { id: "a2", kind: "assistant", text: "newest" },
+    ]);
 
     expect(peeks()[0].querySelector(".pk")?.textContent).toBe("Bold heading with a link and code");
   });
 
   test("a reply that is only an image says so rather than folding to nothing", async () => {
-    await render([{ id: "a1", kind: "assistant", text: "", images: [{ mimeType: "image/png", data: "x" }] }]);
+    await render([
+      { id: "a1", kind: "assistant", text: "", images: [{ mimeType: "image/png", data: "x" }] },
+      { id: "x1", kind: "tool", toolCallId: "c1", title: "src/a.ts", toolKind: "read", status: "completed", locations: [], content: [] },
+      { id: "a2", kind: "assistant", text: "newest" },
+    ]);
 
     expect(peeks()[0].querySelector(".pk")?.textContent).toBe("1 image");
   });
