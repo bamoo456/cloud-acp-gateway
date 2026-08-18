@@ -212,6 +212,17 @@ describe("global styles", () => {
     expect(cssRule(".turn.user::after")).toMatch(/border-top:\s*1px solid var\(--border\)/);
   });
 
+  test("a folded reply is cut at the same height Thread.tsx measures", () => {
+    const rule = cssRule(".turn.agent .replies.folded");
+
+    expect(rule).toMatch(/max-height:\s*320px/);
+    expect(rule).toMatch(/overflow:\s*hidden/);
+    // The fade is a mask, so it needs no colour and holds in both themes.
+    expect(rule).toMatch(/mask-image:\s*linear-gradient/);
+    expect(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "components/Thread.tsx"), "utf8"))
+      .toMatch(/REPLY_FOLD_PX = 320/);
+  });
+
   test("a finished tool call is silent — no badge, no colour", () => {
     expect(cssRule(".tool .tstatus.completed")).toMatch(/display\s*:\s*none/);
     // Amber is "needs you"; a running tool is ink.

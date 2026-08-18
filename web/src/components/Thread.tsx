@@ -21,6 +21,10 @@ const INITIAL_VISIBLE = 10;
 const REVEAL_STEP = 20;
 const NEAR_TOP_PX = 300;
 
+// How much of a finished reply stays on the page before it folds — roughly a
+// dozen lines at the reading size, enough to tell what the answer was about.
+const REPLY_FOLD_PX = 320;
+
 // Inline images attached to a user or agent message. Click opens the full-size
 // image in a new tab (handy for screenshots/mockups).
 function MessageImages({ images }: { images: MessageImage[] }) {
@@ -88,8 +92,23 @@ function groupTurns(items: ThreadItem[]): Row[] {
 // One agent turn: a mono label line, then the reply as plain text on the page.
 // No frame — a message is not a machine artefact (§1.3). Thinking folds into the
 // label rather than standing as its own strip.
-function AgentTurn({ agentName, thoughts, replies }: { agentName: string; thoughts: Thought[]; replies: Reply[] }) {
+function AgentTurn({ agentName, thoughts, replies, live }: { agentName: string; thoughts: Thought[]; replies: Reply[]; live: boolean }) {
   const copyable = replies.map((r) => r.text).filter(Boolean).join("\n\n");
+  const repliesRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [tall, setTall] = useState(false);
+  // A finished reply taller than the fold is cut down to it, so one wall of text
+  // cannot push the rest of the thread off screen. A streaming one is left alone
+  // — you have to be able to watch the output arrive — and is measured once it
+  // stops. Measuring on the reply text (not a ResizeObserver) keeps this to one
+  // pass; a late-loading image can leave a reply unfolded, which is harmless.
+  const measured = replies.map((r) => r.text?.length ?? 0).join(",");
+  useLayoutEffect(() => {
+    const el = repliesRef.current;
+    if (!el || live) { setTall(false); return; }
+    setTall(el.scrollHeight > REPLY_FOLD_PX);
+  }, [live, measured]);
+  const folded = tall && !expanded;
   return (
     <div className="turn agent">
       <div className="lbl">
@@ -102,12 +121,23 @@ function AgentTurn({ agentName, thoughts, replies }: { agentName: string; though
         )}
         <span className="sp" />
       </div>
-      {replies.map((r) => (
-        <div className="body" key={r.id}>
-          {r.images && r.images.length > 0 && <MessageImages images={r.images} />}
-          {r.text && <Markdown text={r.text} />}
-        </div>
-      ))}
+      <div className={folded ? "replies folded" : "replies"} ref={repliesRef}>
+        {replies.map((r) => (
+          <div className="body" key={r.id}>
+            {r.images && r.images.length > 0 && <MessageImages images={r.images} />}
+            {r.text && <Markdown text={r.text} />}
+          </div>
+        ))}
+      </div>
+      {tall && (
+        <button
+          type="button" className="msg-copy reply-fold" aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <IconChevronDown />
+          <span className="msg-copy-label">{expanded ? "Collapse reply" : "Expand reply"}</span>
+        </button>
+      )}
       {copyable && <CopyButton text={copyable} label="Copy reply" />}
     </div>
   );
@@ -295,6 +325,9 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
     .map((it) => (it.kind === "tool" ? `t${it.status}.${it.content.length}` : it.kind))
     .join("|");
   const working = !!session?.working;
+  // The turn currently being streamed into: the last one in the window, while
+  // the session is working. It is the one turn that must not fold.
+  const liveTurnId = working ? rows.reduce<string | null>((last, r) => (r.row === "turn" ? r.id : last), null) : null;
   useEffect(() => {
     const m = ref.current?.closest("main");
     if (m) forceRepaint(m as HTMLElement);
@@ -333,7 +366,7 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
         </div>
       )}
       {rows.map((row) => {
-        if (row.row === "turn") return <AgentTurn key={row.id} agentName={agentLabel} thoughts={row.thoughts} replies={row.replies} />;
+        if (row.row === "turn") return <AgentTurn key={row.id} agentName={agentLabel} thoughts={row.thoughts} replies={row.replies} live={row.id === liveTurnId} />;
         const it = row.item;
         switch (it.kind) {
           case "user": return (
