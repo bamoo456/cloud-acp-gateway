@@ -400,12 +400,24 @@ describe("Thread turn grouping", () => {
     vi.unstubAllGlobals();
   });
 
-  async function render(items: Session["items"]) {
+  async function render(items: Session["items"], working = false) {
     const { Thread } = await import("./Thread.tsx");
     await act(async () => {
       root = createRoot(main);
-      root.render(React.createElement(Thread, { session: session(items), agentReady: true }));
+      root.render(React.createElement(Thread, { session: { ...session(items), working }, agentReady: true }));
     });
+  }
+
+  // jsdom lays nothing out, so the fold's only input — the replies' scrollHeight —
+  // has to be dictated.
+  function stubReplyHeight(px: number) {
+    const proto = HTMLDivElement.prototype;
+    const had = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+    Object.defineProperty(proto, "scrollHeight", { configurable: true, get: () => px });
+    return () => {
+      if (had) Object.defineProperty(proto, "scrollHeight", had);
+      else delete (proto as unknown as Record<string, unknown>).scrollHeight;
+    };
   }
 
   test("a thought and the reply that follows it share one label line", async () => {
@@ -446,6 +458,47 @@ describe("Thread turn grouping", () => {
 
     expect(main.querySelectorAll(".turn.agent")).toHaveLength(2);
     expect(main.querySelectorAll("details.tool")).toHaveLength(1);
+  });
+
+  test("a long finished reply folds, and the toggle opens it back up", async () => {
+    const restore = stubReplyHeight(1200);
+    try {
+      await render([{ id: "a1", kind: "assistant", text: "a very long answer" }]);
+
+      expect(main.querySelector(".turn.agent .replies.folded")).not.toBeNull();
+      const btn = main.querySelector("button.reply-fold") as HTMLButtonElement | null;
+      expect(btn).not.toBeNull();
+
+      await act(async () => { btn!.click(); });
+      expect(main.querySelector(".turn.agent .replies.folded")).toBeNull();
+      expect(main.querySelector(".turn.agent .replies")).not.toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  test("a short reply is never folded", async () => {
+    const restore = stubReplyHeight(80);
+    try {
+      await render([{ id: "a1", kind: "assistant", text: "short" }]);
+
+      expect(main.querySelector(".turn.agent .replies.folded")).toBeNull();
+      expect(main.querySelector("button.reply-fold")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  test("the turn still streaming stays open however long it gets", async () => {
+    const restore = stubReplyHeight(1200);
+    try {
+      await render([{ id: "a1", kind: "assistant", text: "still arriving" }], true);
+
+      expect(main.querySelector(".turn.agent .replies.folded")).toBeNull();
+      expect(main.querySelector("button.reply-fold")).toBeNull();
+    } finally {
+      restore();
+    }
   });
 
   test("a user message is plain text under a YOU label, with no bubble", async () => {
