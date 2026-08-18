@@ -92,13 +92,13 @@ describe("EngineDock", () => {
     vi.unstubAllGlobals();
   });
 
-  async function mount(configOptions: ConfigOption[], working = false) {
+  async function mount(configOptions: ConfigOption[], working = false, viewOnly = false) {
     const { EngineDock } = await import("./EngineDock.tsx");
     const { useStore } = await import("../store/store.ts");
     const s0 = useStore.getState();
     useStore.setState({
       agentName: "claude", activeId: "S", configOptions,
-      sessions: { S: { ...s0.sessions.S, id: "S", title: "t", agentName: "claude", working } as never },
+      sessions: { S: { ...s0.sessions.S, id: "S", title: "t", agentName: "claude", working, viewOnly } as never },
     });
     await act(async () => {
       root = createRoot(container);
@@ -132,6 +132,28 @@ describe("EngineDock", () => {
 
     expect(container.querySelector(".mchip .am")).toBeNull();
     expect(container.querySelector(".mchip .wm")?.textContent).toBe("claude");
+  });
+
+  test("a saved conversation the agent hasn't resumed reads out no engine at all", async () => {
+    // configOptions/models/modes are store-global and still describe the last
+    // live session: attributing them to this one labels it with another
+    // session's model and offers switches the agent rejects ("Session not
+    // found") until the first reply resumes it.
+    const MODE: ConfigOption = {
+      id: "mode", name: "Mode", category: "", type: "select",
+      currentValue: "auto", options: [{ value: "auto", name: "Auto" }],
+    };
+    const useStore = await mount([MODEL, EFFORT, MODE], false, true);
+    await act(async () => { useStore.setState({ models: [{ modelId: "m1", name: "Legacy Model" }] }); });
+
+    expect(container.querySelector(".mchip-mode")).toBeNull();
+    expect(container.querySelector(".mchip .am")).toBeNull();
+    expect(container.querySelector(".mchip .wm")?.textContent).toBe("claude");
+    expect(container.querySelector(".mchip .eff")).toBeNull();
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".mchip")!.click(); });
+    expect(container.querySelector(".engine-menu")!.textContent).not.toContain("Legacy Model");
+    expect(container.querySelectorAll(".engine-menu .arow")).toHaveLength(0);
   });
 
   test("a turn in flight adds the spinner and the clock", async () => {
