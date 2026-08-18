@@ -200,12 +200,23 @@ describe("global styles", () => {
   test("your message reads as a tinted block, not as the reply", () => {
     const rule = cssRule(".turn.user");
 
-    // One mix that works in both themes: 8% of the text colour over the page.
-    expect(rule).toMatch(/background:\s*color-mix\(in srgb,\s*var\(--text\) 8%,\s*var\(--bg\)\)/);
-    expect(rule).toMatch(/border-radius:\s*10px/);
-    // No frame — a border is what marks a machine artefact (§1.3).
-    expect(rule).not.toMatch(/border\s*:/);
-    expect(cssRule(".turn.user .body")).toMatch(/color:\s*var\(--muted\)/);
+    // Tint, mix % and radius are tokens, not literals — dark redefines all three below.
+    expect(rule).toMatch(/background:\s*color-mix\(in srgb,\s*var\(--prompt-tint\)\s*var\(--prompt-tint-mix\),\s*var\(--bg\)\)/);
+    expect(rule).toMatch(/border-radius:\s*var\(--prompt-radius\)/);
+    expect(rule).toMatch(/border:\s*1px solid var\(--border\)/);
+    expect(cssRule(":root")).toMatch(/--prompt-tint:\s*#5b8def/);
+    expect(cssRule(":root")).toMatch(/--prompt-tint-mix:\s*3%/);
+    expect(cssRule(":root")).toMatch(/--prompt-radius:\s*16px/);
+    expect(cssRule(".turn.user .body")).toMatch(/color:\s*var\(--text\)/);
+  });
+
+  test("dark mode compensates with a much higher prompt-tint mix", () => {
+    // The same % that reads against the light --bg is nearly invisible against
+    // the near-black dark --bg, so dark gets its own tint, mix and radius.
+    const darkRoot = styles.match(/@media \(prefers-color-scheme: dark\)\s*\{\s*:root\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(darkRoot).toMatch(/--prompt-tint:\s*#4a6fa5/);
+    expect(darkRoot).toMatch(/--prompt-tint-mix:\s*27%/);
+    expect(darkRoot).toMatch(/--prompt-radius:\s*10px/);
   });
 
   test("a hairline separates the prompt from the reply", () => {
