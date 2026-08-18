@@ -127,6 +127,48 @@ describe("ToolCall file links", () => {
     expect(container.querySelector(".diff .path")?.textContent).toBe("https://example.com/b.ts");
   });
 
+  test("a finished call is a closed one-line record; a running or failed one is open", async () => {
+    const out = [{ type: "content" as const, content: { type: "text" as const, text: "lots of output" } }];
+
+    await render(tool({ status: "completed", content: out }));
+    expect(container.querySelector("details.tool")?.hasAttribute("open")).toBe(false);
+
+    await act(async () => root?.unmount());
+    root = null;
+    await render(tool({ status: "in_progress", content: out }));
+    expect(container.querySelector("details.tool")?.hasAttribute("open")).toBe(true);
+
+    await act(async () => root?.unmount());
+    root = null;
+    await render(tool({ status: "failed", content: out }));
+    expect(container.querySelector("details.tool")?.hasAttribute("open")).toBe(true);
+  });
+
+  test("a card you opened by hand stays open once the call completes", async () => {
+    const out = [{ type: "content" as const, content: { type: "text" as const, text: "output" } }];
+    const { ToolCall } = await import("./ToolCall.tsx");
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(ToolCall, { item: tool({ status: "completed", content: out }) }));
+    });
+    const details = container.querySelector("details.tool") as HTMLDetailsElement;
+    expect(details.hasAttribute("open")).toBe(false);
+
+    // Open it the way a tap does: <details> flips itself, then fires toggle.
+    await act(async () => {
+      details.open = true;
+      details.dispatchEvent(new Event("toggle"));
+    });
+    expect(container.querySelector("details.tool")?.hasAttribute("open")).toBe(true);
+
+    // The same call re-rendered (status churn, streamed output) must not shut it.
+    await act(async () => {
+      root?.render(React.createElement(ToolCall, { item: tool({ status: "completed", content: out }) }));
+    });
+    expect(container.querySelector("details.tool")?.hasAttribute("open")).toBe(true);
+  });
+
   test("a remote URI stays plain text — there is no local file to open", async () => {
     await render(tool({ locations: ["https://example.com/a.ts"] }));
     expect(container.querySelector(".fcard")).toBeNull();
