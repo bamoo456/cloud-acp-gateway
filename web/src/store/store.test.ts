@@ -2338,6 +2338,43 @@ describe("store notification routing", () => {
     expect(st.recentSessions.map((r) => r.sessionId)).toEqual(["home-session"]);
     expect(st.tip).toContain("still running");
   });
+  test("a saved conversation's note says what it last ran on", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "earlier work" }] }],
+        total: 1, start: 0, controls: { model: "opus[1m]", effort: "xhigh", mode: "auto" },
+      }),
+    }));
+
+    await useStore.getState().openHistorySession({ sessionId: "old-session", title: "Old" });
+    await flush();
+
+    // The engine dock reads out nothing until the reply resumes the session, so
+    // this note is the only place the conversation's own model/effort can appear.
+    const note = useStore.getState().sessions["old-session"].items.at(-1);
+    expect(note?.kind === "note" && note.text)
+      .toBe("· saved conversation — last ran on opus[1m] · xhigh — reply to resume the agent");
+  });
+
+  test("a saved conversation with nothing recorded keeps the plain note", async () => {
+    const { useStore } = await bootstrapClaude();
+
+    setHistoryFetch(() => Promise.resolve({
+      json: () => Promise.resolve({
+        messages: [{ role: "user", blocks: [{ type: "text", text: "earlier work" }] }],
+        total: 1, start: 0,
+      }),
+    }));
+
+    await useStore.getState().openHistorySession({ sessionId: "old-session", title: "Old" });
+    await flush();
+
+    const note = useStore.getState().sessions["old-session"].items.at(-1);
+    expect(note?.kind === "note" && note.text).toBe("· saved conversation — reply to resume the agent");
+  });
+
   test("opening a saved conversation loads 50 messages and remembers where they start", async () => {
     const { useStore } = await bootstrapClaude();
 
