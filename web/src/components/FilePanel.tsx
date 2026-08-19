@@ -910,7 +910,7 @@ function FileView({ cwd, target, canAttach, onAttach }: {
                 </>
               : <div className="wf-md-preview">
                   {file.truncated && <div className="wf-note">The file was cut short, so this preview may be incomplete.</div>}
-                  <Markdown text={file.text ?? ""} />
+                  <Markdown text={file.text ?? ""} diagrams />
                 </div>
         )}
       </div>
