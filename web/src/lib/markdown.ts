@@ -24,6 +24,20 @@ const md = new MarkdownIt({
   },
 });
 
-export function renderMarkdown(text: string): string {
-  return md.render(text || "");
+// Images get their src rewritten before the HTML is built, not after it is in
+// the DOM: an <img> inserted with the document's own relative path starts
+// loading it immediately, so a post-pass would cost a 404 and a flash of a
+// broken image on every picture in the file. `env` is markdown-it's own
+// per-render channel, which is what makes this safe on a shared renderer.
+interface MarkdownEnv { resolveSrc?: (src: string) => string }
+
+const renderImage = md.renderer.rules.image!;
+md.renderer.rules.image = (tokens, idx, options, env: MarkdownEnv, self) => {
+  const src = tokens[idx].attrGet("src");
+  if (src && env?.resolveSrc) tokens[idx].attrSet("src", env.resolveSrc(src));
+  return renderImage(tokens, idx, options, env, self);
+};
+
+export function renderMarkdown(text: string, env?: MarkdownEnv): string {
+  return md.render(text || "", env ?? {});
 }
