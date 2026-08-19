@@ -23,6 +23,10 @@ export interface FileMenuTarget {
   abs: string;
   name: string;   // what the menu calls the file
   dir: string;    // the folder line under it, may be empty
+  // The folder `dir` reads against, and the one the gateway must resolve the
+  // file under — not always the conversation's own, since the Project tab can
+  // browse another checkout. Unset means the conversation's folder.
+  base?: string;
   isDir: boolean;
   x: number;
   y: number;

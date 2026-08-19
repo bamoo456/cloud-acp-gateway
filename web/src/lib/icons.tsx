@@ -154,11 +154,14 @@ export function IconAddToChat() {
 // The file-preview panel's header toggle: the standard VS Code / macOS
 // "toggle right panel" glyph — a frame with a divider toward the right,
 // matching that this panel opens on the right edge of the screen.
-export function IconPanel() {
+// A pane beside a pane. `left` puts the divider on the left, for the file
+// panel's own list column — the same glyph would otherwise point at the wrong
+// side of the split it toggles.
+export function IconPanel({ left = false }: { left?: boolean }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M15 4v16" />
+      <path d={left ? "M9 4v16" : "M15 4v16"} />
     </svg>
   );
 }

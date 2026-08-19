@@ -4,6 +4,7 @@ import { fileKind } from "../lib/fileKind.ts";
 import { formatBytes } from "../lib/format.ts";
 import { IconFolder, IconChevronDown, IconChevronRight, fileIcon } from "../lib/icons.tsx";
 import { useRowMenu } from "./FileMenu.tsx";
+import { useIsOpenFile } from "../store/store.ts";
 
 // Browsing the project, rather than only the files this conversation happened
 // to name. Outputs and Context are built from the thread, so they are blind to
@@ -31,9 +32,12 @@ function Row({ entry, depth, open, onClick, onMenu }: {
 }) {
   const kind = fileKind(entry.name);
   const menu = useRowMenu(onMenu);
+  // Marks the row the viewer is showing — the point of keeping the tree on
+  // screen beside it.
+  const showing = useIsOpenFile(entry.abs);
   return (
     <button
-      className={"wf-row wf-tree-row" + (entry.ignored ? " ignored" : "")}
+      className={"wf-row wf-tree-row" + (entry.ignored ? " ignored" : "") + (showing ? " on" : "")}
       style={{ paddingLeft: 10 + depth * INDENT_PX }}
       onClick={onClick}
       {...menu}
@@ -110,8 +114,9 @@ function ResultRow({ file, onOpen, onMenu }: {
   const name = file.path.slice(file.path.lastIndexOf("/") + 1);
   const dir = file.path.slice(0, file.path.length - name.length - 1);
   const menu = useRowMenu(onMenu);
+  const showing = useIsOpenFile(file.abs);
   return (
-    <button className="wf-row" onClick={onOpen} {...menu} title={file.path}>
+    <button className={"wf-row" + (showing ? " on" : "")} onClick={onOpen} {...menu} title={file.path}>
       <span className="wf-mark wf-kind">{fileIcon(fileKind(name).icon)}</span>
       <span className="wf-name">
         <span className="wf-nm">{name}</span>
@@ -194,8 +199,9 @@ function HitRow({ file, onOpen, onMenu }: {
   const name = file.path.slice(file.path.lastIndexOf("/") + 1);
   const dir = file.path.slice(0, file.path.length - name.length - 1);
   const menu = useRowMenu(onMenu);
+  const showing = useIsOpenFile(file.abs);
   return (
-    <button className="wf-row wf-hit" onClick={onOpen} {...menu} title={file.path}>
+    <button className={"wf-row wf-hit" + (showing ? " on" : "")} onClick={onOpen} {...menu} title={file.path}>
       <span className="wf-hit-head">
         <span className="wf-mark wf-kind">{fileIcon(fileKind(name).icon)}</span>
         <span className="wf-name">
