@@ -39,10 +39,25 @@ const makeId = () => Math.random().toString(36).slice(2, 10);
 const anchorKey = (a: { side: string; line: number }) => a.side + ":" + a.line;
 const total = (counts: Record<string, number>) => Object.values(counts).reduce((n, c) => n + c, 0);
 
-export function ReviewPanel({ cwd, onCount }: { cwd: string; onCount: (n: number) => void }) {
+// `split` is the panel saying there is room for two panes, so an opened file
+// goes BESIDE this list instead of over it — the same layout Session and
+// Project get, and for the same reason: a review is read file by file, and
+// going Back for every one of them is the walk this saves.
+// `onDetail` is how the panel learns a file is open here, which is what widens
+// it. Review's open file is this component's own state, and the panel cannot
+// see it any other way.
+export function ReviewPanel({ cwd, onCount, split, onDetail }: {
+  cwd: string; onCount: (n: number) => void;
+  split?: boolean; onDetail?: (open: boolean) => void;
+}) {
   const sendPrompt = useStore((s) => s.sendPrompt);
   const agentReady = useStore((s) => s.agentReady);
   const closeFiles = useStore((s) => s.closeFiles);
+  // The panel has one viewer pane, and the generic preview (a file clicked in
+  // the thread, or in another mode) shares it with this one. Whichever was
+  // asked for last wins, rather than both claiming the pane.
+  const preview = useStore((s) => s.filePreview);
+  const clearFilePreview = useStore((s) => s.clearFilePreview);
   // sendPrompt returns without sending while the active session has a turn in
   // flight. Nothing rejects, so a Send pressed mid-turn would resolve, clear the
   // draft, and lose a whole review to a no-op. Disable it instead.
@@ -58,6 +73,16 @@ export function ReviewPanel({ cwd, onCount }: { cwd: string; onCount: (n: number
   const [commit, setCommit] = useState<CommitEntry | null>(null);
   const [changes, setChanges] = useState<ChangesResult | null>(null);
   const [openFile, setOpenFile] = useState<ChangedFile | null>(null);
+  // Opening a review file is what the panel widens for; unmounting (a mode
+  // switch, a folder change) gives that width straight back.
+  useEffect(() => {
+    onDetail?.(!!openFile);
+    return () => onDetail?.(false);
+  }, [openFile, onDetail]);
+  // The other half of "one viewer at a time": a file opened from the thread
+  // takes the pane, so this one lets go of it.
+  useEffect(() => { if (preview) setOpenFile(null); }, [preview]);
+  const openReviewFile = (f: ChangedFile) => { clearFilePreview(); setOpenFile(f); };
   const [showDraft, setShowDraft] = useState(false);
   const [comments, setComments] = useState<ReviewComment[]>([]);
   // Every scope's comment count, not just the open one's — this is what the tab
@@ -189,22 +214,25 @@ export function ReviewPanel({ cwd, onCount }: { cwd: string; onCount: (n: number
   const files = changes?.files ?? [];
   const canSend = agentReady && !sending && !activeBusy;
 
-  // ---- the file viewer takes over the panel ----
-  if (openFile) {
-    return (
-      <FileReview cwd={cwd} spec={spec} file={openFile} comments={byLine}
-        onBack={() => setOpenFile(null)}
-        onAdd={(anchor, body) => commitComments([...comments, {
-          id: makeId(), path: openFile.path, side: anchor.side, line: anchor.line,
-          code: anchor.code, body,
-        }])}
-        onDelete={(id) => commitComments(comments.filter((c) => c.id !== id))} />
-    );
-  }
+  // ---- the open file ----
+  // Beside the list when the panel has room for both, over it when it hasn't —
+  // and in the narrow case that is the whole of this component, exactly as
+  // before. FileReview's own bar carries the file's name and the way back, so
+  // the pane needs no header of its own.
+  const detail = openFile && (
+    <FileReview cwd={cwd} spec={spec} file={openFile} comments={byLine}
+      onBack={() => setOpenFile(null)}
+      onAdd={(anchor, body) => commitComments([...comments, {
+        id: makeId(), path: openFile.path, side: anchor.side, line: anchor.line,
+        code: anchor.code, body,
+      }])}
+      onDelete={(id) => commitComments(comments.filter((c) => c.id !== id))} />
+  );
+  if (detail && !split) return detail;
 
   // ---- the whole draft, to re-read before sending ----
-  if (showDraft) {
-    return (
+  const list = showDraft
+    ? (
       <>
         <div className="rv-bar">
           <button className="icon-btn" title="Back to the file list" onClick={() => setShowDraft(false)}><IconBack /></button>
@@ -224,12 +252,10 @@ export function ReviewPanel({ cwd, onCount }: { cwd: string; onCount: (n: number
         <Footer comments={comments} canSend={canSend} sending={sending}
           persisted={persisted} onSend={() => void send(false)} onShowDraft={undefined} />
       </>
-    );
-  }
-
-  // ---- scope picker + whatever list it selects ----
-  return (
-    <>
+    )
+    // ---- scope picker + whatever list it selects ----
+    : (
+      <>
       <div className="rv-scope" role="tablist" aria-label="What to review">
         {(["working", "commits", "branch"] as Scope[]).map((s) => (
           <button key={s} role="tab" aria-selected={scope === s}
@@ -313,8 +339,8 @@ export function ReviewPanel({ cwd, onCount }: { cwd: string; onCount: (n: number
             )}
             {files.length > 0 && <StatLine files={files} truncated={!!changes?.truncated} />}
             {files.map((f) => (
-              <button key={f.abs} className="wf-row" onClick={() => setOpenFile(f)}
-                title={f.path}>
+              <button key={f.abs} className={"wf-row" + (openFile?.abs === f.abs ? " on" : "")}
+                onClick={() => openReviewFile(f)} title={f.path}>
                 <span className={"wf-mark wf-git " + f.status} title={STATUS_LABEL[f.status]}>
                   {STATUS_MARK[f.status]}
                 </span>
@@ -345,6 +371,13 @@ export function ReviewPanel({ cwd, onCount }: { cwd: string; onCount: (n: number
           onSend={() => void send(comments.length === 0)}
           onShowDraft={comments.length > 0 ? () => setShowDraft(true) : undefined} />
       )}
+      </>
+    );
+
+  return (
+    <>
+      <div className="wf-list">{list}</div>
+      {detail && <div className="wf-view">{detail}</div>}
     </>
   );
 }
