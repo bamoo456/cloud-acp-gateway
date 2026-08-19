@@ -277,6 +277,47 @@ describe("FilePanel", () => {
     expect(container.querySelector("iframe.wf-html-preview")).toBeNull();
   });
 
+  test("a picture beside the document is shown, and opens full size", async () => {
+    // A README's own screenshot: relative to the file, which resolves against
+    // the console's origin unless the preview says otherwise.
+    getFilePreview.mockResolvedValue({
+      path: "docs/guide.md", abs: "/repo/docs/guide.md", kind: "text",
+      size: 40, modifiedAt: new Date().toISOString(),
+      text: "# Guide\n\n![a shot](shot.png)\n", truncated: false,
+    } satisfies FilePreviewResult);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/docs/guide.md", path: "docs/guide.md", mode: "file" });
+    });
+    await act(async () => { await flush(); });
+    const previewBtn = [...container.querySelectorAll<HTMLButtonElement>(".wf-modes button")]
+      .find((b) => b.textContent === "Preview")!;
+    await act(async () => { previewBtn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    const img = container.querySelector<HTMLImageElement>(".wf-md-preview img")!;
+    // The gateway's own bytes route, with the path resolved against the
+    // document's folder — not /shot.png on this origin.
+    expect(img.getAttribute("src")).toContain("/workspace/raw");
+    expect(img.getAttribute("src")).toContain("/repo/docs/shot.png");
+
+    // And it zooms, which is the only way to read a wide screenshot in a
+    // 440px column.
+    expect(container.querySelector(".wf-lightbox")).toBeNull();
+    await act(async () => { img.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    // Resolved rather than the relative attribute — it is the same bytes route.
+    expect(container.querySelector<HTMLImageElement>(".wf-lightbox img")?.src)
+      .toContain("path=/repo/docs/shot.png");
+
+    // Escape closes it, as it does every other overlay here.
+    await act(async () => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-lightbox")).toBeNull();
+  });
+
   test("a file with no diff falls through to its contents instead of an empty pane", async () => {
     getFileDiff.mockResolvedValue({ ...DIFF, diff: "" });
     const { useStore } = await import("../store/store.ts");
