@@ -31,7 +31,11 @@ export type TextSize = "small" | "default" | "large" | "xl";
 export type PreviewMode = "diff" | "file" | "render";
 // `abs` is the gateway-side absolute path (how the API addresses a file);
 // `path` is the short label shown in the panel's title bar.
-export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode }
+// `cwd` is the folder the file was opened FROM, and only set when that isn't the
+// conversation's own: /workspace/* resolves a path against the cwd it is sent,
+// so a file browsed in another project must carry that project's root or the
+// gateway refuses to read it.
+export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode; cwd?: string }
 
 type PromptRequestMethod = "session/request_permission" | "elicitation/create";
 
@@ -201,7 +205,7 @@ interface State {
   toggleSidebar: () => void;
   // Opens the panel *and* the file — the one entry point for "show me this
   // file", wherever the path was clicked.
-  openFilePreview: (file: { abs: string; path?: string; mode?: PreviewMode }) => void;
+  openFilePreview: (file: { abs: string; path?: string; mode?: PreviewMode; cwd?: string }) => void;
   clearFilePreview: () => void;
   attachFiles: (files: MessageFile[]) => void;
   removeAttachedFile: (index: number) => void;
@@ -1721,7 +1725,9 @@ export const useStore = create<State>((set, get) => {
       if (!file.abs) return;
       set({
         filesOpen: true,
-        filePreview: { abs: file.abs, path: file.path || basename(file.abs), mode: file.mode ?? "diff" },
+        filePreview: {
+          abs: file.abs, path: file.path || basename(file.abs), mode: file.mode ?? "diff", cwd: file.cwd,
+        },
       });
     },
 
@@ -1796,4 +1802,12 @@ export function answerPermission(reqId: number | string, optionId: string) {
 // expose the elicitation resolver for the ElicitationPrompt component
 export function answerElicitation(reqId: number | string, response: ElicitationResponse, summary: string) {
   useStore.getState().answerElicitation(reqId, response, summary);
+}
+
+// Whether a row's file is the one the preview pane is showing. A hook rather
+// than a prop threaded down every list: the file rows are leaves in four
+// different lists (two of them recursive), and the answer is one field of the
+// store either way.
+export function useIsOpenFile(abs: string): boolean {
+  return useStore((s) => s.filePreview?.abs === abs);
 }
