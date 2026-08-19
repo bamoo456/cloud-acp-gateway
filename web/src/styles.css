@@ -852,6 +852,12 @@
 
   .md { min-width: 0; max-width: 100%; word-wrap: break-word; overflow-wrap: break-word; }
   .md p { margin: 0 0 10px; } .md p:last-child { margin-bottom: 0; }
+  /* A picture in a document, at whatever room the column has. Clicking it opens
+     it full size (see Lightbox) — which is the only way to read a 2000px wide
+     screenshot in a 440px panel, and why the cursor says so. */
+  .md img { display: block; max-width: 100%; height: auto; border-radius: 10px; cursor: zoom-in; }
+  /* A linked image stays a link, so it must not claim to zoom. */
+  .md a img { cursor: pointer; }
   .md pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     max-width: 100%; padding: 12px 14px; overflow: auto; margin: 10px 0; }
   .md code { font-family: var(--mono); font-size: var(--chat-code-size); }
@@ -1902,6 +1908,16 @@
      same escaped-HTML renderer chat messages already use, just themed at
      document scale (.md's base rules) instead of a chat bubble's. */
   .wf-md-preview { padding: 10px 12px; }
+  /* A mermaid fence, drawn (lib/mermaid.ts). Zed's preview keeps a diagram at
+     its natural size and scrolls the pane under it rather than fitting it to the
+     width — a wide flowchart squeezed into a 440px column is a picture of a
+     flowchart, not one you can read. So: no max-width on the svg, and the
+     scroller is this box. */
+  .md-mermaid { margin: .9em 0; overflow-x: auto; overscroll-behavior-x: contain; }
+  .md-mermaid svg { display: block; max-width: none; height: auto; }
+  /* A diagram that wouldn't parse keeps its source, and says why underneath. */
+  .md pre.md-mermaid-failed { margin-bottom: 4px; }
+  .md-mermaid-error { margin: 0 0 .9em; color: var(--err); font-size: 12.5px; }
   /* Full-size viewing stays inside the app (see FileContents): the native
      client hosts this console in a webview where a new tab has nowhere to go. */
   .wf-lightbox {
