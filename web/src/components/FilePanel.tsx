@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore } from "../store/store.ts";
+import { useStore, useIsOpenFile } from "../store/store.ts";
 import type { FilePreviewTarget, PreviewMode } from "../store/store.ts";
 import {
   getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, getHtmlRender,
@@ -29,7 +29,8 @@ import {
   clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH,
   DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
 } from "../lib/panelWidth.ts";
-import { IconBack, IconX, IconRefresh, IconExpand, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, fileIcon } from "../lib/icons.tsx";
+import { FolderBrowser } from "./FolderBrowser.tsx";
+import { IconBack, IconX, IconRefresh, IconExpand, IconPanel, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, IconFolder, fileIcon } from "../lib/icons.tsx";
 import { findRanges, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/findInFile.ts";
 
 // The file preview panel: what the agent actually produced, rather than what it
@@ -55,7 +56,10 @@ import { findRanges, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/
 // PROJECT is the folder itself, browsable. A separate mode rather than a fourth
 // section: every list in Session is built FROM the conversation, so none of them
 // knows about a file nobody has touched yet — a different question, needing the
-// full height of the panel rather than whatever is left under three lists.
+// full height of the panel rather than whatever is left under three lists. Which
+// folder it browses is the reader's to change, and only the reader's: pointing
+// it at another checkout reads that one, without moving the conversation, the
+// composer or the next prompt (which is what the picker's setCwd would do).
 //
 // The two modes are not the tabs this panel deliberately avoids. Those would
 // have split the three Session lists, which answer one question between them
@@ -64,20 +68,32 @@ import { findRanges, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/
 // know which of you are asking.
 //
 // Opening a row shows its diff; a binary, an image, or an unchanged file falls
-// through to the contents view on its own. The viewer takes over the whole
-// panel, and Back returns to the mode you opened the file from.
+// through to the contents view on its own. Given room the viewer opens BESIDE
+// the list (see `split`), so the next file is one click away rather than one
+// Back and one click; in a narrow panel it still takes the whole width, and
+// Back returns to the mode you opened the file from.
 
 type Section = "Progress" | "Outputs" | "Context";
 type Mode = "session" | "project" | "review";
 
-function FileRow({ lead, leadClass, leadTitle, name, dir, right, onClick, onMenu }: {
-  lead: React.ReactNode; leadClass: string; leadTitle: string;
+// The list keeps this much of the panel when the viewer opens beside it, and
+// the viewer needs at least this much to be worth splitting for — under that a
+// side-by-side diff is two unreadable columns instead of one readable one.
+const LIST_WIDTH = 300;
+const MIN_VIEW_WIDTH = 340;
+
+function FileRow({ abs, lead, leadClass, leadTitle, name, dir, right, onClick, onMenu }: {
+  abs: string; lead: React.ReactNode; leadClass: string; leadTitle: string;
   name: string; dir: string; right?: React.ReactNode; onClick: () => void;
   onMenu: (x: number, y: number) => void;
 }) {
   const menu = useRowMenu(onMenu);
+  // Which row the viewer is showing. Only visible while both are on screen —
+  // in the takeover layout the list is behind the file it would be marking.
+  const open = useIsOpenFile(abs);
   return (
-    <button className="wf-row" onClick={onClick} {...menu} title={dir ? dir + "/" + name : name}>
+    <button className={"wf-row" + (open ? " on" : "")} onClick={onClick} {...menu}
+      title={dir ? dir + "/" + name : name}>
       <span className={"wf-mark " + leadClass} title={leadTitle}>{lead}</span>
       <span className="wf-name">
         <span className="wf-nm">{name}</span>
@@ -135,6 +151,7 @@ function PanelRow({ file, cwd, onOpen, onMenu }: {
   const counts = git && ((git.additions ?? 0) + (git.deletions ?? 0) > 0 || git.binary);
   return (
     <FileRow
+      abs={file.abs}
       lead={git ? STATUS_MARK[git.status] : fileIcon(kind.icon)}
       leadClass={git ? "wf-git " + git.status : "wf-kind"}
       leadTitle={git ? STATUS_LABEL[git.status] + (git.staged ? " (staged)" : "") : kind.category}
@@ -165,7 +182,7 @@ function ContextRow({ path, label, cwd, onOpen, onMenu }: {
 }) {
   const kind = fileKind(label);
   return (
-    <FileRow lead={fileIcon(kind.icon)} leadClass="wf-kind" leadTitle={kind.category}
+    <FileRow abs={path} lead={fileIcon(kind.icon)} leadClass="wf-kind" leadTitle={kind.category}
       name={label} dir={dirname(relativeTo(path, cwd))} onClick={onOpen} onMenu={onMenu} />
   );
 }
@@ -205,7 +222,15 @@ export function FilePanel() {
   // survives — someone browsing a folder and glancing away should come back to
   // where they were. A new folder is a different project, so that resets.
   const [mode, setMode] = useState<Mode>("session");
-  useEffect(() => { setMode("session"); }, [cwd]);
+  // Which folder the Project tab is browsing, when that isn't the
+  // conversation's own. Panel state rather than the store's cwd: switching the
+  // picker would point the composer, the status bar and the next prompt at
+  // another checkout, where all this wants is to READ one — which is the whole
+  // of the cross-project case (a file over there, opened while working here).
+  const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  const [browsing, setBrowsing] = useState(false);
+  useEffect(() => { setMode("session"); setProjectRoot(null); }, [cwd]);
+  const root = projectRoot ?? cwd;
   // Refresh re-lists the tree too, but nothing else does — see FileTree.
   const [treeKey, setTreeKey] = useState(0);
   const [err, setErr] = useState<string | null>(null);
@@ -285,12 +310,14 @@ export function FilePanel() {
   // owns, and an inline value would override it.
   const [width, setWidth] = useState(readPanelWidth);
   const [desktop, setDesktop] = useState(isDesktopPanelWidth);
+  // The window itself, which is all the expanded panel has to divide.
+  const [winWidth, setWinWidth] = useState(() => window.innerWidth);
   useEffect(() => {
     const mq = window.matchMedia?.(DESKTOP_PANEL_QUERY);
     if (!mq) return;
     // Re-clamp on resize too: a width chosen on a wide window would otherwise
     // leave no room for the chat after the window shrinks.
-    const sync = () => { setDesktop(mq.matches); setWidth((w) => clampPanelWidth(w)); };
+    const sync = () => { setDesktop(mq.matches); setWinWidth(window.innerWidth); setWidth((w) => clampPanelWidth(w)); };
     mq.addEventListener("change", sync);
     window.addEventListener("resize", sync);
     return () => { mq.removeEventListener("change", sync); window.removeEventListener("resize", sync); };
@@ -302,11 +329,40 @@ export function FilePanel() {
   // shape for the panel to keep.
   const [expanded, setExpanded] = useState(false);
 
+  // Opening a file EXTENDS the panel rather than replacing what is in it: the
+  // list keeps its width and the viewer is added beside it, so the next file is
+  // one click away instead of Back-then-click. Derived, never stored — the
+  // dragged width stays the list's width, so closing the file gives the panel
+  // back its own size with nothing to restore.
+  //
+  // Only where the result is readable. clampPanelWidth caps against the chat
+  // column, so near the breakpoint the extra 300px simply isn't there; the
+  // takeover layout is still the right answer for a sheet, a phone, and a
+  // column too narrow to hold two panes.
+  const extended = desktop && !expanded ? clampPanelWidth(width + LIST_WIDTH) : 0;
+  const canSplit = expanded
+    ? winWidth >= LIST_WIDTH + MIN_VIEW_WIDTH
+    : extended - LIST_WIDTH >= MIN_VIEW_WIDTH;
+  // Review's open file is its own state and it draws its own viewer pane (the
+  // diff has comments written on it), so it reports up rather than going
+  // through `filePreview` — but it widens the panel exactly the same way.
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const split = canSplit && (!!target || reviewOpen);
+  const panelWidth = split ? extended : width;
+  // Folding the list away gives the whole extended panel to one diff — which is
+  // what a wide file wants, and what the extra 300px was for. Hidden in CSS
+  // rather than unmounted: the list keeps its scroll, its folded sections and a
+  // browsed tree's open folders, and Review's list is inside Review's own pane
+  // where no prop of ours reaches it. Sticky on purpose — someone who wants the
+  // room wants it for the next file too.
+  const [listFolded, setListFolded] = useState(false);
+
   // Which row was right-clicked / long-pressed, and where the menu goes. Null
-  // is the ordinary state: no menu.
+  // is the ordinary state: no menu. `base` is the folder its path reads
+  // against — the Project tab can be browsing another checkout entirely.
   const [menu, setMenu] = useState<FileMenuTarget | null>(null);
-  const openMenu = (abs: string, isDir: boolean, x: number, y: number) =>
-    setMenu({ abs, name: basename(abs), dir: dirname(relativeTo(abs, cwd)), isDir, x, y });
+  const openMenu = (abs: string, isDir: boolean, x: number, y: number, base = cwd) =>
+    setMenu({ abs, name: basename(abs), dir: dirname(relativeTo(abs, base)), base, isDir, x, y });
 
   // Attaching is the one action here that has its result somewhere else — on the
   // composer. Below the desktop breakpoint this panel is a sheet ON TOP of the
@@ -361,12 +417,16 @@ export function FilePanel() {
       <aside id="files" className={(open ? "open" : "") + (expanded ? " expanded" : "")} aria-hidden={!open}
         // No inline width while expanded: it would beat the stylesheet's
         // full-window rule, leaving a 440px panel pinned to the left edge.
-        style={desktop && !expanded ? { width, maxWidth: width } : undefined}>
+        style={desktop && !expanded ? { width: panelWidth, maxWidth: panelWidth } : undefined}>
+        {/* While split, the handle drags the whole panel and the list keeps
+            what is left — anything else makes the edge jump by LIST_WIDTH the
+            moment it is grabbed. */}
         {desktop && !expanded && <ResizeHandle className="wf-resize" label="Resize the files panel" edge="left" axis="x"
-          size={width} min={MIN_PANEL_WIDTH} max={MAX_PANEL_WIDTH} clamp={clampPanelWidth}
-          onSize={setWidth} onCommit={savePanelWidth} />}
+          size={panelWidth} min={MIN_PANEL_WIDTH} max={MAX_PANEL_WIDTH} clamp={clampPanelWidth}
+          onSize={(px) => setWidth(clampPanelWidth(split ? px - LIST_WIDTH : px))}
+          onCommit={(px) => savePanelWidth(clampPanelWidth(split ? px - LIST_WIDTH : px))} />}
         <div className="wf-head">
-          {target && (
+          {target && !split && (
             <button className="icon-btn" title="Back to file list" onClick={clearFilePreview}><IconBack /></button>
           )}
           {/* Naming the folder is half of what the Project mode is for, and it
@@ -374,8 +434,8 @@ export function FilePanel() {
               when a session's cwd differs from the picker's. */}
           {/* The summary folds into the header rather than taking a row of its
               own (§1.3): "Files repo · 7 files +128 −35". */}
-          <span className="wf-title" title={target ? target.abs : cwd}>
-            {target ? target.path : (
+          <span className="wf-title" title={target && !split ? target.abs : cwd}>
+            {target && !split ? target.path : (
               <>
                 Files <span className="wf-cwd">{basename(cwd)}</span>
                 {stat && <span className="wf-stat">
@@ -386,18 +446,30 @@ export function FilePanel() {
               </>
             )}
           </span>
-          {!target && (
+          {(!target || split) && (
             <button className="icon-btn" title="Refresh" disabled={loading}
               onClick={() => { loadChanges(); setTreeKey((k) => k + 1); }}><IconRefresh /></button>
+          )}
+          {/* Only while there are two panes — with one, folding it away would
+              leave the panel showing nothing. */}
+          {split && (
+            <button className="icon-btn" aria-pressed={!listFolded}
+              title={listFolded ? "Show the file list" : "Hide the file list"}
+              onClick={() => setListFolded((v) => !v)}><IconPanel left /></button>
           )}
           <button className="icon-btn" aria-pressed={expanded} title={expanded ? "Collapse" : "Expand"}
             onClick={() => setExpanded((v) => !v)}><IconExpand collapse={expanded} /></button>
           <button className="icon-btn" title="Close" onClick={closeFiles}><IconX /></button>
         </div>
 
-        {/* Hidden behind the viewer: a file's Back button already says where it
-            returns to, and the switch would be a second, competing way out. */}
-        {!target && (
+        {/* Hidden behind the viewer while it has the panel to itself: a file's
+            Back button already says where it returns to, and the switch would
+            be a second, competing way out. Beside the viewer it is the list's
+            own control again — and it spans both panes, because which mode the
+            panel is in is the panel's question, not the list's. Folded away
+            with the list it belongs to: "just the file, please" means the
+            vertical room too, and the header's toggle brings both back. */}
+        {(!target || (split && !listFolded)) && (
           <div className="wf-switch" role="tablist" aria-label="What to show">
             <button role="tab" aria-selected={mode === "session"} className={mode === "session" ? "active" : ""}
               onClick={() => setMode("session")}>Session</button>
@@ -414,109 +486,167 @@ export function FilePanel() {
           </div>
         )}
 
-        {target && (
-          <FileView cwd={cwd} target={target} canAttach={canAttach}
-            onAttach={(range, text) => attach([
-              makeRangeFile(target.abs, basename(target.path), range, text),
-            ])} />
-        )}
+        {/* One row of panes: the list, the viewer, or — given the room — both.
+            `.split` is what lays them side by side; without it whichever one is
+            rendered has the panel to itself, which is the narrow layout. */}
+        <div className={"wf-panes" + (split ? " split" : "") + (split && listFolded ? " folded" : "")}>
+          {(!target || split) && mode !== "review" && (
+            <div className="wf-list">
 
-        {!target && mode === "project" && (
-          <FileTree cwd={cwd} reloadKey={treeKey}
-            onOpenFile={(f) => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })}
-            onMenu={(f, x, y) => openMenu(f.abs, !!f.isDir, x, y)} />
-        )}
+              {mode === "project" && (
+                <>
+                  {/* Which folder the tree is reading. The session's own is the
+                      default and needs no bar of its own — this only earns its row
+                      once the panel can point somewhere else, which is the whole
+                      point of it: reading a file in the other checkout you are
+                      porting a change to, without moving this conversation. */}
+                  <div className="wf-root">
+                    <button className="wf-root-pick" onClick={() => setBrowsing(true)} title={root}>
+                      <IconFolder /><span className="nm">{basename(root)}</span><IconChevronDown />
+                    </button>
+                    {projectRoot && (
+                      <button className="linkish" onClick={() => setProjectRoot(null)}>
+                        Back to {basename(cwd)}
+                      </button>
+                    )}
+                  </div>
+                  {/* Keyed on the root: a different project is a different tree, and
+                      its expansions and search are not this one's. */}
+                  <FileTree key={root} cwd={root} reloadKey={treeKey}
+                    onOpenFile={(f) => openFilePreview({
+                      abs: f.abs, path: relativeTo(f.abs, root), mode: "file",
+                      // Only when it isn't the conversation's folder: the gateway
+                      // resolves the path against whatever cwd it is sent.
+                      cwd: projectRoot ?? undefined,
+                    })}
+                    onMenu={(f, x, y) => openMenu(f.abs, !!f.isDir, x, y, root)} />
+                </>
+              )}
 
-        {/* Keyed on cwd so a folder change restarts the review rather than
-            leaving a draft for one checkout on screen over another's diff. */}
-        {!target && mode === "review" && (
-          <ReviewPanel key={cwd} cwd={cwd} onCount={setReviewCount} />
-        )}
+              {mode === "session" && (
+                <div className="wf-body">
+                  {plan && plan.kind === "plan" && plan.entries.length > 0 && (
+                    <Section title="Progress" open={!folded.Progress} onToggle={() => toggle("Progress")}>
+                      <Plan entries={plan.entries} heading={false} />
+                    </Section>
+                  )}
 
-        {!target && mode === "session" && (
-          <div className="wf-body">
-            {plan && plan.kind === "plan" && plan.entries.length > 0 && (
-              <Section title="Progress" open={!folded.Progress} onToggle={() => toggle("Progress")}>
-                <Plan entries={plan.entries} heading={false} />
-              </Section>
-            )}
+                  <Section title="Outputs" count={outputs.length}
+                    open={!folded.Outputs} onToggle={() => toggle("Outputs")}>
+                    {err && <div className="wf-empty">{err}</div>}
+                    {!err && loading && !changes && outputs.length === 0 && (
+                      <div className="wf-empty">Reading changes…</div>
+                    )}
+                    {!err && outputs.length === 0 && !loading && (
+                      <div className="wf-empty">Nothing written in this conversation yet.</div>
+                    )}
+                    {labelWritten && (
+                      <div className="wf-group">Written in this conversation</div>
+                    )}
+                    {written.map((f) => (
+                      <PanelRow key={f.abs} file={f} cwd={cwd}
+                        onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
+                        onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
+                    ))}
+                    {alsoChanged.length > 0 && (
+                      <div className="wf-group">Other changes in this folder</div>
+                    )}
+                    {alsoChanged.map((f) => (
+                      <PanelRow key={f.abs} file={f} cwd={cwd}
+                        onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
+                        onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
+                    ))}
+                    {alsoInFolder.length > 0 && (
+                      <div className="wf-group">Also in folders this conversation wrote to</div>
+                    )}
+                    {/* Opens on the file, not on a diff: these rows exist precisely
+                        because git cannot describe them, so there is no diff to show
+                        and the viewer would only bounce itself to the contents view. */}
+                    {alsoInFolder.map((f) => (
+                      <PanelRow key={f.abs} file={f} cwd={cwd}
+                        onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })}
+                        onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
+                    ))}
+                    {folders.some((f) => f.truncated) && (
+                      <div className="wf-note">Those folders hold more than this list shows.</div>
+                    )}
+                    {/* Without git the list is only what tool calls named — no
+                        shell-written file, nothing another conversation changed. Say
+                        so rather than letting a short list read as a quiet turn. */}
+                    {!err && changes?.repo === null && (
+                      <div className="wf-note">
+                        {changes.reason === "git-missing"
+                          ? "git isn't installed on the gateway host, so only files this conversation named are listed."
+                          : "This folder isn't a git checkout, so only files this conversation named are listed."}
+                      </div>
+                    )}
+                    {changes?.truncated && (
+                      <div className="wf-note">Showing the first {changes.files.length} changed files.</div>
+                    )}
+                  </Section>
 
-            <Section title="Outputs" count={outputs.length}
-              open={!folded.Outputs} onToggle={() => toggle("Outputs")}>
-              {err && <div className="wf-empty">{err}</div>}
-              {!err && loading && !changes && outputs.length === 0 && (
-                <div className="wf-empty">Reading changes…</div>
-              )}
-              {!err && outputs.length === 0 && !loading && (
-                <div className="wf-empty">Nothing written in this conversation yet.</div>
-              )}
-              {labelWritten && (
-                <div className="wf-group">Written in this conversation</div>
-              )}
-              {written.map((f) => (
-                <PanelRow key={f.abs} file={f} cwd={cwd}
-                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
-                  onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
-              ))}
-              {alsoChanged.length > 0 && (
-                <div className="wf-group">Other changes in this folder</div>
-              )}
-              {alsoChanged.map((f) => (
-                <PanelRow key={f.abs} file={f} cwd={cwd}
-                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
-                  onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
-              ))}
-              {alsoInFolder.length > 0 && (
-                <div className="wf-group">Also in folders this conversation wrote to</div>
-              )}
-              {/* Opens on the file, not on a diff: these rows exist precisely
-                  because git cannot describe them, so there is no diff to show
-                  and the viewer would only bounce itself to the contents view. */}
-              {alsoInFolder.map((f) => (
-                <PanelRow key={f.abs} file={f} cwd={cwd}
-                  onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })}
-                  onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
-              ))}
-              {folders.some((f) => f.truncated) && (
-                <div className="wf-note">Those folders hold more than this list shows.</div>
-              )}
-              {/* Without git the list is only what tool calls named — no
-                  shell-written file, nothing another conversation changed. Say
-                  so rather than letting a short list read as a quiet turn. */}
-              {!err && changes?.repo === null && (
-                <div className="wf-note">
-                  {changes.reason === "git-missing"
-                    ? "git isn't installed on the gateway host, so only files this conversation named are listed."
-                    : "This folder isn't a git checkout, so only files this conversation named are listed."}
+                  <Section title="Context" count={context.length}
+                    open={!folded.Context} onToggle={() => toggle("Context")}>
+                    {context.length === 0 && (
+                      <div className="wf-empty">No files consulted in this conversation yet.</div>
+                    )}
+                    {context.map((f) => (
+                      <ContextRow key={f.path} path={f.path} label={f.label} cwd={cwd}
+                        onOpen={() => openFilePreview({ abs: f.path, path: relativeTo(f.path, cwd), mode: "file" })}
+                        onMenu={(x, y) => openMenu(f.path, false, x, y)} />
+                    ))}
+                  </Section>
                 </div>
               )}
-              {changes?.truncated && (
-                <div className="wf-note">Showing the first {changes.files.length} changed files.</div>
-              )}
-            </Section>
+            </div>
+          )}
 
-            <Section title="Context" count={context.length}
-              open={!folded.Context} onToggle={() => toggle("Context")}>
-              {context.length === 0 && (
-                <div className="wf-empty">No files consulted in this conversation yet.</div>
+          {/* Its own two panes, not a list inside ours: a review's detail is
+              its diff WITH the comments written on it, which only this
+              component can draw. Keyed on cwd so a folder change restarts the
+              review rather than leaving one checkout's draft over another's. */}
+          {(!target || split) && mode === "review" && (
+            <ReviewPanel key={cwd} cwd={cwd} onCount={setReviewCount}
+              split={canSplit} onDetail={setReviewOpen} />
+          )}
+
+          {target && (
+            <div className="wf-view">
+              {/* The header's title is the folder's again while the list is on
+                  screen, so the file names itself here — and closes here, since
+                  Back is gone with it. */}
+              {split && (
+                <div className="wf-view-head" title={target.abs}>
+                  <span className="p">{target.path}</span>
+                  <button className="icon-btn" title="Close file" onClick={clearFilePreview}><IconX /></button>
+                </div>
               )}
-              {context.map((f) => (
-                <ContextRow key={f.path} path={f.path} label={f.label} cwd={cwd}
-                  onOpen={() => openFilePreview({ abs: f.path, path: relativeTo(f.path, cwd), mode: "file" })}
-                  onMenu={(x, y) => openMenu(f.path, false, x, y)} />
-              ))}
-            </Section>
-          </div>
-        )}
+              <FileView cwd={target.cwd ?? cwd} target={target} canAttach={canAttach}
+                onAttach={(range, text) => attach([
+                  makeRangeFile(target.abs, basename(target.path), range, text),
+                ])} />
+            </div>
+          )}
+        </div>
       </aside>
+      {/* Rendered outside the panel for the same reason the menu is: it is a
+          fixed-position modal, and the panel is a transformed ancestor. */}
+      {browsing && (
+        <FolderBrowser
+          onUse={(p) => { setProjectRoot(p === cwd ? null : p); setBrowsing(false); }}
+          onBack={() => setBrowsing(false)} onClose={() => setBrowsing(false)} />
+      )}
       {/* Outside the panel, not inside it: the menu is positioned against the
           viewport, and the panel is the one element here that animates in on a
           transform (which would re-anchor a fixed child to it). */}
       {menu && (
         <FileMenu target={menu} canAttach={canAttach}
-          onAttach={() => attach([makeAbsFile(menu.abs, relativeTo(menu.abs, cwd))])}
+          onAttach={() => attach([makeAbsFile(menu.abs, relativeTo(menu.abs, menu.base ?? cwd))])}
           onOpen={menu.isDir ? undefined : () =>
-            openFilePreview({ abs: menu.abs, path: relativeTo(menu.abs, cwd), mode: "file" })}
+            openFilePreview({
+              abs: menu.abs, path: relativeTo(menu.abs, menu.base ?? cwd), mode: "file",
+              cwd: menu.base === cwd ? undefined : menu.base,
+            })}
           onCopyPath={() => void copyText(menu.abs)}
           onClose={() => setMenu(null)} />
       )}

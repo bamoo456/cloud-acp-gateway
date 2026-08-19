@@ -71,6 +71,9 @@ describe("FilePanel", () => {
       getWorkspaceOutputs,
       getHtmlRender,
       findWorkspaceFiles: vi.fn().mockResolvedValue({ files: [], truncated: false, fromGit: true }),
+      // The Project tab's folder switcher browses with the same /fs route the
+      // composer's folder picker uses.
+      listDir: vi.fn().mockResolvedValue({ root: "/", path: "/repo", parent: "/", dirs: [{ name: "other" }] }),
       rawFileUrl: (cwd: string, p: string) => `/workspace/raw?cwd=${cwd}&path=${p}`,
       // Review mode's surface. The panel reads the draft counts alongside the
       // change list (that is what badges the tab), so these have to exist even
@@ -88,6 +91,9 @@ describe("FilePanel", () => {
       root = null;
     }
     vi.doUnmock("../lib/api.ts");
+    // matchMedia and innerWidth are stubbed per test; a failed assertion would
+    // otherwise leak a 1600px desktop into whatever runs next.
+    vi.unstubAllGlobals();
   });
 
   async function render() {
@@ -650,6 +656,189 @@ describe("FilePanel", () => {
     await act(async () => { await flush(); });
     expect(container.querySelector(".wf-switch button.active")?.textContent).toBe("Project");
     expect(section("outputs")).toBeUndefined();
+  });
+
+  test("given room, a file opens BESIDE the list rather than over it", async () => {
+    // The reason the split exists: reading a second file must not cost a Back
+    // and a hunt down the list for where you were.
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    vi.stubGlobal("innerWidth", 1600);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    const panel = container.querySelector<HTMLElement>("#files")!;
+    const listWidth = parseInt(panel.style.width, 10);
+
+    const rows = () => [...container.querySelectorAll<HTMLButtonElement>("button.wf-row")];
+    await act(async () => { rows()[0].dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    expect(container.querySelector(".wf-panes.split")).not.toBeNull();
+    // The panel extended by the list's width — the list did not give up its own.
+    expect(parseInt(panel.style.width, 10)).toBe(listWidth + 300);
+    // The list keeps its rows, and the mode switch stays reachable above both.
+    expect(container.querySelector(".wf-list")).not.toBeNull();
+    expect(container.querySelector(".wf-switch")).not.toBeNull();
+    expect(container.querySelector(".wf-view")).not.toBeNull();
+    // Nothing to go Back to while the list is right there.
+    expect([...container.querySelectorAll("button")].some((b) => b.title === "Back to file list")).toBe(false);
+    expect(rows()[0].classList.contains("on")).toBe(true);
+
+    // The next file is one click away, from the same list.
+    await act(async () => { rows()[1].dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/docs/shot.png");
+    expect(rows()[1].classList.contains("on")).toBe(true);
+    expect(rows()[0].classList.contains("on")).toBe(false);
+
+    // The list folds away when one diff wants the whole panel, and comes back.
+    const fold = [...container.querySelectorAll<HTMLButtonElement>(".wf-head .icon-btn")]
+      .find((b) => b.title === "Hide the file list")!;
+    await act(async () => { fold.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-panes.split.folded")).not.toBeNull();
+    // Still mounted, so it keeps its scroll and its open folders.
+    expect(container.querySelector(".wf-list")).not.toBeNull();
+    // The mode switch goes with it: folded means the file gets the room.
+    expect(container.querySelector(".wf-switch")).toBeNull();
+    // The panel keeps its extended width — folding is for the diff, not against it.
+    expect(parseInt(panel.style.width, 10)).toBe(listWidth + 300);
+    const unfold = [...container.querySelectorAll<HTMLButtonElement>(".wf-head .icon-btn")]
+      .find((b) => b.title === "Show the file list")!;
+    await act(async () => { unfold.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-panes.folded")).toBeNull();
+
+    // And the viewer closes from its own header, since Back is gone with it.
+    const close = [...container.querySelectorAll<HTMLButtonElement>(".wf-view-head .icon-btn")][0];
+    await act(async () => { close.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-view")).toBeNull();
+    expect(parseInt(panel.style.width, 10)).toBe(listWidth);
+    vi.unstubAllGlobals();
+  });
+
+  test("a column with no room for two panes keeps the takeover", async () => {
+    // 1024px leaves the panel 564 at most (the chat keeps 460), and a 264px
+    // viewer beside a 300px list is two unreadable columns.
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button.wf-row")!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-panes.split")).toBeNull();
+    expect(container.querySelector(".wf-switch")).toBeNull();
+    expect([...container.querySelectorAll("button")].some((b) => b.title === "Back to file list")).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  test("a Review file opens beside its list too, and gives the width back", async () => {
+    // Review draws its own viewer — the diff with comments written on it — so
+    // it reports the open file up rather than going through filePreview. The
+    // panel must widen for it all the same.
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    vi.stubGlobal("innerWidth", 1600);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    const panel = container.querySelector<HTMLElement>("#files")!;
+    const listWidth = parseInt(panel.style.width, 10);
+    await switchTo("Review");
+
+    const row = [...container.querySelectorAll<HTMLButtonElement>("button.wf-row")]
+      .find((b) => b.textContent?.includes("gateway.ts"))!;
+    await act(async () => { row.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    expect(container.querySelector(".wf-panes.split")).not.toBeNull();
+    expect(parseInt(panel.style.width, 10)).toBe(listWidth + 300);
+    // The scope chips are still there — the list did not go anywhere.
+    expect(container.querySelector(".wf-list .rv-scope")).not.toBeNull();
+    expect(container.querySelector(".wf-view .rv-bar")?.textContent).toContain("src/gateway.ts");
+    expect(row.classList.contains("on")).toBe(true);
+
+    // Closing it hands the width back.
+    const back = container.querySelector<HTMLButtonElement>(".wf-view .rv-bar .icon-btn")!;
+    await act(async () => { back.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(container.querySelector(".wf-view")).toBeNull();
+    expect(parseInt(panel.style.width, 10)).toBe(listWidth);
+  });
+
+  test("with no room, a Review file still takes over — and the switch stays", async () => {
+    // jsdom reports no matchMedia, so this is the sheet: one pane. The mode
+    // switch is not the way out of a review file (FileReview's own Back is),
+    // but it must not vanish either — it is how you leave Review at all.
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await switchTo("Review");
+
+    const row = [...container.querySelectorAll<HTMLButtonElement>("button.wf-row")]
+      .find((b) => b.textContent?.includes("gateway.ts"))!;
+    await act(async () => { row.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    expect(container.querySelector(".wf-panes.split")).toBeNull();
+    expect(container.querySelector(".rv-bar")?.textContent).toContain("src/gateway.ts");
+    expect(container.querySelector(".rv-scope")).toBeNull();
+    expect(container.querySelector(".wf-switch")).not.toBeNull();
+  });
+
+  test("Project browses another folder without moving the conversation", async () => {
+    getWorkspaceTree.mockResolvedValue({
+      abs: "/repo/other", path: "", truncated: false,
+      entries: [{ name: "app.ts", abs: "/repo/other/app.ts", dir: false }],
+    });
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await switchTo("Project");
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".wf-root-pick")!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await flush(); });
+    const dir = [...container.querySelectorAll<HTMLButtonElement>("#fb .bp.top button.dir")][0];
+    await act(async () => { dir.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    const use = [...container.querySelectorAll<HTMLButtonElement>("#fb button")]
+      .find((b) => b.textContent === "Use this folder")!;
+    await act(async () => { use.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    expect(getWorkspaceTree).toHaveBeenLastCalledWith("/repo/other", undefined);
+    // The conversation stays where it was: this reads a folder, it doesn't move in.
+    expect(useStore.getState().cwd).toBe("/repo");
+
+    // A file over there is read with ITS root as the cwd, or the gateway refuses it.
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button.wf-tree-row")!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await flush(); });
+    expect(getFilePreview).toHaveBeenLastCalledWith("/repo/other", "/repo/other/app.ts");
+
+    // And one tap home again.
+    await act(async () => { useStore.getState().clearFilePreview(); });
+    await act(async () => { await flush(); });
+    const home = [...container.querySelectorAll<HTMLButtonElement>(".wf-root button")]
+      .find((b) => b.textContent?.includes("Back to"))!;
+    await act(async () => { home.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(getWorkspaceTree).toHaveBeenLastCalledWith("/repo", undefined);
   });
 
   test("a different folder is a different project, so the panel returns to Session", async () => {

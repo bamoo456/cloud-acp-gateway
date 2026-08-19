@@ -61,7 +61,9 @@ describe("ReviewPanel", () => {
     }));
     vi.doMock("../store/store.ts", () => ({
       useStore: (pick: (s: unknown) => unknown) =>
-        pick({ sendPrompt, agentReady: true, closeFiles: vi.fn() }),
+        // filePreview/clearFilePreview: the panel has one viewer pane, and this
+        // component gives it up when a file is opened from anywhere else.
+        pick({ sendPrompt, agentReady: true, closeFiles: vi.fn(), filePreview: null, clearFilePreview: vi.fn() }),
     }));
   });
 
