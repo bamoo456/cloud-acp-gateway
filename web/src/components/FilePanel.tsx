@@ -22,6 +22,7 @@ import type { MessageFile } from "../types.ts";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
 import { HtmlPreview } from "./HtmlPreview.tsx";
 import { Markdown } from "./Markdown.tsx";
+import { Lightbox } from "./Lightbox.tsx";
 import { Plan } from "./Plan.tsx";
 import { basename, dirname, formatBytes, relativeTo, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
 import { ReviewPanel } from "./ReviewPanel.tsx";
@@ -910,7 +911,10 @@ function FileView({ cwd, target, canAttach, onAttach }: {
                 </>
               : <div className="wf-md-preview">
                   {file.truncated && <div className="wf-note">The file was cut short, so this preview may be incomplete.</div>}
-                  <Markdown text={file.text ?? ""} diagrams />
+                  {/* The document's own folder, so `![](docs/shot.png)` next to
+                      it resolves to the file rather than to the console's origin. */}
+                  <Markdown text={file.text ?? ""} diagrams
+                    images={{ cwd, dir: dirname(target.abs) }} />
                 </div>
         )}
       </div>
@@ -959,11 +963,8 @@ function FileContents({ file, raw, codeRef }: {
   // the toolbar button that acts on it.
   codeRef: React.RefObject<HTMLElement>;
 }) {
-  // Full-size viewing is an overlay inside the app, not target="_blank". The
-  // panel is narrow and a screenshot is the thing you most want to zoom into,
-  // but a new-window request in the native client's WKWebView has nowhere to go
-  // — it is silently dropped when the host app implements no UI delegate, and
-  // navigates away from the console when it does.
+  // Full size opens in an overlay rather than a new tab — see Lightbox, which
+  // the markdown preview's own images share.
   const [zoom, setZoom] = useState(false);
   if (file.kind === "image") {
     return (
@@ -973,12 +974,7 @@ function FileContents({ file, raw, codeRef }: {
             <img src={raw} alt={file.path} />
           </button>
         </div>
-        {zoom && (
-          <div className="wf-lightbox" role="dialog" aria-label={file.path} onClick={() => setZoom(false)}>
-            <img src={raw} alt={file.path} />
-            <button type="button" className="icon-btn" title="Close" onClick={() => setZoom(false)}><IconX /></button>
-          </div>
-        )}
+        {zoom && <Lightbox src={raw} alt={file.path} onClose={() => setZoom(false)} />}
       </>
     );
   }
