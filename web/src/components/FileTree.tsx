@@ -101,7 +101,14 @@ function Level({ cwd, dir, depth, onOpenFile, onMenu }: {
           )}
         </div>
       ))}
-      {truncated && <div className="wf-note">Showing the first {entries.length} entries in this folder.</div>}
+      {/* Names the way out, not just the cap: the rows a folder this size is
+          hiding are not reachable by scrolling, and Find files is the only
+          control that gets to them. */}
+      {truncated && (
+        <div className="wf-note">
+          Showing the first {entries.length} entries in this folder — Find files reaches the rest.
+        </div>
+      )}
     </>
   );
 }

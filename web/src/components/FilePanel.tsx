@@ -3,7 +3,7 @@ import { useStore, useIsOpenFile } from "../store/store.ts";
 import type { FilePreviewTarget, PreviewMode } from "../store/store.ts";
 import {
   getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, getHtmlRender,
-  getReviewDraft, rawFileUrl,
+  getReviewDraft, rawFileUrl, saveFilePreview,
   type ChangesResult, type FileDiffResult, type FilePreviewResult,
   type HtmlRender, type OutputFolder,
 } from "../lib/api.ts";
@@ -31,7 +31,7 @@ import {
   DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
 } from "../lib/panelWidth.ts";
 import { FolderBrowser } from "./FolderBrowser.tsx";
-import { IconBack, IconX, IconRefresh, IconExpand, IconPanel, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, IconFolder, fileIcon } from "../lib/icons.tsx";
+import { IconBack, IconX, IconRefresh, IconExpand, IconPanel, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, IconFolder, IconCopy, IconPencil, IconCheck, fileIcon } from "../lib/icons.tsx";
 import { findRanges, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/findInFile.ts";
 
 // The file preview panel: what the agent actually produced, rather than what it
@@ -618,7 +618,28 @@ export function FilePanel() {
                   Back is gone with it. */}
               {split && (
                 <div className="wf-view-head" title={target.abs}>
-                  <span className="p">{target.path}</span>
+                  {/* Which checkout, which folder, which file — the three
+                      questions the old bare filename left open. Not links:
+                      there is nothing for a click on a folder to DO from here
+                      (the tree owns its own expansion), and a link that does
+                      nothing is worse than plain text. Only the middle shrinks
+                      — the root and the filename are the two parts you always
+                      need, and they are the two a narrow panel would cut. */}
+                  {/* Only a file the gateway gave a relative path for is
+                      actually under this checkout — an absolute one came from a
+                      preview root or a sibling folder, and naming the checkout
+                      in front of it would claim a home it doesn't have. */}
+                  <span className="wf-crumb">
+                    {!target.path.startsWith("/") && (
+                      <><span className="root">{basename(target.cwd ?? cwd)}</span><span className="sl">/</span></>
+                    )}
+                    {dirname(target.path) !== "." && (
+                      <><span className="mid">{dirname(target.path)}</span><span className="sl">/</span></>
+                    )}
+                    <span className="leaf">{basename(target.path)}</span>
+                  </span>
+                  <button className="icon-btn" title="Copy path"
+                    onClick={() => void copyText(target.abs)}><IconCopy /></button>
                   <button className="icon-btn" title="Close file" onClick={clearFilePreview}><IconX /></button>
                 </div>
               )}
@@ -682,6 +703,26 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   const [render, setRender] = useState<HtmlRender | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // ---- editing ----
+  // `edit` is both the flag and the buffer: null is "not editing", and the
+  // string is what will be saved. `conflict` holds a refused save's answer —
+  // the file as it is now — which is the only state where two versions of the
+  // same file exist at once and the reader has to pick.
+  const [edit, setEdit] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<{ text: string; hash: string } | null>(null);
+  // Somebody else writing this checkout right now. Scoped to sessions whose cwd
+  // IS this folder, not the store's global `busy`: that one is true while any
+  // conversation anywhere works, and a save here has nothing to do with a turn
+  // running in another project.
+  // The folder this file is READ AND SAVED against, which is not always the
+  // panel's own: Project mode can point at a second checkout. Everything that
+  // has to agree with the save — the warning below, the guard the gateway will
+  // apply — is keyed off this one value rather than three copies of it.
+  const fileCwd = target.cwd ?? cwd;
+  const agentWorkingHere = useStore((s) =>
+    Object.keys(s.busySessionIds).some((id) => s.sessions[id]?.cwd === fileCwd));
   // Which file we've already redirected away from the diff view for. Without
   // it, a manual click back onto "Diff" for a file that has no diff would be
   // bounced straight back to "File" — the redirect is a first-open default,
@@ -689,6 +730,11 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   const autoSwitched = useRef<string | null>(null);
 
   useEffect(() => { setMode(target.mode); }, [target.abs, target.mode]);
+  // A different file is a different edit. Dropping the buffer silently is safe
+  // only because opening another file takes a click on the list, which is not
+  // something you do mid-sentence — and the alternative, blocking navigation on
+  // a confirm, makes the panel modal over a textarea nobody asked to keep.
+  useEffect(() => { setEdit(null); setConflict(null); setSaveErr(null); }, [target.abs]);
 
   // The rendered code element, and which lines are selected inside it. Watched
   // through selectionchange rather than a mouseup: a selection is also made by
@@ -698,7 +744,10 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   const [range, setRange] = useState<LineRange | null>(null);
   useEffect(() => {
     setRange(null);
-    if (mode !== "file") return;
+    // Not while editing: the rendered <code> the selection is measured against
+    // isn't on screen, and "add these lines to the chat" is not an offer to
+    // make about text that hasn't been saved yet.
+    if (mode !== "file" || edit !== null) return;
     // Deliberately only ever arms the button, never disarms it. Pressing a
     // button IS what clears a selection on most platforms — the tap collapses
     // it before the click lands — so a handler that mirrored every collapse
@@ -712,7 +761,7 @@ function FileView({ cwd, target, canAttach, onAttach }: {
     };
     document.addEventListener("selectionchange", sync);
     return () => document.removeEventListener("selectionchange", sync);
-  }, [mode, target.abs]);
+  }, [mode, target.abs, edit]);
 
   function addSelection() {
     const text = codeRef.current?.textContent;
@@ -788,6 +837,53 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   const step = (d: number) => { if (hits.length) setHit((i) => (i + d + hits.length) % hits.length); };
   const closeFind = () => { setFindOpen(false); setFind(""); };
 
+  // Two conditions, and between them they are the whole of what a save needs.
+  //
+  // The digest is the gateway's own answer to "could this file be written" — it
+  // issues one for a whole text read inside the write cap and for nothing else,
+  // so binary, images, truncated previews and oversized files are all covered
+  // without restating any of them here.
+  //
+  // Containment it cannot answer, because the read guard is deliberately wider
+  // than the write guard: the viewer opens files from the preview roots and from
+  // sibling folders in the repo, and a save to any of those will be refused. The
+  // display path is what says which side of that line a file is on — the gateway
+  // sends a cwd-relative path when it can and falls back to the absolute one
+  // when it can't, so an absolute path here IS "outside the folder we would
+  // write to". Better a pencil that is dim than one that fails after you type.
+  const insideCwd = !target.path.startsWith("/");
+  const canEdit = mode === "file" && file?.kind === "text"
+    && !!file.hash && file.text !== undefined && insideCwd;
+
+  function startEdit() {
+    if (!canEdit || file?.text === undefined) return;
+    // The find bar searches the rendered body, and the textarea is not in it —
+    // left open it would sit there reporting 0/0 over text it cannot see.
+    closeFind();
+    setSaveErr(null);
+    setConflict(null);
+    setEdit(file.text);
+  }
+
+  async function save() {
+    if (edit === null || !file?.hash) return;
+    setSaving(true);
+    setSaveErr(null);
+    try {
+      const r = await saveFilePreview(fileCwd, target.abs, restoreEol(edit, file.text ?? ""), file.hash);
+      if (!r.ok) { setConflict({ text: r.text, hash: r.hash }); return; }
+      // Straight back to reading, with the file the save produced. Not a
+      // re-fetch: the response already says what is on disk, and the digest it
+      // carries is what a second edit would need anyway.
+      setFile({ ...file, text: edit, size: r.size, modifiedAt: r.modifiedAt, hash: r.hash });
+      setEdit(null);
+    } catch (e) {
+      setSaveErr((e as Error).message || "Couldn't save this file.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const raw = rawFileUrl(cwd, target.abs);
   const ext = extensionOf(target.path);
   const isHtml = ext === "html" || ext === "htm";
@@ -809,42 +905,86 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   }, [cwd, target.abs, mode, isHtml]);
   return (
     <>
+      {/* The toolbar is the card's header rather than a bar floating over the
+          content: with the body edge-to-edge there was nothing to say the two
+          belonged together. The card continues the flex column so .wf-body is
+          still the thing that scrolls. */}
+      <div className="wf-card">
       <div className="wf-modes">
-        <button className={mode === "diff" ? "active" : ""} onClick={() => setMode("diff")}>Diff</button>
+        {/* Locked while editing: every one of them replaces the body the
+            textarea is in, and none of them has anything to say about text that
+            is only in the browser. */}
+        <button className={mode === "diff" ? "active" : ""} disabled={edit !== null}
+          onClick={() => setMode("diff")}>Diff</button>
         <button className={mode === "file" ? "active" : ""} onClick={() => setMode("file")}>File</button>
-        {canPreview && <button className={mode === "render" ? "active" : ""}
+        {canPreview && <button className={mode === "render" ? "active" : ""} disabled={edit !== null}
           // An HTML preview is an iframe, which no search of ours reaches into
           // — leaving the bar open there would only ever report 0/0.
           onClick={() => { setMode("render"); if (isHtml) closeFind(); }}>Preview</button>}
+        {/* Beside the tabs, not across the toolbar from them: what it describes
+            is the file those tabs are showing, and pinned to the far edge it
+            read as a third, unrelated thing. Yields the room to the range while
+            there is one — both at once overflow a phone-width panel.
+            No line count for a truncated file: the number would be the
+            preview's, and the preview is not the file. */}
+        {file && !range && (
+          <span className="wf-meta">
+            {file.kind === "text" && !file.truncated && file.text !== undefined
+              && countLines(file.text) + " lines · "}
+            {formatBytes(file.size)}{file.modifiedAt ? " · " + timeAgo(file.modifiedAt) : ""}
+          </span>
+        )}
         <span className="sp" />
-        {/* Yields the room to the range while there is one: both at once
-            overflow the toolbar on a phone-width panel. */}
-        {file && !range && <span className="wf-meta">{formatBytes(file.size)}{file.modifiedAt ? " · " + timeAgo(file.modifiedAt) : ""}</span>}
-        {/* Select lines in the file and they can go to the composer as an
-            attachment. Present but dim with nothing selected — an action that
-            only exists once you have already done the thing that enables it is
-            an action nobody finds. */}
-        {canAttach && mode === "file" && file?.kind === "text" && (
-          <button type="button" className={"icon-btn wf-add" + (range ? " on" : "")} disabled={!range}
-            onClick={addSelection}
-            // Keeps the lines visibly selected while the button is pressed —
-            // the default action of a mousedown is to collapse the selection.
-            onMouseDown={(e) => e.preventDefault()}
-            title={range
-              ? "Add lines " + formatRange(range) + " to the chat"
-              : "Select lines in the file to add them to the chat"}>
-            <IconAddToChat />{range && <span className="lines">{formatRange(range)}</span>}
-          </button>
-        )}
-        {!(mode === "render" && isHtml) && (
-          <button type="button" className={"icon-btn wf-search-btn" + (findOpen ? " on" : "")}
-            onClick={() => (findOpen ? closeFind() : setFindOpen(true))}
-            title={findOpen ? "Close search" : "Find in this file"}>
-            <IconSearch />
-          </button>
-        )}
-        <DownloadButton raw={raw} name={basename(target.path)}
-          selfContained={mode === "render" && isHtml && render && render.inlined > 0 ? render.html : undefined} />
+        {/* One bordered cluster rather than three loose glyphs: they are the
+            file's actions, and grouped they also cost less width than spaced. */}
+        <span className="wf-acts">
+          {/* Small fixes from wherever you are, which is the whole scope: a flag
+              in a config, a line in a prompt. Anything bigger is what the agent
+              in the next pane is for. Shown greyed rather than hidden on a file
+              it can't touch — "why can't I edit this" is answerable, "where did
+              the pencil go" is not. */}
+          {mode === "file" && file && file.kind === "text" && (
+            <button type="button" className={"icon-btn wf-edit" + (edit !== null ? " on" : "")}
+              disabled={!canEdit || edit !== null}
+              onClick={startEdit}
+              title={canEdit ? "Edit this file"
+                : !insideCwd ? "This file is outside " + basename(fileCwd) + ", so it can only be read here"
+                : file.truncated || !file.hash ? "This file is too big to edit here"
+                : "This file can't be edited here"}>
+              <IconPencil />
+            </button>
+          )}
+          {/* Select lines in the file and they can go to the composer as an
+              attachment. Present but dim with nothing selected — an action that
+              only exists once you have already done the thing that enables it is
+              an action nobody finds. */}
+          {canAttach && mode === "file" && file?.kind === "text" && (
+            <button type="button" className={"icon-btn wf-add" + (range ? " on" : "")} disabled={!range}
+              onClick={addSelection}
+              // Keeps the lines visibly selected while the button is pressed —
+              // the default action of a mousedown is to collapse the selection.
+              onMouseDown={(e) => e.preventDefault()}
+              title={range
+                ? "Add lines " + formatRange(range) + " to the chat"
+                : "Select lines in the file to add them to the chat"}>
+              <IconAddToChat />{range && <span className="lines">{formatRange(range)}</span>}
+            </button>
+          )}
+          {!(mode === "render" && isHtml) && (
+            // Off while editing for the same reason it is closed on the way in:
+            // the search reads the rendered body, and a textarea's value is not
+            // in it — the bar would sit there reporting 0/0 over your own text.
+            <button type="button" className={"icon-btn wf-search-btn" + (findOpen ? " on" : "")}
+              disabled={edit !== null}
+              onClick={() => (findOpen ? closeFind() : setFindOpen(true))}
+              title={edit !== null ? "Finish editing to search this file"
+                : findOpen ? "Close search" : "Find in this file"}>
+              <IconSearch />
+            </button>
+          )}
+          <DownloadButton raw={raw} name={basename(target.path)}
+            selfContained={mode === "render" && isHtml && render && render.inlined > 0 ? render.html : undefined} />
+        </span>
       </div>
       {/* Its own row rather than a field in the toolbar: at 390px that bar
           already carries three mode buttons and two icons. */}
@@ -871,7 +1011,22 @@ function FileView({ cwd, target, canAttach, onAttach }: {
           <button type="button" className="icon-btn" onClick={closeFind} title="Close search"><IconX /></button>
         </div>
       )}
-      <div className="wf-body" ref={bodyRef}>
+      {/* The editor REPLACES the body rather than sitting inside it: .wf-body is
+          a block scroller for rendered content, so a textarea in there gets no
+          flex context and collapses to its default two rows. Out here the card's
+          own column gives it the height, and it does its own scrolling. */}
+      {edit !== null && (
+        <textarea className="wf-edit-area" value={edit} spellCheck={false} autoFocus
+          aria-label={"Edit " + target.path}
+          onChange={(e) => setEdit(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") { setEdit(null); setConflict(null); setSaveErr(null); return; }
+            // The footer's button is the discoverable way; this is the one you
+            // reach for once you have used it twice.
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void save(); }
+          }} />
+      )}
+      <div className="wf-body" ref={bodyRef} hidden={edit !== null}>
         {err && <div className="wf-empty">{err}</div>}
         {!err && loading && <div className="wf-empty">Loading…</div>}
         {!err && !loading && mode === "diff" && diff && (
@@ -918,8 +1073,71 @@ function FileView({ cwd, target, canAttach, onAttach }: {
                 </div>
         )}
       </div>
+      {edit !== null && (
+        <>
+          {/* A warning, never a lock. A turn can run for minutes, and refusing
+              to save for its duration costs more than the occasional refused
+              save — which the digest catches anyway, with both versions in hand. */}
+          {agentWorkingHere && !conflict && (
+            <div className="wf-strip warn">
+              A conversation is working in this folder. If it writes this file first, your save will be
+              refused rather than overwrite it.
+            </div>
+          )}
+          {conflict && (
+            <div className="wf-strip err">
+              This file changed after you opened it, so nothing was saved — your edit is still above.
+            </div>
+          )}
+          {saveErr && <div className="wf-strip err">{saveErr}</div>}
+          <div className="wf-edit-foot">
+            {/* No automatic merge: the two versions were written by different
+                authors minutes apart, and guessing which lines survive is the
+                one thing a panel this size should not do. Copy, look, decide. */}
+            {conflict
+              ? <>
+                  <span className="hint">Copy yours, then reload to see theirs.</span>
+                  <span className="sp" />
+                  <button className="wf-btn" onClick={() => void copyText(edit)}>Copy mine</button>
+                  <button className="wf-btn danger" onClick={() => {
+                    setFile((f) => (f ? { ...f, text: conflict.text, hash: conflict.hash } : f));
+                    setEdit(null);
+                    setConflict(null);
+                  }}>Discard mine, load theirs</button>
+                </>
+              : <>
+                  <span className="hint">⌘↵ to save · Esc to cancel</span>
+                  <span className="sp" />
+                  <button className="wf-btn" disabled={saving}
+                    onClick={() => { setEdit(null); setSaveErr(null); }}>Cancel</button>
+                  <button className="wf-btn primary" disabled={saving || edit === file?.text}
+                    onClick={() => void save()}>
+                    {saving ? <IconSpinner /> : <IconCheck />}{saving ? "Saving…" : "Save"}
+                  </button>
+                </>}
+          </div>
+        </>
+      )}
+      </div>
     </>
   );
+}
+
+// Line endings as the file had them. A textarea normalises every \r\n in its
+// value to \n, so saving one straight back rewrites the ending of every line in
+// a CRLF file — a whole-file diff nobody asked for, and the kind that is only
+// noticed by whoever reviews it. Mixed endings are unified to whatever the file
+// had more of a claim to: if it contained a \r\n at all, it gets \r\n.
+function restoreEol(next: string, original: string): string {
+  return original.includes("\r\n") ? next.replace(/\r?\n/g, "\r\n") : next;
+}
+
+// Lines as a reader counts them: a file ending in a newline has not got an
+// extra empty last line, which is what a bare split would claim.
+function countLines(text: string): number {
+  if (text === "") return 0;
+  const n = text.split("\n").length;
+  return text.endsWith("\n") ? n - 1 : n;
 }
 
 // Saves through a blob rather than linking straight at /workspace/raw. An
@@ -999,7 +1217,13 @@ function FileContents({ file, raw, codeRef }: {
           ? <code ref={codeRef} className="wf-hl" dangerouslySetInnerHTML={{ __html: html }} />
           : <code ref={codeRef}>{file.text}</code>}
       </pre>
-      {file.truncated && <div className="wf-note">File truncated at {formatBytes(file.text?.length ?? 0)}.</div>}
+      {/* No byte count: the only one to hand was the decoded string's length,
+          which is UTF-16 units and reads about half the truth for CJK text.
+          The toolbar already carries the file's real size — what this row has
+          to say is that the text above isn't all of it. */}
+      {file.truncated && (
+        <div className="wf-note">Showing the start of this file — the rest was too large to preview.</div>
+      )}
     </>
   );
 }

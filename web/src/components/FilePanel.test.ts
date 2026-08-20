@@ -34,6 +34,7 @@ describe("FilePanel", () => {
   let getWorkspaceTree: ReturnType<typeof vi.fn>;
   let getWorkspaceOutputs: ReturnType<typeof vi.fn>;
   let getHtmlRender: ReturnType<typeof vi.fn>;
+  let saveFilePreview: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -63,6 +64,9 @@ describe("FilePanel", () => {
     getHtmlRender = vi.fn().mockResolvedValue({
       html: "", inlined: 0, skipped: 0, truncated: false, htmlTruncated: false,
     });
+    saveFilePreview = vi.fn().mockResolvedValue({
+      ok: true, size: 21, modifiedAt: new Date().toISOString(), hash: "after",
+    });
     vi.doMock("../lib/api.ts", () => ({
       getWorkspaceChanges,
       getFileDiff,
@@ -70,6 +74,7 @@ describe("FilePanel", () => {
       getWorkspaceTree,
       getWorkspaceOutputs,
       getHtmlRender,
+      saveFilePreview,
       findWorkspaceFiles: vi.fn().mockResolvedValue({ files: [], truncated: false, fromGit: true }),
       // The Project tab's folder switcher browses with the same /fs route the
       // composer's folder picker uses.
@@ -204,7 +209,7 @@ describe("FilePanel", () => {
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
     const modeLabels = () =>
-      [...container.querySelectorAll(".wf-modes button:not(.wf-dl):not(.wf-search-btn)")].map((b) => b.textContent);
+      [...container.querySelectorAll(".wf-modes > button")].map((b) => b.textContent);
     expect(modeLabels()).toEqual(["Diff", "File"]);
 
     getFilePreview.mockResolvedValue({
@@ -753,7 +758,8 @@ describe("FilePanel", () => {
     expect(container.querySelector(".wf-panes.folded")).toBeNull();
 
     // And the viewer closes from its own header, since Back is gone with it.
-    const close = [...container.querySelectorAll<HTMLButtonElement>(".wf-view-head .icon-btn")][0];
+    const close = [...container.querySelectorAll<HTMLButtonElement>(".wf-view-head .icon-btn")]
+      .find((b) => b.title === "Close file")!;
     await act(async () => { close.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
     expect(container.querySelector(".wf-view")).toBeNull();
@@ -1180,4 +1186,147 @@ describe("FilePanel", () => {
     expect(useStore.getState().attachedFiles).toHaveLength(1);
     expect(useStore.getState().filesOpen).toBe(false);
   });
+
+  // ---- editing a file in place ----
+  // The precondition lives on the gateway; what these pin down is the client's
+  // half — that it only offers the pencil where a save could succeed, that it
+  // puts back the line endings a textarea silently ate, and that a refused save
+  // keeps the reader's work.
+
+  // The panel has to be wide enough to split before the viewer's own header and
+  // toolbar are on screen at all.
+  async function openForEdit(preview: Partial<FilePreviewResult> = {}, openAs?: { abs: string; path: string }) {
+    const { useStore } = await import("../store/store.ts");
+    getFilePreview.mockResolvedValue({
+      path: "agents.json", abs: "/repo/agents.json", kind: "text",
+      size: 20, modifiedAt: new Date().toISOString(),
+      text: "flag = off\n", truncated: false, hash: "before",
+      ...preview,
+    } satisfies FilePreviewResult);
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await act(async () => {
+      useStore.getState().openFilePreview({
+        abs: openAs?.abs ?? "/repo/agents.json", path: openAs?.path ?? "agents.json", mode: "file",
+      });
+    });
+    await act(async () => { await flush(); });
+    return [...container.querySelectorAll<HTMLButtonElement>(".wf-modes .icon-btn")]
+      .find((b) => b.classList.contains("wf-edit"))!;
+  }
+
+  const area = () => container.querySelector<HTMLTextAreaElement>(".wf-edit-area");
+  const footBtn = (label: string) =>
+    [...container.querySelectorAll<HTMLButtonElement>(".wf-edit-foot .wf-btn")]
+      .find((b) => b.textContent?.includes(label))!;
+  const type = async (text: string) => {
+    const el = area()!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(el, text);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+
+  test("a whole-text file can be edited and saved back", async () => {
+    const pencil = await openForEdit();
+    expect(pencil.disabled).toBe(false);
+    await act(async () => { pencil.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(area()?.value).toBe("flag = off\n");
+
+    // Nothing typed yet, so there is nothing to save.
+    expect(footBtn("Save").disabled).toBe(true);
+    await type("flag = on\n");
+    await act(async () => { footBtn("Save").dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    expect(saveFilePreview).toHaveBeenCalledWith("/repo", "/repo/agents.json", "flag = on\n", "before");
+    // Back to reading, without a second read: the save's own answer is the file.
+    expect(area()).toBeNull();
+    expect(getFilePreview).toHaveBeenCalledTimes(1);
+  });
+
+  test("a CRLF file keeps its line endings, which the textarea would have eaten", async () => {
+    const pencil = await openForEdit({ text: "one\r\ntwo\r\n" });
+    await act(async () => { pencil.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    // What a textarea hands back: every \r\n normalised away.
+    await type("one\ntwo\nthree\n");
+    await act(async () => { footBtn("Save").dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(saveFilePreview.mock.calls[0][2]).toBe("one\r\ntwo\r\nthree\r\n");
+  });
+
+  test("a truncated file offers no pencil at all", async () => {
+    // No hash is how the gateway says "you did not see all of this", and it is
+    // the only thing the client checks — one condition covering every reason.
+    const pencil = await openForEdit({ truncated: true, hash: undefined });
+    expect(pencil.disabled).toBe(true);
+    expect(pencil.title).toContain("too big");
+  });
+
+  test("a refused save keeps the edit and offers both versions", async () => {
+    saveFilePreview.mockResolvedValue({
+      ok: false, code: "stale", text: "written by the agent\n", hash: "theirs",
+      modifiedAt: new Date().toISOString(),
+    });
+    const pencil = await openForEdit();
+    await act(async () => { pencil.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await type("mine\n");
+    await act(async () => { footBtn("Save").dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    expect(container.querySelector(".wf-strip.err")?.textContent).toContain("changed after you opened it");
+    // The reader's work must survive the refusal.
+    expect(area()?.value).toBe("mine\n");
+
+    // Taking theirs uses the text the 409 already carried — no re-read.
+    await act(async () => {
+      footBtn("Discard mine").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => { await flush(); });
+    expect(area()).toBeNull();
+    expect(getFilePreview).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".wf-text")?.textContent).toContain("written by the agent");
+  });
+
+
+  test("a file outside the folder we could write to is read-only", async () => {
+    // The gateway sends an ABSOLUTE display path for anything it had to reach a
+    // preview root or a sibling folder for — which is exactly the set its write
+    // guard refuses. The pencil has to read that, or it lights up on a file the
+    // save will 400.
+    // relativeTo() hands back the absolute path unchanged for a file that isn't
+    // under the folder it was opened against, so that is what the panel holds.
+    const pencil = await openForEdit(
+      { path: "/tmp/scratch/note.txt", abs: "/tmp/scratch/note.txt" },
+      { abs: "/tmp/scratch/note.txt", path: "/tmp/scratch/note.txt" },
+    );
+    expect(pencil.disabled).toBe(true);
+    expect(pencil.title).toContain("outside");
+  });
+
+  test("a file past the write cap gets no pencil, because the gateway issued no digest", async () => {
+    // Not truncated — under the 512 KB read cap — but over the 256 KB write cap,
+    // so a save would always 413. The gateway withholds the hash and that alone
+    // is what the client checks.
+    const pencil = await openForEdit({ size: 300 * 1024, hash: undefined });
+    expect(pencil.disabled).toBe(true);
+    expect(pencil.title).toContain("too big");
+  });
+
+
+  test("the editor is the card's own pane, not something inside the scroller", async () => {
+    // .wf-body is a block scroller: a textarea inside it has no flex context and
+    // collapses to two rows with the rest of the card blank under it. This is a
+    // layout bug a rendering test can only catch structurally — so it checks the
+    // parent, which is the thing that was wrong.
+    const pencil = await openForEdit();
+    await act(async () => { pencil.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const editor = area()!;
+    expect(editor.parentElement?.classList.contains("wf-card")).toBe(true);
+    expect(editor.closest(".wf-body")).toBeNull();
+    // And the reading pane is out of the way while it is up.
+    expect(container.querySelector<HTMLElement>(".wf-body")?.hidden).toBe(true);
+  });
+
 });

@@ -251,4 +251,29 @@ describe("global styles", () => {
 
     expect(tinted.sort()).toEqual(['.idot', ':root[data-identity="hue"]']);
   });
+
+  // The file-action cluster was first written as `.wf-group`, which is already
+  // the list-heading class four screens use — so both rules landed on both
+  // elements, and the cluster came out 16px taller than its own buttons while
+  // the headings picked up a border. A block-level heading and an inline-flex
+  // strip of buttons are the two shapes this checks stayed apart.
+  test("the file-action cluster and the list headings are different classes", () => {
+    const acts = cssRule(".wf-acts");
+    const heading = cssRule(".wf-group");
+
+    expect(acts).toMatch(/display\s*:\s*inline-flex/);
+    expect(acts).toMatch(/border\s*:/);
+    // The heading is a line of text and owns no box of its own.
+    expect(heading).not.toMatch(/inline-flex/);
+    expect(heading).not.toMatch(/border\s*:/);
+  });
+
+  // A 22px glyph in a 30px button, next to a 17px one, is what "the icons look
+  // broken" was: .icon-btn and .wf-add each set their own size, and the cluster
+  // put them side by side for the first time.
+  test("every glyph in the action cluster is one size", () => {
+    expect(cssRule(".wf-acts .icon-btn svg")).toMatch(/width\s*:\s*16px/);
+    expect(cssRule(".wf-acts .icon-btn")).toMatch(/padding\s*:\s*0/);
+  });
+
 });

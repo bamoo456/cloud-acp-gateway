@@ -170,6 +170,10 @@ export interface FilePreviewResult {
   kind: "text" | "image" | "binary";
   size: number; modifiedAt: string;
   mimeType?: string; text?: string; truncated?: boolean;
+  // Present only for a text file the gateway read WHOLE. It is the token a save
+  // echoes back, so its absence is also the answer to "can this be edited" — a
+  // truncated read has no digest that describes the file.
+  hash?: string;
 }
 
 // Which revision a workspace read is about. Null — the ordinary case — is the
@@ -231,7 +235,43 @@ export async function getFilePreview(cwd: string, filePath: string): Promise<Fil
     mimeType: typeof r?.mimeType === "string" ? r.mimeType : undefined,
     text: typeof r?.text === "string" ? r.text : undefined,
     truncated: !!r?.truncated,
+    hash: typeof r?.hash === "string" ? r.hash : undefined,
   };
+}
+
+// Replacing one file, with the digest of what was read as the precondition.
+//
+// The 409 is not an error to throw: it carries the file as it is NOW, and the
+// caller's whole job at that point is to show both versions. So it comes back
+// as a value, and only a genuinely failed request throws.
+export type SaveFileResult =
+  | { ok: true; size: number; modifiedAt: string; hash: string }
+  | { ok: false; code: "stale"; text: string; hash: string; modifiedAt: string };
+
+export async function saveFilePreview(
+  cwd: string, filePath: string, text: string, hash: string,
+): Promise<SaveFileResult> {
+  const url = base() + "/workspace/file?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text, hash }),
+  });
+  const body = await r.json().catch(() => null) as Record<string, unknown> | null;
+  if (r.status === 409 && body?.code === "stale") {
+    return {
+      ok: false, code: "stale",
+      text: String(body.text ?? ""), hash: String(body.hash ?? ""), modifiedAt: String(body.modifiedAt ?? ""),
+    };
+  }
+  if (!r.ok) {
+    throw new Error(
+      r.status === 413 ? "This file is too large to save from the browser."
+        : typeof body?.error === "string" ? body.error
+        : "Couldn't save this file.",
+    );
+  }
+  return { ok: true, size: Number(body?.size ?? 0), modifiedAt: String(body?.modifiedAt ?? ""), hash: String(body?.hash ?? "") };
 }
 
 // ---- browsing the project itself ----
