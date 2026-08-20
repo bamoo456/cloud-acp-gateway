@@ -35,6 +35,33 @@ test("seedPinnedFolders seeds once and never resurrects after the user edits", (
   db.close();
 });
 
+test("hide / unhide round-trips and reports membership", () => {
+  const db = new Db(":memory:");
+  assert.deepEqual(db.hiddenFolders(), []);
+  assert.equal(db.isHidden("/a"), false);
+
+  db.hide("/a");
+  assert.equal(db.isHidden("/a"), true);
+  assert.deepEqual(db.hiddenFolders(), ["/a"]);
+
+  // hiding the same path again is idempotent
+  db.hide("/a");
+  assert.deepEqual(db.hiddenFolders(), ["/a"]);
+
+  db.unhide("/a");
+  assert.equal(db.isHidden("/a"), false);
+  assert.deepEqual(db.hiddenFolders(), []);
+  db.close();
+});
+
+test("hiddenFolders orders oldest-hidden first", () => {
+  const db = new Db(":memory:");
+  db.hide("/a");
+  db.hide("/b");
+  assert.deepEqual(db.hiddenFolders(), ["/a", "/b"]);
+  db.close();
+});
+
 test("state persists across reopen of the same file", () => {
   const dir = `/tmp/acpb-db-test-${process.pid}-${Date.now()}`;
   const file = `${dir}/state.sqlite`;

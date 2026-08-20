@@ -92,3 +92,47 @@ export function latestWithPinned<T>(rows: Array<GroupableRow<T>>): {
   const rest = rows.filter((r) => !r.needsYou && !r.running).sort(byWhen);
   return { pinned, rest };
 }
+
+// Splits the (already-sorted) recency list in two, so a reader can tell "just
+// happened" apart from "sometime in the last N days" without reading every
+// relative timestamp. `<=`, not `<`, at the boundary: a row exactly one hour
+// old has not gone stale in the second it crosses the line. A `when` of 0 (no
+// usable timestamp) is always more than windowMs away from `now`, so it lands
+// in `older` — which is where it already sorts anyway.
+export function splitByAge<T>(
+  rows: Array<GroupableRow<T>>,
+  now: number,
+  windowMs = 3600_000,
+): { fresh: Array<GroupableRow<T>>; older: Array<GroupableRow<T>> } {
+  const fresh: Array<GroupableRow<T>> = [];
+  const older: Array<GroupableRow<T>> = [];
+  for (const row of rows) (now - row.when <= windowMs ? fresh : older).push(row);
+  return { fresh, older };
+}
+
+// Folders the reader has explicitly chosen (in the folder picker) never to
+// see — real folders now, not typed substring patterns, so a hide entry is
+// matched by normalised folder key: exact, or a parent whose subtree the
+// entry covers. That "subtree" rule is why a plain string.includes() won't
+// do: it would make "/x/repo" hide "/x/repo-2" too, which is not what hiding
+// a specific folder should mean. This is the one place a row IS allowed to
+// sink out of sight even while running or needing you: unlike the sorting
+// above, hiding is something the reader chose on purpose, the durable inbox
+// still surfaces that session's prompts elsewhere, and the "N hidden"
+// affordance the caller renders keeps the cut from being silent.
+export function hideFolders<T>(
+  rows: Array<GroupableRow<T>>,
+  hidden: string[],
+  currentCwd: string,
+  home = "",
+): Array<GroupableRow<T>> {
+  const hiddenKeys = [...new Set(hidden.map((h) => folderKey(h, home)).filter(Boolean))];
+  if (hiddenKeys.length === 0) return rows;
+  // Never hide the folder you're working in — silently emptying it would
+  // read as data loss, not as the filter doing its job.
+  const currentKey = folderKey(currentCwd, home);
+  return rows.filter((row) => {
+    const key = folderKey(row.cwd, home);
+    return key === currentKey || !hiddenKeys.some((h) => key === h || key.startsWith(h + "/"));
+  });
+}

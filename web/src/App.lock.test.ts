@@ -35,7 +35,7 @@ describe("screen lock — connection-driven (no idle/visibility timer)", () => {
       renameSession: vi.fn(),
       listDir: vi.fn().mockResolvedValue({ root: "/", path: "/", parent: null, dirs: [] }),
       // lock enabled with a stored PIN hash
-      getPrefs: vi.fn().mockResolvedValue({ textSize: null, lock: savedPinLock, recentSessions: [], recentFolders: [] }),
+      getPrefs: vi.fn().mockResolvedValue({ textSize: null, lock: savedPinLock, recentSessions: [], recentFolders: [], hiddenFolders: [] }),
       putTextSize: vi.fn().mockResolvedValue(undefined),
       // The status bar's diffstat: the file panel reads the checkout even
       // while it is shut, so App-level renders touch this route too.
