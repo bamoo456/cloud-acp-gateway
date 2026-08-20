@@ -128,7 +128,7 @@ function SessionRowMenu({ target, onRename, onDelete, onClose }: {
     </>
   );
 }
-export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClose: () => void; onOpenPicker: () => void }) {
+export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open: boolean; onClose: () => void; onOpenPicker: () => void; focusSearch?: number }) {
   const s = useStore();
   const [items, setItems] = useState<TaggedHistory[] | null>(null);
   const [err, setErr] = useState(false);
@@ -174,6 +174,10 @@ export function Sidebar({ open, onClose, onOpenPicker }: { open: boolean; onClos
   // Only so clearing the box can hand focus back to it — a clear that also
   // dismisses the keyboard costs a second tap to type the next term.
   const searchRef = useRef<HTMLInputElement>(null);
+  // Cmd-Shift-F (App owns the key) lands here. The counter starts at 0 so a
+  // plain mount doesn't steal focus, and App reveals the panel in the same
+  // event, so the column is no longer display:none by the time this runs.
+  useEffect(() => { if (focusSearch) searchRef.current?.focus(); }, [focusSearch]);
   // The gateway marks agents with no native history reader as history:false.
   // Missing flag (dev fallback, older gateway) = supported.
   const agentByName = new Map(s.cfg.agents.map((a) => [a.name, a] as const));
