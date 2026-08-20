@@ -1167,6 +1167,33 @@ test("search finds a phrase in a user message and reports its message index", as
   assert.equal(r.results[0].cwd, fs.realpathSync(cwd));
 });
 
+// "Find in this conversation": the scope names one session, so the scan must
+// read that transcript and no other, must not be bounded by the recency window
+// a cross-session scan uses (the conversation you are reading can be months
+// old), and must report every matching message rather than the three a results
+// LIST shows.
+test("a session-scoped search reads only that session, unbounded, past the list cap", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));
+  const stale = "2026-01-01T00:00:00.000Z"; // seven months before NOW, i.e. outside the default window
+  const lines: unknown[] = [{ type: "user", cwd, sessionId: "s-target", timestamp: stale, message: { role: "user", content: "needle opener" } }];
+  for (let i = 0; i < 5; i++) {
+    lines.push({ type: "assistant", sessionId: "s-target", message: { role: "assistant", content: [{ type: "text", text: `needle reply ${i}` }] } });
+  }
+  writeClaudeProjectTranscript(root, "proj", "s-target", lines as never[], Date.parse(stale));
+  writeClaudeProjectTranscript(root, "proj", "s-other", [
+    { type: "user", cwd, sessionId: "s-other", timestamp: "2026-08-01T00:00:00.000Z", message: { role: "user", content: "needle elsewhere" } },
+  ], Date.parse("2026-08-01T00:00:00.000Z"));
+
+  const r = await searchTranscripts([{ name: "claude", cmd: CLAUDE_CMD }], searchParams("q=needle&session=s-target"),
+    { projectsRoot: root, fsRoot: permissiveRoot(), store: memStore() });
+  assert.deepEqual(r.results.map((x) => x.sessionId), ["s-target"]);
+  assert.equal(r.scanned.files, 1);            // the other transcript is never opened
+  assert.equal(r.results[0].hitCount, 6);
+  assert.equal(r.results[0].hits.length, 6);   // not capped at MAX_HITS_PER_SESSION
+  assert.deepEqual(r.results[0].hits.map((h) => h.index), [0, 1, 2, 3, 4, 5]);
+});
+
 test("search ignores a term that appears only in tool output", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-search-"));
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-cwd-"));

@@ -4,7 +4,7 @@ import { ActionMenu } from "./ActionMenu.tsx";
 import { PendingPermissions } from "./PendingPermissions.tsx";
 import { basename, dirname } from "../lib/format.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
-import { IconClock, IconPlus, IconDots, IconPanel } from "../lib/icons.tsx";
+import { IconClock, IconPlus, IconDots, IconPanel, IconSearch } from "../lib/icons.tsx";
 
 // The crumb answers one question — where are you — and nothing else (§1.4).
 // The folder's parents are muted, its own name is ink, the session title trails
@@ -24,7 +24,9 @@ function Crumb({ cwd, title, onPicker }: { cwd: string; title: string; onPicker:
 
 // Identity and the engine settings live in the dock above the composer now, so
 // the crumb carries neither the agent pill nor its re-login button (§1.4).
-export function TopBar({ onPanel, onPicker }: { onPanel: () => void; onPicker: () => void }) {
+export function TopBar({ onPanel, onPicker, findOpen, onFind }: {
+  onPanel: () => void; onPicker: () => void; findOpen?: boolean; onFind?: () => void;
+}) {
   const s = useStore();
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const [menu, setMenu] = useState(false);
@@ -46,6 +48,8 @@ export function TopBar({ onPanel, onPicker }: { onPanel: () => void; onPicker: (
           an agent this client has no live connection to can be ANSWERED
           without first switching sessions. */}
       <PendingPermissions />
+      <button className={"icon-btn" + (findOpen ? " on" : "")} title="Find in conversation"
+        aria-pressed={findOpen} onClick={onFind}><IconSearch /></button>
       <button className="icon-btn" title="Conversation menu" onClick={() => setMenu((v) => !v)}><IconDots /></button>
       <button className="icon-btn" title="New chat" onClick={() => { if (s.agentReady) s.newSession(); }}><IconPlus /></button>
       {/* Last, against the edge the panel it opens slides out from — the same
