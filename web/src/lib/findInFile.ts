@@ -17,7 +17,12 @@
 // ponytail: hard cap; make it incremental if anyone actually hits it.
 export const MAX_HITS = 500;
 
-const ALL = "wf-find", CURRENT = "wf-find-current";
+// Highlight names are per-caller because the registry is document-global: the
+// file panel and the thread can be searched at the same time on a desktop
+// layout, and one clearing or overwriting the other's highlights would leave
+// the losing panel's matches unpainted. Each name needs its own ::highlight()
+// rule in styles.css.
+export const DEFAULT_HIGHLIGHT = "wf-find";
 
 export function matchOffsets(text: string, query: string, cap = MAX_HITS): number[] {
   if (!query) return [];
@@ -77,26 +82,26 @@ type Globals = { CSS?: { highlights?: Map<string, unknown> }; Highlight?: Highli
 const registry = () => (globalThis as unknown as Globals).CSS?.highlights;
 const highlightCtor = () => (globalThis as unknown as Globals).Highlight;
 
-export function paintHits(hits: Range[], index: number): void {
+export function paintHits(hits: Range[], index: number, name = DEFAULT_HIGHLIGHT): void {
   const reg = registry(), Ctor = highlightCtor();
   if (!reg || !Ctor) return;
   const current = hits[index];
-  if (!current) { clearHits(); return; }
+  if (!current) { clearHits(name); return; }
   // The current hit is held out of the general set rather than layered over it:
   // two highlights covering the same range are painted in registration order,
   // so an overlapping "all" would win and the current match would look like
   // every other one.
-  reg.set(ALL, new Ctor(...hits.filter((_, i) => i !== index)));
-  reg.set(CURRENT, new Ctor(current));
+  reg.set(name, new Ctor(...hits.filter((_, i) => i !== index)));
+  reg.set(name + "-current", new Ctor(current));
 }
 
 // The registry is document-global — highlights left behind by a closed panel
 // stay painted over whatever renders next.
-export function clearHits(): void {
+export function clearHits(name = DEFAULT_HIGHLIGHT): void {
   const reg = registry();
   if (!reg) return;
-  reg.delete(ALL);
-  reg.delete(CURRENT);
+  reg.delete(name);
+  reg.delete(name + "-current");
 }
 
 // The viewer renders a file as a single text node, so scrollIntoView() on the

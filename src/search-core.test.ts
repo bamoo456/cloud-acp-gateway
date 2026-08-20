@@ -187,3 +187,21 @@ test("searchQueryParams ignores an unusable role and decodes the cursor", () => 
   assert.deepEqual(params("q=liquid&cursor=" + encodeCursor({ recencyMs: 5, sessionId: "s1" }))?.cursor,
     { recencyMs: 5, sessionId: "s1" });
 });
+
+// "Find in this conversation" names its own scope, so the recency window that
+// keeps a cross-session scan cheap must not silently empty it — a conversation
+// you are reading right now can easily be older than the 14-day default.
+test("searchQueryParams scopes to a session and drops the recency window", () => {
+  const p = params("q=liquid&session=abc-123&until=2026-07-01T00:00:00Z");
+  assert.equal(p?.sessionId, "abc-123");
+  assert.equal(p?.sinceMs, null);
+  assert.equal(p?.untilMs, null);
+});
+
+test("searchQueryParams sanitizes the session id and treats an empty one as unscoped", () => {
+  assert.equal(params("q=liquid&session=" + encodeURIComponent("../../etc/passwd"))?.sessionId, "etcpasswd");
+  assert.equal(params("q=liquid&session=")?.sessionId, null);
+  assert.equal(params("q=liquid")?.sessionId, null);
+  // Unscoped keeps the default window.
+  assert.equal(params("q=liquid")?.sinceMs, NOW - DEFAULT_SINCE_DAYS * 86400000);
+});

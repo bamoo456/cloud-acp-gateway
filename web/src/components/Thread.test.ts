@@ -514,3 +514,219 @@ describe("Thread turn grouping", () => {
     expect(main.querySelector(".turn.user .body")?.textContent).toContain("do the thing");
   });
 });
+
+// Find in this conversation. The window mounts only the last handful of items
+// and folds every reply but one, so the two things worth pinning are that a
+// match outside the window pulls it into the DOM, and that a match inside a
+// folded reply unfolds it.
+describe("Thread find-in-conversation", () => {
+  let root: Root | null = null;
+  let main: HTMLElement;
+
+  const longSession = (): Session => ({
+    id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
+    hasContent: true, working: false,
+    curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+    historyStart: 0, loadingOlder: false,
+    items: [
+      { id: "old-q", kind: "user", text: "how do we handle the zzyzx token?" },
+      { id: "old-a", kind: "assistant", text: "The zzyzx token is minted in auth.ts." },
+      // Well past INITIAL_VISIBLE (10), so the pair above starts off-window.
+      ...Array.from({ length: 30 }, (_, i) => (
+        i % 2 === 0
+          ? { id: "u" + i, kind: "user" as const, text: "later question " + i }
+          : { id: "a" + i, kind: "assistant" as const, text: "later answer " + i }
+      )),
+    ],
+  });
+
+  beforeEach(() => {
+    vi.resetModules();
+    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "wsPath": "/acp",
+      "token": "test-token",
+      "defaultAgent": "claude",
+      "agents": [{ "name": "claude", "cwd": "/repo" }],
+      "fsRoot": "/"
+    }</script>`;
+    main = document.createElement("main");
+    document.body.appendChild(main);
+  });
+
+  afterEach(() => {
+    if (root) { act(() => root?.unmount()); root = null; }
+    main.remove();
+    vi.unstubAllGlobals();
+  });
+
+  async function typeQuery(q: string) {
+    const input = main.querySelector<HTMLInputElement>(".thread-find input")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, q);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  test("reveals and unfolds a match that was outside the mounted window", async () => {
+    const { Thread } = await import("./Thread.tsx");
+    const session = longSession();
+
+    await act(async () => {
+      root = createRoot(main);
+      root.render(React.createElement(Thread, { session, agentReady: true, findOpen: true, onCloseFind: () => {} }));
+    });
+
+    // The old exchange is off-window before the search.
+    expect(main.querySelector('[data-id="old-a"]')).toBeNull();
+
+    await typeQuery("zzyzx");
+
+    // Two occurrences (the question and the reply), starting at the first.
+    expect(main.querySelector(".thread-find .n")?.textContent).toBe("1/2");
+    expect(main.querySelector('[data-id="old-q"]')).not.toBeNull();
+
+    // Stepping to the reply's occurrence unfolds that turn — a folded one shows
+    // only its peek line, never the body the match is in.
+    const next = main.querySelectorAll<HTMLButtonElement>(".thread-find .icon-btn")[1];
+    await act(async () => { next.click(); });
+    expect(main.querySelector(".thread-find .n")?.textContent).toBe("2/2");
+    expect(main.querySelector('[data-id="old-a"]')?.textContent).toContain("minted in auth.ts");
+  });
+
+  test("no match reads 0/0 and leaves the window alone", async () => {
+    const { Thread } = await import("./Thread.tsx");
+    await act(async () => {
+      root = createRoot(main);
+      root.render(React.createElement(Thread, { session: longSession(), agentReady: true, findOpen: true, onCloseFind: () => {} }));
+    });
+    await typeQuery("nothinghere");
+    expect(main.querySelector(".thread-find .n")?.textContent).toBe("0/0");
+    expect(main.querySelector('[data-id="old-q"]')).toBeNull();
+  });
+});
+
+// The half of the conversation the client does not hold: matches before
+// historyStart exist only on the gateway, and it is asked once, debounced, and
+// only when there is unfetched history to ask about.
+describe("Thread find beyond the fetched history", () => {
+  let root: Root | null = null;
+  let main: HTMLElement;
+
+  beforeEach(() => {
+    vi.resetModules();
+    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "wsPath": "/acp", "token": "test-token", "defaultAgent": "claude",
+      "agents": [{ "name": "claude", "cwd": "/repo" }], "fsRoot": "/"
+    }</script>`;
+    main = document.createElement("main");
+    document.body.appendChild(main);
+  });
+
+  afterEach(() => {
+    if (root) { act(() => root?.unmount()); root = null; }
+    main.remove();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  test("counts only the matches older than what is loaded, and skips the call when nothing is older", async () => {
+    const searchSessions = vi.fn().mockResolvedValue({
+      // index 3 and 7 are before historyStart (10); 12 is already in hand.
+      results: [{ hits: [{ index: 3 }, { index: 7 }, { index: 12 }] }],
+      truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 0, ms: 1 },
+    });
+    vi.doMock("../lib/api.ts", async () => ({ ...(await vi.importActual<object>("../lib/api.ts")), searchSessions }));
+    const { Thread } = await import("./Thread.tsx");
+
+    const session: Session = {
+      id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
+      hasContent: true, working: false,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+      historyStart: 10, loadingOlder: false,
+      items: [{ id: "m1", kind: "assistant", text: "the zzyzx token" }],
+    };
+
+    vi.useFakeTimers();
+    await act(async () => {
+      root = createRoot(main);
+      root.render(React.createElement(Thread, { session, agentReady: true, findOpen: true, onCloseFind: () => {} }));
+    });
+
+    const input = main.querySelector<HTMLInputElement>(".thread-find input")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "zzyzx");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // Debounced: nothing has gone out yet.
+    expect(searchSessions).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+
+    expect(searchSessions).toHaveBeenCalledWith("zzyzx", { session: "S", limit: 1 });
+    expect(main.querySelector(".find-older")?.textContent).toContain("2 more messages match earlier");
+
+    // A conversation held whole in memory has nothing to ask about.
+    searchSessions.mockClear();
+    await act(async () => {
+      root!.render(React.createElement(Thread, {
+        session: { ...session, historyStart: 0 }, agentReady: true, findOpen: true, onCloseFind: () => {},
+      }));
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(searchSessions).not.toHaveBeenCalled();
+    expect(main.querySelector(".find-older")).toBeNull();
+  });
+
+  // One click has to reach the match, not advance one page toward it: the store
+  // pages 50 messages at a time and a hit can be hundreds back (measured on a
+  // real conversation: 237 → 0 took five pages).
+  test("pages back until the earliest matching message is loaded, then stops", async () => {
+    const searchSessions = vi.fn().mockResolvedValue({
+      results: [{ hits: [{ index: 12 }, { index: 140 }] }],
+      truncated: false, cursor: null, skipped: [], scanned: { files: 1, bytes: 0, ms: 1 },
+    });
+    // Each page hands back its own start, which is what stops the loop.
+    const getMessages = vi.fn(async (_a: string, _c: string, _s: string, page: { from?: number }) =>
+      ({ start: page.from ?? 0, messages: [], controls: {} }));
+    vi.doMock("../lib/api.ts", async () => ({
+      ...(await vi.importActual<object>("../lib/api.ts")), searchSessions, getMessages,
+    }));
+    const { Thread } = await import("./Thread.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    const session: Session = {
+      id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
+      hasContent: true, working: false,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+      historyStart: 150, loadingOlder: false,
+      items: [{ id: "m1", kind: "assistant", text: "the zzyzx token" }],
+    };
+    // The click reads the session from the store, not from props.
+    useStore.setState({ agentName: "claude", cwd: "/tmp", activeId: "S", sessions: { S: session } });
+
+    await act(async () => {
+      root = createRoot(main);
+      root.render(React.createElement(Thread, { session, agentReady: true, findOpen: true, onCloseFind: () => {} }));
+    });
+    const input = main.querySelector<HTMLInputElement>(".thread-find input")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "zzyzx");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 350)); });
+
+    await act(async () => { main.querySelector<HTMLButtonElement>(".find-older")!.click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+
+    // 150 → 100 → 50 → 0: it stops as soon as index 12 is in hand, and does not
+    // keep paging past the beginning.
+    expect(getMessages.mock.calls.map((c) => c[3])).toEqual([
+      { from: 100, to: 150 }, { from: 50, to: 100 }, { from: 0, to: 50 },
+    ]);
+    expect(useStore.getState().sessions.S.historyStart).toBe(0);
+  });
+});
