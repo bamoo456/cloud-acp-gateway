@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, toggleHiddenFolder as apiToggleHiddenFolder, type RunningTask, type InboxItem } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
@@ -117,6 +117,10 @@ interface State {
   joining: boolean; // resolving a ?session= deep-link (show a loading state, not "Ready to code?")
   historyNonce: number; // bumped to ask the sidebar to refresh its conversation list (e.g. after rename)
   recentSessions: RecentSession[];
+  // Folders chosen (in the folder picker) never to show in the sidebar list —
+  // like pinned folders, this lives on the gateway so it's the same on every
+  // device. Paths, not patterns (see lib/sessionGroups.ts's hideFolders).
+  hiddenFolders: string[];
   // "agent\nsessionId" -> the title the gateway's own listings report, which is
   // where a rename actually lands (the per-cwd titles sidecar). Filled by the
   // sidebar as it fetches /history and /history/discovered, and read back by
@@ -173,6 +177,10 @@ interface State {
   setConfigOption: (configId: string, value: string) => void;
   cancel: () => void;
   setCwd: (p: string) => void;
+  // Toggles a folder's hidden state via the gateway; best-effort like the
+  // folder picker's own pin toggle, so a failed round-trip just leaves the
+  // list as it was.
+  toggleHiddenFolder: (path: string) => void;
   toggleAuto: () => void;
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
@@ -1035,6 +1043,7 @@ export const useStore = create<State>((set, get) => {
     joining: !!linkParams().session, // deep-link present → show "Joining…" from first paint
     historyNonce: 0,
     recentSessions: readRecentSessions(),
+    hiddenFolders: [],
     historyTitles: {},
     runningTasks: [],
     runningSeen: {},
@@ -1071,6 +1080,7 @@ export const useStore = create<State>((set, get) => {
         set({
           textSize,
           recentSessions: readRecentSessions(),
+          hiddenFolders: p.hiddenFolders,
           lockEnabled,
         });
         if (lockEnabled) {
@@ -1245,6 +1255,9 @@ export const useStore = create<State>((set, get) => {
       }
       set({ cwd: p, activeId: null, configOptions: [] });
       if (get().agentReady) initSession().then((res: any) => { if (res?.sessionId) adopt(res); }).catch(() => {});
+    },
+    toggleHiddenFolder(path) {
+      apiToggleHiddenFolder(path).then((list) => set({ hiddenFolders: list })).catch(() => {});
     },
     toggleAuto() { set((st) => ({ autoApprove: !st.autoApprove })); },
     setTextSize(size) {

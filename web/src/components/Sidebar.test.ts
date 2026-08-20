@@ -69,6 +69,7 @@ describe("Sidebar recent conversations", () => {
       getMessages: vi.fn(),
       renameSession: vi.fn(),
       listDir: vi.fn(),
+      toggleHiddenFolder: vi.fn().mockResolvedValue([]),
     }));
   });
 
@@ -157,10 +158,13 @@ describe("Sidebar recent conversations", () => {
     await seedRecentSessions(sixteenRecents());
     await renderSidebar();
 
-    const recent = container.querySelector(".recent-section");
-    expect(recent).not.toBeNull();
-    expect(recent!.querySelectorAll(".sess-item")).toHaveLength(15);
-    expect(recent!.textContent).not.toContain("Folder browser polish");
+    // All 15 visible recents are within the hour, so only "Last hour" renders —
+    // "Folder browser polish" (from 2026-06-06) is both past RECENT_LIMIT and,
+    // once revealed, old enough to land in "Earlier" instead.
+    const sections = () => container.querySelectorAll(".recent-section:not(.running-section)");
+    expect(sections()).toHaveLength(1);
+    expect(sections()[0].querySelectorAll(".sess-item")).toHaveLength(15);
+    expect(container.textContent).not.toContain("Folder browser polish");
 
     // .see-more is a sibling of .recent-section, not nested inside it.
     const seeMore = container.querySelector<HTMLButtonElement>(".see-more");
@@ -169,8 +173,10 @@ describe("Sidebar recent conversations", () => {
       seeMore!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(recent!.querySelectorAll(".sess-item")).toHaveLength(16);
-    expect(recent!.textContent).toContain("Folder browser polish");
+    expect(container.textContent).toContain("Earlier");
+    expect(container.textContent).toContain("Folder browser polish");
+    const allRows = container.querySelectorAll(".recent-section:not(.running-section) .sess-item");
+    expect(allRows).toHaveLength(16);
     expect(container.textContent).toContain("Show less");
   });
 
@@ -1501,5 +1507,109 @@ describe("Sidebar recent conversations", () => {
     await showLatestView();
 
     expect(localStorage.getItem("acpg.sessionsView")).toBe("latest");
+  });
+
+  // The latest view's flat recency list is now two groups, not one — a session
+  // straddling the hour boundary must land in the right one, not just "somewhere".
+  test("splits the latest view's Recent list into Last hour and Earlier", async () => {
+    getHistory.mockResolvedValue([]);
+    seedLatestView();
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "fresh-1", title: "Fresh one", lastActiveAt: "2026-06-10T03:30:00.000Z" },
+      { agentName: "claude", cwd: "/repo", sessionId: "old-1", title: "Old one", lastActiveAt: "2026-06-10T02:00:00.000Z" },
+    ]);
+    await renderSidebar();
+
+    const heads = Array.from(container.querySelectorAll(".listhead span")).map((h) => h.textContent);
+    expect(heads).toEqual(expect.arrayContaining(["Last hour", "Earlier"]));
+
+    const sections = Array.from(container.querySelectorAll(".recent-section:not(.running-section)"));
+    const lastHour = sections.find((sec) => sec.querySelector(".listhead")?.textContent === "Last hour")!;
+    const earlier = sections.find((sec) => sec.querySelector(".listhead")?.textContent === "Earlier")!;
+    expect(lastHour.textContent).toContain("Fresh one");
+    expect(lastHour.textContent).not.toContain("Old one");
+    expect(earlier.textContent).toContain("Old one");
+    expect(earlier.textContent).not.toContain("Fresh one");
+  });
+
+  // Hidden folders are filtered before the qty count and both views, per
+  // sessionGroups.ts's hideFolders — this exercises the wiring end to end.
+  // The list itself now lives on the store (hydrated from the gateway), not
+  // in localStorage — seed it directly the way the folder picker would.
+  test("hides sessions from a folder chosen in the picker and shows the non-silent count", async () => {
+    getHistory.mockResolvedValue([]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "r1", title: "Current repo work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/other-repo", sessionId: "o1", title: "Other repo work", lastActiveAt: "2026-06-10T03:58:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => { useStore.setState({ hiddenFolders: ["/other-repo"] }); });
+
+    expect(container.textContent).toContain("Current repo work");
+    expect(container.textContent).not.toContain("Other repo work");
+    const hiddenBtn = Array.from(container.querySelectorAll<HTMLButtonElement>(".sb-head button"))
+      .find((b) => b.textContent?.includes("hidden"));
+    expect(hiddenBtn?.textContent).toBe("1 hidden");
+  });
+
+  // Hiding now starts here, at the folder header — the picker only manages
+  // (un-hides) folders already hidden this way.
+  test("folder view: a folder group's hide affordance toggles that folder hidden", async () => {
+    getHistory.mockResolvedValue([]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "o1", title: "Other repo work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { toggleHiddenFolder } = await import("../lib/api.ts") as unknown as { toggleHiddenFolder: ReturnType<typeof vi.fn> };
+
+    const group = Array.from(container.querySelectorAll(".folder-group"))
+      .find((g) => g.textContent?.includes("other-repo"))!;
+    const header = group.querySelector<HTMLButtonElement>(".fgroup")!;
+    const hideBtn = header.querySelector<HTMLElement>(".hide")!;
+    expect(hideBtn).not.toBeNull();
+
+    await act(async () => { hideBtn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(toggleHiddenFolder).toHaveBeenCalledWith("/other-repo");
+    // The click must not also expand/collapse the header underneath it.
+    expect(header.classList.contains("closed")).toBe(true);
+  });
+
+  test("folder view: the current folder's group has no hide affordance", async () => {
+    await renderSidebar();
+
+    const group = Array.from(container.querySelectorAll(".folder-group"))
+      .find((g) => g.textContent?.includes("repo") && !g.textContent?.includes("other-repo"))!;
+    const header = group.querySelector<HTMLButtonElement>(".fgroup")!;
+    expect(header.querySelector(".hide")).toBeNull();
+  });
+
+  test("latest view: a row's context menu offers Hide folder for another folder, not for the current one", async () => {
+    seedLatestView();
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "Cross folder work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { toggleHiddenFolder } = await import("../lib/api.ts") as unknown as { toggleHiddenFolder: ReturnType<typeof vi.fn> };
+
+    const rows = () => Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"));
+    const otherRow = rows().find((el) => el.textContent?.includes("Cross folder work"))!;
+    await act(async () => { otherRow.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+
+    const hideItem = Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
+      .find((b) => b.textContent?.includes("Hide folder"));
+    expect(hideItem).not.toBeUndefined();
+    expect(hideItem!.textContent).toContain("other-repo");
+    await act(async () => { hideItem!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(toggleHiddenFolder).toHaveBeenCalledWith("/other-repo");
+    expect(container.querySelector(".wf-menu")).toBeNull();
+
+    // The current-folder row (s-recent, cwd /repo) offers no such item.
+    const curRow = rows().find((el) => el.textContent?.includes("Recent conversation sidebar"))!;
+    await act(async () => { curRow.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    const hideItemForCurrent = Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
+      .find((b) => b.textContent?.includes("Hide folder"));
+    expect(hideItemForCurrent).toBeUndefined();
   });
 });
