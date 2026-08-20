@@ -27,6 +27,7 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 import { Terminal } from "./components/Terminal.tsx";
 import { UsageStrip } from "./components/UsageStrip.tsx";
 import { IconTerminal } from "./lib/icons.tsx";
+import { isDesktopSidebarWidth } from "./lib/sidebarWidth.ts";
 import type { AgentRef } from "./types.ts";
 
 export function App() {
@@ -50,6 +51,12 @@ export function App() {
   // Find-in-conversation lives here because two children share it: the TopBar
   // button that opens it and the Thread that owns the search itself.
   const [findOpen, setFindOpen] = useState(false);
+  // Bumped, not set: every Cmd-Shift-F has to re-focus the box, including the
+  // ones fired while the sidebar is already open.
+  const [searchFocus, setSearchFocus] = useState(0);
+  // Same trick for the conversation find bar: `autoFocus` covers the press that
+  // opens it, this covers every press after that.
+  const [findFocus, setFindFocus] = useState(0);
   useEffect(() => { bootstrap(); }, [bootstrap]);
   // Ctrl-` toggles the terminal, the shortcut the strip advertises. Capture
   // phase and stopPropagation because xterm listens on its own textarea: once
@@ -70,11 +77,22 @@ export function App() {
   // find-in-page is deliberate: it only ever searches the mounted window, which
   // is the last handful of messages, and silently reports nothing for the rest.
   // Escape closes it from the input (Thread), not from here.
+  // Cmd/Ctrl-Shift-F is the cross-session search, VS Code's split: this one
+  // reveals the sidebar and hands focus to its box. `key` is "F" once Shift is
+  // held, hence the lowercasing.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "f" || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (e.key.toLowerCase() !== "f" || !(e.metaKey || e.ctrlKey) || e.altKey) return;
       e.preventDefault();
-      setFindOpen(true);
+      if (!e.shiftKey) { setFindOpen(true); setFindFocus((n) => n + 1); return; }
+      // Same two doors as the TopBar's sessions button: a column to expand on
+      // desktop, an overlay sheet below the breakpoint.
+      if (isDesktopSidebarWidth()) {
+        if (!useStore.getState().sidebarOpen) useStore.getState().toggleSidebar();
+      } else {
+        setPanel(true);
+      }
+      setSearchFocus((n) => n + 1);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -160,13 +178,14 @@ export function App() {
   return (
     <>
       <div className="app-row">
-        <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)} />
+        <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)}
+          focusSearch={searchFocus} />
         <div className="content">
           <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)}
             findOpen={findOpen} onFind={() => setFindOpen((v) => !v)} />
           <main id="main">
             <Thread session={sess} agentReady={agentReady} loading={joining}
-              findOpen={findOpen} onCloseFind={() => setFindOpen(false)} />
+              findOpen={findOpen} focusFind={findFocus} onCloseFind={() => setFindOpen(false)} />
           </main>
           {/* Between the thread and the input, right-aligned: what is answering
               and on what, plus the control that changes it (§3 P3). */}
