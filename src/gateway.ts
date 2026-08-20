@@ -49,7 +49,8 @@ import {
   tree as workspaceTree, find as workspaceFind, grep as workspaceGrep,
   outputFolder as workspaceOutputFolder,
   revChanges as workspaceRevChanges, commits as workspaceCommits,
-  inlineImageType, repoRoot, validRev, MAX_RAW_BYTES, MAX_COMMITS, type RevSpec,
+  writeText as workspaceWriteText,
+  inlineImageType, repoRoot, validRev, MAX_RAW_BYTES, MAX_COMMITS, MAX_WRITE_BYTES, type RevSpec,
 } from "./workspace.ts";
 import {
   readDraft, readDrafts, writeDraft, parseComments, reviewScopeKey, MAX_DRAFTS_BYTES,
@@ -4400,6 +4401,56 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         res.end(JSON.stringify(r));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Saving one file back. Its own resolver, NOT resolveWorkspaceTarget: that
+  // one answers "may this be read", and its answer is deliberately wide — the
+  // preview roots, the whole repo, an absolute path, or with the filter off
+  // every file on the host. None of that is a sane reach for a write. A save
+  // resolves under the conversation's own cwd and nowhere else, which is the
+  // one folder the browser session was already working in.
+  if (consoleEnabled && pathname === "/workspace/file" && req.method === "POST") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    // An absolute path is not refused for being absolute — the panel sends one,
+    // because that is what it holds for every file it has open. What decides is
+    // only where it LANDS: resolve() leaves an absolute path as itself and joins
+    // a relative one onto cwd, and either way the result has to be inside cwd.
+    // So `/repo/agents.json` passes from a session in /repo and `/etc/hosts`
+    // does not, which is the distinction that matters. resolveWithinRootBase
+    // realpaths, so a symlink pointing out is refused on where it leads rather
+    // than how it is spelled.
+    const abs = cwd ? resolveWithinRootBase(path.resolve(cwd, q.get("path") ?? ""), cwd) : null;
+    if (!abs) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+    // Room for JSON's own escaping above the byte cap the payload is judged by:
+    // capping the wire at MAX_WRITE_BYTES would refuse legal files whose quotes
+    // and newlines happen to encode long. The real limit is checked on the
+    // decoded bytes, in writeText.
+    readJsonBody(req, MAX_WRITE_BYTES * 8)
+      // Two catches, not one: a malformed body is the CALLER's fault and answers
+      // 400, while a failed write is the host's (EACCES, ENOSPC) and answers 500
+      // like every other operation in this file. Chained onto one handler they
+      // would share a catch, and a full disk would come back as "bad-json".
+      .catch((e: Error) => {
+        const tooBig = e.message === "too-large";
+        res.writeHead(tooBig ? 413 : 400);
+        res.end(JSON.stringify({ error: e.message, code: tooBig ? "too-large" : "bad-json" }));
+        return null;
+      })
+      .then((body) => {
+        if (body === null) return;   // already answered above
+        const b = body as { text?: unknown; hash?: unknown };
+        if (typeof b?.text !== "string" || typeof b?.hash !== "string") {
+          res.writeHead(400); res.end(JSON.stringify({ error: "text and hash are required", code: "bad-request" })); return;
+        }
+        return workspaceWriteText(abs, b.text, b.hash)
+          .then((r) => {
+            const status = r.ok ? 200 : r.code === "stale" ? 409 : r.code === "too-large" ? 413 : r.code === "not-found" ? 404 : 400;
+            res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+            res.end(JSON.stringify(r));
+          })
+          .catch((e: Error) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e.message) })); });
+      });
     return;
   }
   if (consoleEnabled && pathname === "/workspace/file") {

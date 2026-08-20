@@ -617,3 +617,193 @@ test("a folder that isn't a checkout gets no draft directory planted in it", asy
     await close();
   }
 });
+
+// ---- POST /workspace/file: saving one file back ----
+//
+// The hash precondition is the whole safety story (the client's greyed-out
+// pencil is only UX), so these are about what happens when it is wrong, and
+// about the reach of the path guard — which is narrower here than for reads on
+// purpose, and is the part a regression would silently widen.
+
+// One file per test, so a save in one can't be what another asserts about.
+function scratchFile(name: string, body: string | Buffer): string {
+  const abs = path.join(REPO, name);
+  fs.writeFileSync(abs, body);
+  return abs;
+}
+
+test("a save that still matches what was read replaces the file", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    scratchFile("editable.txt", "flag = off\n");
+    const read = await get(q("/workspace/file", { cwd: REPO, path: "editable.txt" }));
+    const { hash, text } = (await read.json()) as { hash: string; text: string };
+    assert.equal(text, "flag = off\n");
+    assert.match(hash, /^[0-9a-f]{64}$/);
+
+    const saved = await post(q("/workspace/file", { cwd: REPO, path: "editable.txt" }),
+      { text: "flag = on\n", hash });
+    assert.equal(saved.status, 200);
+    const body = (await saved.json()) as { ok: boolean; hash: string; size: number };
+    assert.equal(body.ok, true);
+    assert.notEqual(body.hash, hash, "the response carries the SAVED file's hash, to keep editing against");
+    assert.equal(fs.readFileSync(path.join(REPO, "editable.txt"), "utf8"), "flag = on\n");
+  } finally {
+    await close();
+  }
+});
+
+test("a file changed since it was read is refused, and left exactly as it was", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    scratchFile("raced.txt", "original\n");
+    const read = await get(q("/workspace/file", { cwd: REPO, path: "raced.txt" }));
+    const { hash } = (await read.json()) as { hash: string };
+
+    // Whoever else writes this file — the agent mid-turn, an editor on the
+    // host, a shell in the gateway's own terminal. None of them are visible to
+    // the browser session that is about to save.
+    fs.writeFileSync(path.join(REPO, "raced.txt"), "written by somebody else\n");
+
+    const saved = await post(q("/workspace/file", { cwd: REPO, path: "raced.txt" }),
+      { text: "my edit\n", hash });
+    assert.equal(saved.status, 409);
+    const body = (await saved.json()) as { code: string; text: string; hash: string };
+    assert.equal(body.code, "stale");
+    assert.equal(body.text, "written by somebody else\n", "409 carries what is on disk now, so no second request is needed");
+    assert.equal(fs.readFileSync(path.join(REPO, "raced.txt"), "utf8"), "written by somebody else\n",
+      "the refused save must not have landed");
+  } finally {
+    await close();
+  }
+});
+
+test("a save can't reach outside the conversation's own folder", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    const outside = path.join(SCRATCH, "note.txt");
+    const before = fs.readFileSync(outside, "utf8");
+    // An absolute path, a traversal, and a symlink planted inside the checkout
+    // — the three shapes of "somewhere else". The first two are what a caller
+    // types; the third is what a repo can contain without anybody typing it.
+    fs.symlinkSync(outside, path.join(REPO, "escape.txt"));
+    for (const p of [outside, "../../etc/hosts", "escape.txt"]) {
+      const r = await post(q("/workspace/file", { cwd: REPO, path: p }), { text: "pwned\n", hash: "x" });
+      assert.equal(r.status, 400, `${p} should not be writable`);
+      assert.equal(((await r.json()) as { code: string }).code, "outside-root");
+    }
+    assert.equal(fs.readFileSync(outside, "utf8"), before);
+    // A preview root is readable — that asymmetry is the point of the separate guard.
+    assert.equal((await get(q("/workspace/file", { cwd: REPO, path: outside }))).status, 200);
+  } finally {
+    fs.rmSync(path.join(REPO, "escape.txt"), { force: true });
+    await close();
+  }
+});
+
+test("a file too big to have been previewed whole can't be saved over", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    // Past MAX_TEXT_BYTES, so the preview was truncated — and a save built on a
+    // truncated read would drop everything past the cut.
+    scratchFile("huge.txt", "x".repeat(600 * 1024));
+    const read = await get(q("/workspace/file", { cwd: REPO, path: "huge.txt" }));
+    const body = (await read.json()) as { truncated: boolean; hash?: string };
+    assert.equal(body.truncated, true);
+    assert.equal(body.hash, undefined, "no precondition token is issued for a partial read");
+
+    const saved = await post(q("/workspace/file", { cwd: REPO, path: "huge.txt" }),
+      { text: "short\n", hash: "whatever" });
+    assert.equal(saved.status, 400);
+    assert.equal(((await saved.json()) as { code: string }).code, "not-text");
+    assert.equal(fs.statSync(path.join(REPO, "huge.txt")).size, 600 * 1024, "the file must not have been shortened");
+  } finally {
+    await close();
+  }
+});
+
+test("a binary file can't be saved over as text", async () => {
+  const { post, close } = await startHttpServer();
+  try {
+    const before = fs.readFileSync(path.join(REPO, "shot.png"));
+    const r = await post(q("/workspace/file", { cwd: REPO, path: "shot.png" }), { text: "not a png\n", hash: "x" });
+    assert.equal(r.status, 400);
+    assert.equal(((await r.json()) as { code: string }).code, "not-text");
+    assert.deepEqual(fs.readFileSync(path.join(REPO, "shot.png")), before);
+  } finally {
+    await close();
+  }
+});
+
+test("a payload past the write cap is refused before the precondition is even considered", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    scratchFile("cap.txt", "small\n");
+    const read = await get(q("/workspace/file", { cwd: REPO, path: "cap.txt" }));
+    const { hash } = (await read.json()) as { hash: string };
+    const r = await post(q("/workspace/file", { cwd: REPO, path: "cap.txt" }),
+      { text: "y".repeat(300 * 1024), hash });
+    assert.equal(r.status, 413);
+    assert.equal(fs.readFileSync(path.join(REPO, "cap.txt"), "utf8"), "small\n");
+  } finally {
+    await close();
+  }
+});
+
+test("bytes go to disk exactly as sent — CRLF survives a round trip", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    // The client is what puts the \r\n back (a textarea normalises them away);
+    // this is the other half of that contract — the server must not have its
+    // own opinion about line endings, or the client's care would be undone.
+    scratchFile("crlf.txt", "one\r\ntwo\r\n");
+    const read = await get(q("/workspace/file", { cwd: REPO, path: "crlf.txt" }));
+    const { hash, text } = (await read.json()) as { hash: string; text: string };
+    assert.equal(text, "one\r\ntwo\r\n");
+
+    const saved = await post(q("/workspace/file", { cwd: REPO, path: "crlf.txt" }),
+      { text: "one\r\ntwo\r\nthree\r\n", hash });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(
+      fs.readFileSync(path.join(REPO, "crlf.txt")),
+      Buffer.from("one\r\ntwo\r\nthree\r\n", "utf8"),
+    );
+  } finally {
+    await close();
+  }
+});
+
+test("a save at an enormous file is refused from its stat, without reading it", async () => {
+  const { post, close } = await startHttpServer();
+  try {
+    // Sparse, so the test costs no disk: 4 GB of nothing that a readFile before
+    // the size check would still try to buffer. The refusal has to come from the
+    // stat, which is the only reason this test can exist at all.
+    const huge = path.join(REPO, "sparse.bin");
+    const fd = fs.openSync(huge, "w");
+    fs.ftruncateSync(fd, 4 * 1024 * 1024 * 1024);
+    fs.closeSync(fd);
+    const r = await post(q("/workspace/file", { cwd: REPO, path: "sparse.bin" }), { text: "small\n", hash: "x" });
+    assert.equal(r.status, 400);
+    assert.equal(((await r.json()) as { code: string }).code, "not-text");
+  } finally {
+    fs.rmSync(path.join(REPO, "sparse.bin"), { force: true });
+    await close();
+  }
+});
+
+test("a file over the write cap is handed no digest to save with", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    // Under the 512 KB read cap, so the preview is whole and NOT truncated —
+    // but over the 256 KB write cap, so no save could ever land. Withholding the
+    // hash is how that reaches the client, which greys the pencil on its absence.
+    scratchFile("midsize.txt", "z".repeat(300 * 1024));
+    const body = (await (await get(q("/workspace/file", { cwd: REPO, path: "midsize.txt" }))).json()) as
+      { truncated: boolean; hash?: string };
+    assert.equal(body.truncated, false);
+    assert.equal(body.hash, undefined);
+  } finally {
+    await close();
+  }
+});

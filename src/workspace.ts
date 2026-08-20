@@ -23,10 +23,18 @@
 // single commit or a branch against its base. It is the same screen either way —
 // only the revision git is asked about differs.
 //
-// Deliberately read-only: nothing here writes, stages, or reverts. The panel is
-// a viewer, and keeping the write surface at zero means a browser session that
-// leaks can't rewrite the checkout the agent is working in. (Review drafts do
-// get written, but never into the checkout's own files — see review.ts.)
+// Almost read-only, and the exception is deliberately one function wide:
+// writeText() replaces a single text file, and only when the caller can prove
+// the file still holds what it last read. Nothing here stages, reverts, creates
+// or deletes. The point of keeping the write surface this small is that a
+// browser session that leaks cannot rewrite the checkout the agent is working
+// in — it can, at worst, overwrite one file it had already been shown, and only
+// if nothing has touched that file since. Its caller in src/gateway.ts narrows
+// the reach further: writes resolve under the conversation's own cwd only,
+// never through the preview roots the reads are allowed to reach.
+// (Review drafts also get written, but never into the checkout's own files —
+// see review.ts.)
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { git, gitStdin, gitTokens } from "./git-exec.ts";
@@ -40,6 +48,10 @@ export const MAX_CHANGED_FILES = 500;
 export const MAX_DIFF_BYTES = 512 * 1024;
 // Text preview cap. Same reasoning; the client shows a "truncated" notice.
 export const MAX_TEXT_BYTES = 512 * 1024;
+// What one save may write. Deliberately well under the read cap: the editor
+// this backs is for a flag in a config from a phone, not for moving a file's
+// worth of text through a browser textarea.
+export const MAX_WRITE_BYTES = 256 * 1024;
 // Raw byte cap for the <img>/download route. Generous enough for screenshots
 // and design assets, small enough that one request can't pin memory.
 export const MAX_RAW_BYTES = 25 * 1024 * 1024;
@@ -239,6 +251,13 @@ export interface FilePreview {
   mimeType?: string;   // set for `image`
   text?: string;       // set for `text`
   truncated?: boolean; // text was cut at MAX_TEXT_BYTES
+  // sha256 of the file's bytes, and the precondition a write echoes back. Set
+  // only for a text file this read could also SAVE — whole (a truncated read's
+  // digest describes the head, and a token meaning "the file I saw" must not
+  // stand for half of it) and inside the write cap. Editors key off its
+  // absence, so it must not be issued for a file a save would refuse: an
+  // enabled control that always fails is worse than a disabled one.
+  hash?: string;
 }
 
 // Image types the raw route may serve with their real content-type, i.e. types a
@@ -703,7 +722,73 @@ export async function preview(abs: string, displayPath: string): Promise<FilePre
   // A cap can land mid-codepoint; decoding the whole slice at once leaves that
   // as a single replacement char at the very end, which is the right cosmetic
   // outcome for a view already labelled truncated.
-  return { ...base, kind: "text", text: body.toString("utf8"), truncated };
+  return {
+    ...base, kind: "text", text: body.toString("utf8"), truncated,
+    hash: truncated || st.size > MAX_WRITE_BYTES ? undefined : sha256(head),
+  };
+}
+
+// The precondition token for a write: sha256 over the file's BYTES, never over
+// the decoded string. The two differ for anything that isn't clean UTF-8, and a
+// client that hashed one while the server hashed the other would reject every
+// save on exactly the files most worth being careful with.
+export function sha256(buf: Buffer): string {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
+export type WriteResult =
+  | { ok: true; size: number; modifiedAt: string; hash: string }
+  // `stale` carries what is on disk NOW, so the client can offer to reload
+  // without a second request — the round trip it would make is one this
+  // response already knows the answer to.
+  | { ok: false; code: "stale"; text: string; hash: string; modifiedAt: string }
+  | { ok: false; code: "not-found" | "not-text" | "too-large" };
+
+// Replace one text file, but only if it still holds what the caller last read.
+//
+// Every check here is repeated from the client on purpose: the client's are
+// what grey out the pencil, these are what decide. `expected` is the whole
+// mechanism — mtimes are coarse and a same-size same-tick overwrite is exactly
+// the case an agent editing alongside you produces.
+export async function writeText(abs: string, text: string, expected: string): Promise<WriteResult> {
+  const next = Buffer.from(text, "utf8");
+  if (next.length > MAX_WRITE_BYTES) return { ok: false, code: "too-large" };
+
+  // Everything that can be settled from the stat is settled before a byte is
+  // read, exactly as preview() reads only what it is willing to show: a POST
+  // naming a 2GB artifact must cost a stat, not 2GB of buffer, and refusing it
+  // after reading it is refusing it too late.
+  let st: fs.Stats;
+  try { st = await fs.promises.stat(abs); } catch { return { ok: false, code: "not-found" }; }
+  if (!st.isFile()) return { ok: false, code: "not-found" };
+  // Not "is it text now" but "would preview() have handed this out as whole,
+  // editable text" — so the refusals mirror its non-text outcomes. The image
+  // check has to be by extension exactly as preview()'s is: it runs BEFORE the
+  // content sniff there, and a small PNG carries no NUL byte for looksBinary to
+  // find, so content alone would call it text and let a save through on a file
+  // the viewer never showed as text at all.
+  if (inlineImageType(abs) || st.size > MAX_TEXT_BYTES) return { ok: false, code: "not-text" };
+
+  let current: Buffer;
+  try { current = await fs.promises.readFile(abs); } catch { return { ok: false, code: "not-found" }; }
+  if (looksBinary(current)) return { ok: false, code: "not-text" };
+
+  const hash = sha256(current);
+  if (hash !== expected) {
+    return {
+      ok: false, code: "stale", hash,
+      text: current.toString("utf8"),
+      modifiedAt: new Date(st.mtimeMs).toISOString(),
+    };
+  }
+
+  // Plain write, not write-to-temp-and-rename: the repo's other writes are
+  // plain (see the titles sidecar), and atomicity is not what protects this —
+  // the digest above is. A torn write needs a crash mid-syscall; a concurrent
+  // agent edit needs only a second.
+  await fs.promises.writeFile(abs, next);
+  const after = await fs.promises.stat(abs);
+  return { ok: true, size: after.size, modifiedAt: new Date(after.mtimeMs).toISOString(), hash: sha256(next) };
 }
 
 // Sort a directory the way a file tree reads: folders first, then files, each
