@@ -195,11 +195,21 @@ function forceRepaint(m: HTMLElement) {
   requestAnimationFrame(() => { m.style.transform = prev; });
 }
 
-export function Thread({ session, agentReady, loading, findOpen, onCloseFind }: {
+export function Thread({ session, agentReady, loading, findOpen, focusFind = 0, onCloseFind }: {
   session: Session | null; agentReady: boolean; loading?: boolean;
-  findOpen?: boolean; onCloseFind?: () => void;
+  findOpen?: boolean; focusFind?: number; onCloseFind?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const findRef = useRef<HTMLInputElement>(null);
+  // Every Cmd-F re-focuses the box and selects what is in it, so a repeat press
+  // types over the last term instead of appending to it — the bar's `autoFocus`
+  // only ever fires on the press that mounted it. App bumps the counter in the
+  // same event that opens the bar, so the input exists by the time this runs.
+  useEffect(() => {
+    if (!focusFind) return;
+    findRef.current?.focus();
+    findRef.current?.select();
+  }, [focusFind]);
   const atBottom = useRef(true);
   const hiddenRef = useRef(0);      // latest hidden count, read inside the (once-bound) scroll handler
   const anchorHeight = useRef(0);   // scrollHeight captured before a reveal, to compensate the prepend
@@ -507,7 +517,7 @@ export function Thread({ session, agentReady, loading, findOpen, onCloseFind }: 
         // thread (it is the thread's state that reveals and unfolds a hit), and
         // `main` is the scroll container it sticks to.
         <div className="wf-search thread-find">
-          <input autoFocus value={find} placeholder="Find in conversation" aria-label="Find in conversation"
+          <input ref={findRef} autoFocus value={find} placeholder="Find in conversation" aria-label="Find in conversation"
             onChange={(e) => setFind(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") { closeFind(); return; }

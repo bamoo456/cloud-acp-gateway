@@ -102,6 +102,51 @@ describe("App running-task polling", () => {
   });
 
   // Shares this block's mocks rather than standing up a second App harness.
+  // Cmd-Shift-F is the cross-session search: it has to reveal the sidebar and
+  // land in its box, and `key` arrives uppercased because Shift is held.
+  test("Cmd-Shift-F reveals the sidebar and focuses its search box", async () => {
+    await render();
+    const input = () => container.querySelector<HTMLInputElement>("#panel .search input");
+    expect(document.activeElement).not.toBe(input());
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "F", metaKey: true, shiftKey: true, bubbles: true }));
+    });
+
+    expect(container.querySelector("#panel")?.classList.contains("open")).toBe(true);
+    expect(document.activeElement).toBe(input());
+    // ...and it is NOT the in-conversation find, which Cmd-F alone owns.
+    expect(container.querySelector(".thread-find")).toBeNull();
+  });
+
+  // The bar's own autoFocus only fires on the press that mounts it, so a second
+  // press has to put the caret back and select the old term to type over.
+  test("Cmd-F focuses the find box and selects the term already in it", async () => {
+    await render();
+    const press = async () => {
+      await act(async () => {
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true }));
+      });
+    };
+    await press();
+    const input = container.querySelector<HTMLInputElement>(".thread-find input")!;
+    expect(document.activeElement).toBe(input);
+
+    await act(async () => {
+      // React tracks the value itself, so a plain `input.value =` is ignored.
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "deploy");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    input.blur();
+    expect(document.activeElement).not.toBe(input);
+
+    await press();
+
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe("deploy".length);
+  });
+
   test("the status bar carries the diffstat", async () => {
     await render();
     const { useStore } = await import("./store/store.ts");
