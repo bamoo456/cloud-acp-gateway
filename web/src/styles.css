@@ -1533,10 +1533,18 @@
     flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
     padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--border);
   }
-  .wf-view-head .p {
-    flex: 1; min-width: 0; font-size: 13px; font-weight: 650;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  /* repo / folders / file. Only .mid shrinks: the checkout's name says WHICH
+     copy of the project this is (the panel can point at another one) and the
+     filename is what you came for, so a narrow panel eats the folders in
+     between rather than either end. */
+  .wf-crumb {
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 3px;
+    font-size: 13px; white-space: nowrap;
   }
+  .wf-crumb .root { flex: 0 0 auto; font-weight: 650; color: var(--muted); }
+  .wf-crumb .sl { flex: 0 0 auto; color: var(--faint); }
+  .wf-crumb .mid { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+  .wf-crumb .leaf { flex: 0 0 auto; font-weight: 700; }
   .wf-view-head .icon-btn svg { width: 16px; height: 16px; }
   /* Which folder the Project tree is reading, when the panel offers the choice. */
   .wf-root { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 0 8px 6px; }
@@ -1776,6 +1784,14 @@
     flex: 0 0 auto; font-size: 11.5px; color: var(--muted);
     font-family: var(--mono);
   }
+  /* The size column competes with the name for a narrow panel's width, and the
+     name is what you are reading the tree for — so it waits for the row you are
+     actually pointing at. Only where there IS a pointer: on touch there is no
+     hover to reveal it with, and hiding it there would just delete the column. */
+  @media (hover: hover) {
+    .wf-size { opacity: 0; transition: opacity .12s ease; }
+    .wf-row:hover .wf-size, .wf-row.on .wf-size { opacity: 1; }
+  }
   .wf-find { padding: 4px 8px 8px; display: flex; align-items: center; gap: 6px; }
   .wf-find input {
     flex: 1 1 auto; min-width: 0;
@@ -1806,19 +1822,87 @@
   .wf-hit-line .tx { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .wf-hit-more { padding-left: 22px; font-size: 11px; color: var(--faint); }
 
+  /* The viewer's content, boxed. The toolbar reads as this box's header
+     instead of a bar hanging over an edge-to-edge body — which is the whole
+     change. It has to continue the flex column it sits in, or .wf-body stops
+     being the scroller and the panel scrolls as one page. */
+  .wf-card {
+    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+    margin: 10px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+  }
   /* diff / file switch above the viewer */
   .wf-modes {
     flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
     padding: 6px 6px 6px 10px; border-bottom: 1px solid var(--border);
+    background: var(--surface-2);
   }
   .wf-modes button {
     min-height: 30px; padding: 5px 12px; border-radius: 8px;
     font-size: 13px; font-weight: 700; color: var(--muted);
   }
-  .wf-modes button.active { color: var(--accent); background: var(--surface-2); }
-  .wf-modes button:hover:not(.active) { background: var(--surface-2); color: var(--text); }
+  /* Lifted off the header's own tint rather than tinted further — on a bar
+     that is already --surface-2 the old fill said nothing. */
+  .wf-modes button.active { color: var(--accent); background: var(--surface); }
+  .wf-modes button:hover:not(.active) { background: var(--surface); color: var(--text); }
   .wf-modes .sp { flex: 1 1 auto; }
   .wf-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  /* The file's actions as one control. Hairlines between the members instead
+     of gaps: three separate buttons cost more width and read as three
+     unrelated offers.
+     NOT .wf-group — that name is taken, by the list headings at the top of this
+     file, and both were landing on both. */
+  .wf-acts {
+    flex: 0 0 auto; display: inline-flex; align-items: center; background: var(--surface);
+    border: 1px solid var(--border-strong); border-radius: 8px; overflow: hidden;
+  }
+  /* One size for every member, glyph included. Left alone they arrive at three
+     different sizes — .icon-btn is 38px with a 22px glyph, .wf-add sets its own
+     17px one — and side by side in a bordered strip that reads as broken rather
+     than as variety. The 22px glyph also did not fit the shorter button. */
+  .wf-acts .icon-btn { border-radius: 0; width: 30px; height: 30px; padding: 0; }
+  .wf-acts .icon-btn svg { width: 16px; height: 16px; }
+  .wf-acts .icon-btn + .icon-btn { border-left: 1px solid var(--border); }
+  /* Except when it is carrying a range: the chip is the point of that state, so
+     the button grows for it rather than clipping it. */
+  .wf-acts .wf-add { width: auto; min-width: 30px; padding: 0 7px; gap: 4px; }
+
+  /* ---- editing one file ----
+     The textarea takes the body's place, so it inherits the body's job of being
+     the thing that scrolls. Same metrics as .wf-text: switching into edit must
+     not reflow the text you were just reading. */
+  /* A direct child of .wf-card, which is the flex column — so this is the pane
+     that grows and the pane that scrolls, exactly as .wf-body is when reading. */
+  .wf-edit-area {
+    flex: 1 1 auto; min-height: 0; width: 100%; resize: none; display: block;
+    padding: 10px 12px; border: 0; outline: 0;
+    background: var(--surface); color: var(--text);
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+    tab-size: 2; white-space: pre; overflow: auto;
+  }
+  .wf-edit-foot {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; background: var(--surface-2); border-top: 1px solid var(--border);
+  }
+  .wf-edit-foot .sp { flex: 1 1 auto; }
+  .wf-edit-foot .hint { font-size: 11.5px; color: var(--muted); }
+  .wf-btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 6px 12px; border-radius: 8px; font-size: 13px; font-weight: 650;
+    border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+  }
+  .wf-btn svg { width: 14px; height: 14px; }
+  .wf-btn.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .wf-btn.danger { background: var(--err); color: #fff; border-color: var(--err); }
+  .wf-btn:disabled { opacity: .45; cursor: default; }
+  /* Sits between the text and the buttons that act on it, which is where a
+     condition on the save belongs — not at the top, out of the eyeline of the
+     button it is about. */
+  .wf-strip {
+    flex: 0 0 auto; padding: 8px 12px; font-size: 12.5px; line-height: 1.45;
+    border-top: 1px solid var(--border);
+  }
+  .wf-strip.warn { background: color-mix(in srgb, var(--warn) 12%, var(--surface)); color: var(--warn); }
+  .wf-strip.err { background: color-mix(in srgb, var(--err) 12%, var(--surface)); color: var(--err); }
   /* ---- find in file ----
      A row of its own under the mode switch (see FileView), and highlights
      painted through ::highlight() rather than <mark> — which is also why the
