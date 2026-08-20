@@ -2,6 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Session, MessageImage, MessageFile, ThreadItem } from "../types.ts";
 import { useStore } from "../store/store.ts";
 import { imageSrc } from "../lib/images.ts";
+import { searchSessions } from "../lib/api.ts";
+import { clearHits, findRanges, paintHits, scrollToHit } from "../lib/findInFile.ts";
+import { threadHits, THREAD_HIGHLIGHT, type ThreadHit } from "../lib/findInThread.ts";
 import { IconFile } from "../lib/icons.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { ToolCall } from "./ToolCall.tsx";
@@ -10,7 +13,7 @@ import { PermissionPrompt } from "./PermissionPrompt.tsx";
 import { ElicitationPrompt } from "./ElicitationPrompt.tsx";
 import { Working } from "./Working.tsx";
 import { CopyButton } from "./CopyButton.tsx";
-import { CodexMark, IconChevronDown, OpencodeMark, Robot } from "../lib/icons.tsx";
+import { CodexMark, IconChevronDown, IconX, OpencodeMark, Robot } from "../lib/icons.tsx";
 
 // Mount only the most recent slice of a conversation. Every rendered message adds
 // DOM nodes (a code block becomes hundreds), and the browser's per-keystroke layout
@@ -120,7 +123,7 @@ function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, on
         <>
           <div className="replies">
             {replies.map((r) => (
-              <div className="body" key={r.id}>
+              <div className="body" data-id={r.id} key={r.id}>
                 {r.images && r.images.length > 0 && <MessageImages images={r.images} />}
                 {r.text && <Markdown text={r.text} />}
               </div>
@@ -192,7 +195,10 @@ function forceRepaint(m: HTMLElement) {
   requestAnimationFrame(() => { m.style.transform = prev; });
 }
 
-export function Thread({ session, agentReady, loading }: { session: Session | null; agentReady: boolean; loading?: boolean }) {
+export function Thread({ session, agentReady, loading, findOpen, onCloseFind }: {
+  session: Session | null; agentReady: boolean; loading?: boolean;
+  findOpen?: boolean; onCloseFind?: () => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const hiddenRef = useRef(0);      // latest hidden count, read inside the (once-bound) scroll handler
@@ -360,6 +366,116 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
   const [choice, setChoice] = useState<{ id: string | null } | null>(null);
   const openTurnId = choice ? choice.id : lastTurnId;
   useEffect(() => { setChoice(null); }, [sid, lastTurnId]);
+
+  // ---- find in this conversation ----
+  // Matching runs over the store (findInThread), never the DOM: most of a
+  // conversation is either outside the mounted window or inside a folded turn.
+  // The DOM is only used to PAINT, once the hit has been revealed and unfolded.
+  const [find, setFind] = useState("");
+  const [hitIdx, setHitIdx] = useState(0);
+  const q = find.trim();
+  const hits = useMemo(() => (findOpen ? threadHits(items, q) : []), [findOpen, items, q]);
+  // A new query starts at the first match; so does a new conversation.
+  useEffect(() => { setHitIdx(0); }, [q, sid]);
+  // Streaming can append matches under the cursor; keep it inside the list.
+  const hit: ThreadHit | undefined = hits[Math.min(hitIdx, Math.max(0, hits.length - 1))];
+  // The two effects below key on these VALUES, not on `hit` itself: every
+  // streamed chunk rebuilds `hits`, and an object dep would re-run both — the
+  // second of which scrolls, i.e. it would drag the viewport back to the match
+  // on every chunk of an answer still being written.
+  const hitId = hit?.itemId ?? null;
+  const hitNth = hit?.nth ?? 0;
+  // How far the window has to open to mount the hit's turn, and which turn to
+  // unfold once it is there.
+  const hitReveal = hit ? items.length - hit.turnStart : 0;
+  const hitTurnId = hit ? items[hit.turnStart]?.id ?? null : null;
+  const hitIsReply = hit ? items[hit.itemIndex]?.kind === "assistant" : false;
+
+  // Reveal and unfold whatever the current hit sits in. Both are the thread's
+  // own state, so this is the whole cost of reaching a hit the user cannot see.
+  // ponytail: the window is a tail-anchored slice, so jumping to an early hit
+  // mounts everything from it to the tail — the same cost as scrolling up there
+  // by hand, and it stays mounted after the search closes. If that ever bites,
+  // the fix is the rewindow the search hits already carry (store's atMessage).
+  useEffect(() => {
+    if (!hitReveal) return;
+    setVisible((v) => Math.max(v, hitReveal));
+    // Only for an agent reply: `choice` names the ONE unfolded turn, and a user
+    // message is not a turn — pinning its id would fold every reply on screen.
+    if (hitIsReply) setChoice((c) => (c && c.id === hitTurnId ? c : { id: hitTurnId }));
+  }, [hitReveal, hitIsReply, hitTurnId]);
+
+  // Paint after the reveal has landed. The whole rendered thread is highlighted,
+  // not just the current item, so the surrounding matches stay visible while
+  // stepping — but which range is CURRENT comes from the store's hit (item +
+  // occurrence), because the rendered thread contains text the store's search
+  // never saw (labels, buttons, a folded reply's peek line).
+  useEffect(() => {
+    const root = ref.current;
+    const box = root?.closest("main") as HTMLElement | null;
+    if (!findOpen || !hitId || !root) { clearHits(THREAD_HIGHLIGHT); return; }
+    // Attribute selector, so an id containing ":" needs no escaping.
+    const el = root.querySelector<HTMLElement>('[data-id="' + hitId + '"]');
+    if (!el) return; // not mounted yet — the reveal above re-runs this
+    const all = findRanges(root, q);
+    const cur = findRanges(el, q)[hitNth];
+    const at = cur ? all.findIndex((r) => r.startContainer === cur.startContainer && r.startOffset === cur.startOffset) : -1;
+    paintHits(all, at < 0 ? 0 : at, THREAD_HIGHLIGHT);
+    // One scroll, no re-assert: `main` scrolls smoothly, so reaching a match far
+    // up a long thread takes about a second of animation — measured mid-flight
+    // it looks like an undershoot, and it settles centred.
+    scrollToHit(box, at < 0 ? cur : all[at]);
+  }, [findOpen, hitId, hitNth, q, visible, openTurnId, structuralSig]);
+
+  // The registry is document-global: highlights left behind outlive this thread.
+  useEffect(() => () => clearHits(THREAD_HIGHLIGHT), []);
+
+  const stepHit = (d: number) => { if (hits.length) setHitIdx((i) => (i + d + hits.length) % hits.length); };
+  const closeFind = () => { setFind(""); clearHits(THREAD_HIGHLIGHT); onCloseFind?.(); };
+
+  // What is NOT in the store: the transcript before the page we fetched. The
+  // gateway answers that in one scoped call — debounced, and only when there
+  // actually is unfetched history, so a conversation held whole in memory never
+  // touches the network. Two counters, never summed: this one counts MESSAGES
+  // (the gateway reports one hit per matching message), the bar counts
+  // occurrences.
+  const historyStart = session?.historyStart ?? 0;
+  // `oldest` is the earliest matching message index, so one click can fetch far
+  // enough back to actually reach it instead of one page at a time.
+  const [older, setOlder] = useState<{ count: number; oldest: number } | null>(null);
+  useEffect(() => {
+    // MIN_QUERY_LEN on the gateway is 2; a shorter query is a 400, not a search.
+    if (!findOpen || !sid || historyStart <= 0 || q.length < 2) { setOlder(null); return; }
+    let alive = true;
+    const t = setTimeout(() => {
+      searchSessions(q, { session: sid, limit: 1 })
+        .then((r) => {
+          if (!alive) return;
+          const idx = (r.results[0]?.hits ?? []).map((h) => h.index).filter((i) => i < historyStart);
+          setOlder(idx.length ? { count: idx.length, oldest: Math.min(...idx) } : null);
+        })
+        .catch(() => { if (alive) setOlder(null); });
+    }, 300);
+    return () => { alive = false; clearTimeout(t); };
+  }, [findOpen, sid, historyStart, q]);
+
+  // Page back until the earliest match is in hand. The store fetches a fixed 50
+  // messages per call, and a match can be a thousand messages back, so one click
+  // per page would be a dozen taps that each look like nothing happened.
+  // ponytail: bounded at 40 pages (2000 messages); a conversation deeper than
+  // that needs the rewindow, not more paging.
+  const loadUntilMatch = async () => {
+    if (!sid || !older) return;
+    for (let i = 0; i < 40; i++) {
+      const before = useStore.getState().sessions[sid]?.historyStart ?? 0;
+      if (before <= 0 || before <= older.oldest) break;
+      await loadOlderMessages(sid);
+      // No progress means the fetch failed (the store keeps historyStart on
+      // error, deliberately) — stop rather than spin.
+      if ((useStore.getState().sessions[sid]?.historyStart ?? 0) >= before) break;
+    }
+  };
+
   const working = !!session?.working;
   // The turn currently being streamed into. It is the one turn that must not
   // fold, whatever is pinned.
@@ -386,6 +502,42 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
 
   return (
     <div className="thread" ref={ref}>
+      {findOpen && (
+        // Sticky rather than docked under the header: the bar belongs to the
+        // thread (it is the thread's state that reveals and unfolds a hit), and
+        // `main` is the scroll container it sticks to.
+        <div className="wf-search thread-find">
+          <input autoFocus value={find} placeholder="Find in conversation" aria-label="Find in conversation"
+            onChange={(e) => setFind(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { closeFind(); return; }
+              if (e.key !== "Enter") return;
+              // Enter would otherwise submit nothing and dismiss the phone's
+              // keyboard, which is the opposite of stepping through matches.
+              e.preventDefault();
+              stepHit(e.shiftKey ? -1 : 1);
+            }} />
+          <span className="n">
+            {q === "" ? "" : hits.length === 0 ? "0/0" : `${Math.min(hitIdx, hits.length - 1) + 1}/${hits.length}`}
+          </span>
+          <button type="button" className="icon-btn prev" disabled={!hits.length}
+            onClick={() => stepHit(-1)} title="Previous match"><IconChevronDown /></button>
+          <button type="button" className="icon-btn" disabled={!hits.length}
+            onClick={() => stepHit(1)} title="Next match"><IconChevronDown /></button>
+          <button type="button" className="icon-btn" onClick={closeFind} title="Close search"><IconX /></button>
+        </div>
+      )}
+      {/* Matches the gateway found in the part of the transcript this client
+          has not fetched. Counted in messages, not occurrences — see above. */}
+      {findOpen && older && (
+        <button type="button" className="earlier-hint find-older"
+          disabled={!!session?.loadingOlder}
+          onClick={() => { void loadUntilMatch(); }}>
+          {session?.loadingOlder
+            ? "Loading earlier messages…"
+            : `↑ ${older.count} more message${older.count === 1 ? "" : "s"} match earlier in this conversation — load them`}
+        </button>
+      )}
       {showLoading && (
         <div className="empty"><span className="spinner" /><h2>Joining conversation…</h2><p>Loading the shared session.</p></div>
       )}
@@ -417,7 +569,7 @@ export function Thread({ session, agentReady, loading }: { session: Session | nu
               <div className="lbl"><span className="you">you</span><span className="sp" /></div>
               {it.images && it.images.length > 0 && <MessageImages images={it.images} />}
               {it.files && it.files.length > 0 && <MessageFiles files={it.files} />}
-              {it.text && <div className="body"><Markdown text={it.text} /></div>}
+              {it.text && <div className="body" data-id={it.id}><Markdown text={it.text} /></div>}
               {it.text && <CopyButton text={it.text} label="Copy message" />}
             </div>
           );

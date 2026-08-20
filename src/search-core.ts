@@ -77,6 +77,14 @@ export function buildSnippet(text: string, terms: string[]): SnippetResult | nul
 
 export const MAX_HITS_PER_SESSION = 3;
 
+// A session-scoped search ("find in this conversation") is a different question
+// from the cross-session one: three hits per session keeps a RESULTS LIST
+// readable, but inside one conversation those three are the whole answer. The
+// cap stays — a hit is a live object per matching message and nobody pages
+// through thousands.
+// ponytail: flat cap; paginate if a transcript ever exceeds it.
+export const MAX_HITS_IN_SESSION = 500;
+
 export type SearchHit = {
   index: number; // index into the session's ViewMessage[] — the same absolute
                  // index /history/messages pages by, so a hit deep-links directly
@@ -171,6 +179,9 @@ const DAY_MS = 86400000;
 
 export type SearchQuery = {
   query: ParsedQuery;
+  // Scope to ONE conversation ("find in this session"), which also lifts the
+  // recency window — see searchQueryParams.
+  sessionId: string | null;
   sinceMs: number | null;  // null = unbounded (all=1)
   untilMs: number | null;
   agents: string[] | null; // null = every configured agent
@@ -198,10 +209,18 @@ export function searchQueryParams(q: URLSearchParams, nowMs: number): SearchQuer
   // A legitimate 0 must clamp to 1, not fall back to the default — so NaN is
   // tested explicitly rather than leaning on falsiness.
   const limit = Number.isNaN(rawLimit) ? DEFAULT_SEARCH_LIMIT : rawLimit;
+  // Same sanitizing as /history/messages: an id reaches the filesystem layer.
+  const sessionId = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "") || null;
+  // A named conversation is unbounded in time. since/until filter on a
+  // session's RECENCY, so the 14-day default would silently return nothing for
+  // the conversation you are looking at the moment it goes two weeks idle —
+  // and the client asking "find in THIS session" has already named its scope.
+  const unbounded = sessionId !== null;
   return {
     query,
-    sinceMs: q.get("all") === "1" ? null : (instantMs(q.get("since")) ?? nowMs - DEFAULT_SINCE_DAYS * DAY_MS),
-    untilMs: instantMs(q.get("until")),
+    sessionId,
+    sinceMs: unbounded || q.get("all") === "1" ? null : (instantMs(q.get("since")) ?? nowMs - DEFAULT_SINCE_DAYS * DAY_MS),
+    untilMs: unbounded ? null : instantMs(q.get("until")),
     agents: agents.length > 0 ? agents : null,
     role: role === "user" || role === "assistant" ? role : null,
     limit: Math.min(Math.max(limit, 1), MAX_SEARCH_LIMIT),

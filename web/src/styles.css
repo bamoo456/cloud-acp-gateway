@@ -701,6 +701,16 @@
      characters of every monospace line spent on margin. A phone gets 10. */
   @media (max-width: 640px) { .thread { padding: 18px 10px 8px; } }
   .earlier-hint { text-align: center; margin: 2px auto 16px; padding: 4px 0; font-size: 12px; color: var(--muted); opacity: .7; user-select: none; }
+  /* Find in this conversation. Sticks to the top of the scrollport so stepping
+     through matches never scrolls the box you are typing in off screen. */
+  .thread-find {
+    position: sticky; top: 0; z-index: 6; margin: -8px -2px 8px;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+  }
+  /* Same line as the local "scroll up for N earlier messages" hint, but it is an
+     action: the matches it counts are in history this client has not fetched. */
+  .find-older { display: block; width: 100%; background: none; border: 0; cursor: pointer; opacity: 1; color: var(--accent); }
+  .find-older:disabled { color: var(--muted); cursor: default; }
   /* "Jump to latest" arrow. Sticky to the bottom of the scrollport (which ends right
      above the composer), so it floats clear of the input without hard-coding the
      composer's height. The 0-height wrapper keeps it from adding a gap below the tail. */
@@ -1837,6 +1847,10 @@
   .wf-search-btn.on { color: var(--accent); background: var(--surface-2); }
   ::highlight(wf-find) { background-color: var(--hit-bg, rgba(255, 214, 0, 0.35)); }
   ::highlight(wf-find-current) { background-color: var(--accent); color: var(--accent-text); }
+  /* The thread's own find (Thread.tsx) paints under its own names, so a file
+     search and a conversation search open at once don't erase each other. */
+  ::highlight(th-find) { background-color: var(--hit-bg, rgba(255, 214, 0, 0.35)); }
+  ::highlight(th-find-current) { background-color: var(--accent); color: var(--accent-text); }
   .wf-dl { width: 34px; height: 34px; }
   .wf-dl svg { width: 18px; height: 18px; }
   /* "add the selected lines to the chat". Dim until there is a selection, then

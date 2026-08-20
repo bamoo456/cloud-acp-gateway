@@ -47,6 +47,9 @@ export function App() {
   const [picker, setPicker] = useState(false);
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  // Find-in-conversation lives here because two children share it: the TopBar
+  // button that opens it and the Thread that owns the search itself.
+  const [findOpen, setFindOpen] = useState(false);
   useEffect(() => { bootstrap(); }, [bootstrap]);
   // Ctrl-` toggles the terminal, the shortcut the strip advertises. Capture
   // phase and stopPropagation because xterm listens on its own textarea: once
@@ -63,6 +66,19 @@ export function App() {
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
   }, [terminalEnabled]);
+  // Cmd/Ctrl-F opens the conversation search. Taking the browser's own
+  // find-in-page is deliberate: it only ever searches the mounted window, which
+  // is the last handful of messages, and silently reports nothing for the rest.
+  // Escape closes it from the input (Thread), not from here.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "f" || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      setFindOpen(true);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
   // Poll the gateway for tasks running anywhere (any agent, any device) so the
   // TopBar can surface and jump to them. Independent of the active SSE connection.
   // Skip the request while the tab is hidden — a backgrounded tab has nothing to
@@ -146,8 +162,12 @@ export function App() {
       <div className="app-row">
         <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)} />
         <div className="content">
-          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)} />
-          <main id="main"><Thread session={sess} agentReady={agentReady} loading={joining} /></main>
+          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)}
+            findOpen={findOpen} onFind={() => setFindOpen((v) => !v)} />
+          <main id="main">
+            <Thread session={sess} agentReady={agentReady} loading={joining}
+              findOpen={findOpen} onCloseFind={() => setFindOpen(false)} />
+          </main>
           {/* Between the thread and the input, right-aligned: what is answering
               and on what, plus the control that changes it (§3 P3). */}
           <EngineDock onOpenLogin={(a) => setLoginAgent(a)} />
