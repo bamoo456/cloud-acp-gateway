@@ -665,6 +665,10 @@ export interface SearchOptions {
   since?: string; until?: string; all?: boolean;
   agent?: string; cwd?: string; role?: "user" | "assistant";
   limit?: number; cursor?: string;
+  // Find-in-conversation: one session, no date window (the gateway drops
+  // since/until for a scoped search), every matching message rather than the
+  // three a results list shows.
+  session?: string;
 }
 
 // Content search across conversations. `since`/`until` are date bounds — NOT the
@@ -679,6 +683,7 @@ export async function searchSessions(q: string, opts: SearchOptions = {}): Promi
   if (opts.role) url += "&role=" + encodeURIComponent(opts.role);
   if (opts.limit) url += "&limit=" + opts.limit;
   if (opts.cursor) url += "&cursor=" + encodeURIComponent(opts.cursor);
+  if (opts.session) url += "&session=" + encodeURIComponent(opts.session);
   const r = await readJson(await fetch(url), "Search isn't available.");
   const results: Array<Record<string, unknown>> = Array.isArray(r?.results) ? r.results : [];
   const scannedRaw = r && typeof r.scanned === "object" && r.scanned !== null ? r.scanned : {};

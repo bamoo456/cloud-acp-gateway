@@ -56,7 +56,7 @@ import {
 } from "./review.ts";
 import { renderHtmlFile } from "./htmlinline.ts";
 import { buildClientConfig } from "./client-config.ts";
-import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
+import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, MAX_HITS_IN_SESSION, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
 const ROOT = path.join(__dirname, "..");
 
@@ -1702,6 +1702,9 @@ export async function searchCandidates(
 
   const candidates: SearchCandidate[] = [];
   for (const c of raw) {
+    // Scoped to one conversation: every other candidate is dropped before its
+    // cwd is even resolved, so the scan reads exactly one file.
+    if (params.sessionId && c.sessionId !== params.sessionId) continue;
     // I2: the cwd the transcript itself records, guarded before the file is read.
     if (!c.cwd) continue;
     const cwd = resolveWithinRootBase(c.cwd, fsRoot);
@@ -1789,7 +1792,7 @@ export async function searchTranscripts(
     if (probe && !probe.test(buf.toString("latin1"))) continue;
 
     const { hits, hitCount } = findHits(await parseForSearch(c, parsed), params.query,
-      { role: params.role ?? undefined });
+      { role: params.role ?? undefined, max: params.sessionId ? MAX_HITS_IN_SESSION : undefined });
     if (hitCount === 0) continue;
 
     results.push({
