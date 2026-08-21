@@ -52,6 +52,16 @@ export const TEXT_SIZE_OPTIONS: Array<{ id: TextSize; label: string; description
   { id: "xl", label: "XL", description: "Maximum readability" },
 ];
 
+// A branch's name, derived from what it was branched off: "X (Branch)", then
+// "X (Branch 2)" for the next one off the same name, matching how the Claude CLI
+// names its own branches. Branching a branch bumps the counter rather than
+// stacking suffixes, so a chain of them stays readable.
+export function branchTitle(title: string): string {
+  const m = /^(.*?) \(Branch(?: (\d+))?\)$/.exec(title.trim());
+  if (!m) return (title.trim() || "Untitled") + " (Branch)";
+  return m[1] + " (Branch " + (m[2] ? Number(m[2]) + 1 : 2) + ")";
+}
+
 function normalizeTextSize(value: unknown): TextSize {
   return TEXT_SIZE_OPTIONS.some((o) => o.id === value) ? value as TextSize : "default";
 }
@@ -88,6 +98,14 @@ interface State {
   tip: string;
   sessions: Record<string, Session>;
   activeId: string | null;
+  // A conversation branched off another one (ACP `session/fork`), rendered as a
+  // floating window over its parent's thread. The branch is an ordinary live
+  // session in `sessions` — this only records that it is a branch OF `parentId`,
+  // which is what lets the window follow its parent: it shows while that parent
+  // is the open conversation and hides (rather than closes) while another one is,
+  // so switching away and back does not throw the branch away. Null when none is
+  // open. Memory-only, so a reload leaves the branch as a normal conversation.
+  branch: { parentId: string; sessionId: string } | null;
   models: Model[];
   modes: Mode[];
   commands: SlashCommand[];
@@ -172,10 +190,24 @@ interface State {
   openRecentSession: (s: RecentSession) => Promise<void>;
   loadOlderMessages: (id: string) => Promise<void>;
   sendPrompt: (text: string, images?: MessageImage[], files?: MessageFile[]) => Promise<void>;
+  // Prompt a specific live conversation, leaving `activeId` alone — what the
+  // branch window's own composer sends through. Unlike sendPrompt it does not
+  // start, resume, or remap anything: a branch is created live by session/fork,
+  // so none of that resolution applies and a caller naming a session that isn't
+  // live is a no-op rather than a silent new conversation.
+  sendPromptTo: (sessionId: string, text: string, images?: MessageImage[], files?: MessageFile[]) => Promise<void>;
+  // Fork the open conversation into a new one (whole history, agent-side), open
+  // it as the branch window, and ask the fork the message the caller was
+  // holding. The prompt is the point, not a convenience: a branch nobody says
+  // anything in has no transcript on disk, so it can only ever surface as a
+  // conversation that fails to open. Resolves true when the fork landed — on
+  // false the caller still holds the only copy of that message.
+  branchSession: (prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => Promise<boolean>;
+  closeBranch: () => void;
   setModel: (id: string) => void;
   setMode: (id: string) => void;
   setConfigOption: (configId: string, value: string) => void;
-  cancel: () => void;
+  cancel: (sessionId?: string) => void;
   setCwd: (p: string) => void;
   // Toggles a folder's hidden state via the gateway; best-effort like the
   // folder picker's own pin toggle, so a failed round-trip just leaves the
@@ -230,6 +262,29 @@ function activeAgentSkin(state: SkinState): AgentSkin | null {
   return normalizeAgentSkin(
     state.cfg.agents.find((a) => a.name === state.agentName)?.skin,
   );
+}
+
+// Whether the "branch this conversation" affordance should be offered, and why
+// not when it shouldn't. Lives here rather than in the component that renders it
+// because the answer is entirely about store state, and the reason strings are
+// what the button says on hover — a disabled control that doesn't explain itself
+// is a dead end. `show: false` (the agent never advertised
+// `sessionCapabilities.fork`) means don't render it at all: a permanently dead
+// button teaches nothing.
+export interface BranchGate { show: boolean; disabled: boolean; why: string }
+export function branchGate(state: State): BranchGate {
+  const show = state.cfg.agents.find((a) => a.name === state.agentName)?.sessionFork === true;
+  const ready = !!state.activeId && !state.activeId.startsWith("pending-");
+  // A turn in flight is not in the transcript yet, so forking mid-turn would
+  // silently drop that reply; one parent tracks one branch at a time.
+  const running = state.runningTasks.some((t) => t.agentName === state.agentName && t.sessionId === state.activeId)
+    || (!!state.activeId && !!state.busySessionIds[state.activeId]);
+  const open = !!state.branch && state.branch.parentId === state.activeId;
+  const why = !ready ? "Send a message first"
+    : running ? "Wait for this turn to finish"
+    : open ? "A branch of this conversation is already open"
+    : "Branch conversation — forks it into a floating window";
+  return { show, disabled: !ready || running || open, why };
 }
 
 export function hasCodexSkin(state: SkinState): boolean {
@@ -565,7 +620,7 @@ export const useStore = create<State>((set, get) => {
     acp?.close();
     set({
       agentReady: false, tip: "Reconnecting…",
-      sessions: {}, activeId: null,
+      sessions: {}, activeId: null, branch: null,
       // rateLimits is deliberately untouched: it's polled per provider,
       // independent of this connection, and a restart shouldn't blank it.
       models: [], modes: [], commands: [], configOptions: [],
@@ -811,6 +866,47 @@ export const useStore = create<State>((set, get) => {
     });
   }
 
+  // The turn itself, for a session that is already live: build the prompt blocks,
+  // send it, and own the bookkeeping that has to happen however it ends. Shared by
+  // sendPrompt (which resolves *which* session first — starting, resuming or
+  // remapping one) and sendPromptTo (which is handed a live one). The caller has
+  // already added the user bubble and marked the session busy; this releases both.
+  async function runPrompt(sid: string, text: string, imgs: MessageImage[], refs: MessageFile[]): Promise<void> {
+    try {
+      // text block first (when non-empty), then one image block per attachment,
+      // then a block per file reference.
+      const prompt: Array<Record<string, unknown>> = [];
+      if (text.trim()) prompt.push({ type: "text", text });
+      for (const im of imgs) {
+        prompt.push(im.data
+          ? { type: "image", mimeType: im.mimeType, data: im.data }
+          : { type: "image", mimeType: im.mimeType, uri: im.uri });
+      }
+      // A whole file is a resource_link — the agent reads it itself, and
+      // sending a large file inline would spend the context on a file it may
+      // only need one function out of. A line range is the opposite case:
+      // the lines ARE the point, so they ride along as an embedded resource.
+      // Both adapters turn that into a link plus a <context ref="…"> block
+      // (claude-agent-acp promptToClaude, codex-acp buildPromptItems), which
+      // is how the selection reaches the model without a second read.
+      for (const f of refs) {
+        prompt.push(f.text !== undefined
+          ? { type: "resource", resource: { uri: f.uri, mimeType: "text/plain", text: f.text } }
+          : { type: "resource_link", uri: f.uri, name: f.name });
+      }
+      const res = (await acp.request("session/prompt", { sessionId: sid, prompt })) as { stopReason?: string };
+      patch(sid, (s) => ({ ...s, curAssistantId: null, curThoughtId: null }));
+      if (res?.stopReason && res.stopReason !== "end_turn") {
+        patch(sid, (s) => ({ ...s, seq: s.seq + 1, items: [...s.items, { id: s.id + ":" + (s.seq + 1), kind: "note", text: "· " + res.stopReason }] }));
+      }
+    } catch (e: any) {
+      if (!e?.__disconnected) patch(sid, (s) => ({ ...s, seq: s.seq + 1, items: [...s.items, { id: s.id + ":" + (s.seq + 1), kind: "note", variant: "error", text: "Error: " + msg(e) }] }));
+    } finally {
+      setSessionBusy(sid, false);
+      patch(sid, (s) => ({ ...s, working: false }));
+    }
+  }
+
   function initSession(): Promise<unknown> {
     if (!sessionInit) sessionInit = acp.request("session/new", { cwd: get().cwd || "", mcpServers: [] });
     return sessionInit;
@@ -955,19 +1051,35 @@ export const useStore = create<State>((set, get) => {
             // (questions with options), which it presents via `elicitation/create`;
             // without this capability the adapter disables the tool entirely.
             clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, elicitation: { form: {} } },
-          })) as { agentCapabilities?: { promptCapabilities?: PromptCapabilities; loadSession?: boolean } } | undefined;
+          })) as {
+            agentCapabilities?: {
+              promptCapabilities?: PromptCapabilities;
+              loadSession?: boolean;
+              // Present (as an empty object) when the agent implements
+              // `session/fork`; absent when it doesn't. claude-agent-acp does,
+              // codex-acp bundles the schema but has no handler.
+              sessionCapabilities?: { fork?: unknown };
+            };
+          } | undefined;
           // The agent's capabilities flow through the gateway unchanged. Gate image
           // input on promptCapabilities; and trust the agent's own loadSession over
           // the gateway's conservative name-based guess — codex-acp now reports
           // loadSession:true, so resuming it threads the conversation (like Zed)
           // instead of forking a fresh session on every reply.
           const loadSession = init?.agentCapabilities?.loadSession;
+          // Only the agent can say whether it forks — there is no name-based
+          // guess to fall back on, so absence means "no branching" and the
+          // affordance simply doesn't appear.
+          const sessionFork = !!init?.agentCapabilities?.sessionCapabilities?.fork;
           set((st) => ({
             agentReady: true, tip: "",
             promptCapabilities: init?.agentCapabilities?.promptCapabilities ?? {},
-            cfg: typeof loadSession === "boolean"
-              ? { ...st.cfg, agents: st.cfg.agents.map((a) => (a.name === st.agentName ? { ...a, sessionLoad: loadSession } : a)) }
-              : st.cfg,
+            cfg: {
+              ...st.cfg,
+              agents: st.cfg.agents.map((a) => (a.name === st.agentName
+                ? { ...a, sessionFork, ...(typeof loadSession === "boolean" ? { sessionLoad: loadSession } : {}) }
+                : a)),
+            },
           }));
           const link = linkParams();
           if (pendingResyncId) {
@@ -1034,7 +1146,7 @@ export const useStore = create<State>((set, get) => {
     agentName: initialAgent?.name ?? cfg.defaultAgent,
     cwd: initialAgent?.cwd || cfg.fsRoot || "",
     conn: "connecting", agentReady: false, tip: "Connecting to the local agent…",
-    sessions: {}, activeId: null,
+    sessions: {}, activeId: null, branch: null,
     models: [], modes: [], commands: [], configOptions: [], rateLimits: {}, quotaUnlimited: {}, quotaUnavailable: {},
     promptCapabilities: {},
     pendingPermissions: [],
@@ -1196,6 +1308,9 @@ export const useStore = create<State>((set, get) => {
         // historyNonce re-pulls both sidebar lists.
         return {
           sessions, activeId: st.activeId === sid ? null : st.activeId,
+          // Either side going away ends the pairing: a branch window with no
+          // branch, or one whose parent thread is gone, has nothing to sit on.
+          branch: st.branch && (st.branch.sessionId === sid || st.branch.parentId === sid) ? null : st.branch,
           recentSessions, historyNonce: st.historyNonce + 1, tip: "",
         };
       });
@@ -1594,40 +1709,134 @@ export const useStore = create<State>((set, get) => {
         if (!e?.__disconnected) set({ tip: "Couldn't start session: " + msg(e) });
         return;
       }
+      await runPrompt(activeId!, text, imgs, refs);
+    },
+
+    async sendPromptTo(sessionId, text, images, files) {
+      const target = get().sessions[sessionId];
+      // A provisional id belongs to a conversation the agent has not created yet
+      // (a branch whose session/fork is still in flight) — prompting it would be
+      // a request about a session that does not exist. The branch window already
+      // shows a waiting strip instead of a composer; this is the belt to that
+      // braces, for any other caller.
+      if (!target || target.viewOnly || sessionId.startsWith("pending-") || !get().agentReady) return;
+      if (get().busySessionIds[sessionId]) return;
+      const imgs = get().promptCapabilities.image ? (images || []) : [];
+      const refs = get().promptCapabilities.embeddedContext ? (files || []) : [];
+      if (!text.trim() && !imgs.length && !refs.length) return;
+      patch(sessionId, (s) => ({
+        ...addUserBubble(s, text, imgs.length ? imgs : undefined, refs.length ? refs : undefined),
+        working: true, curAssistantId: null, curThoughtId: null,
+      }));
+      touchSessionActivity(sessionId);
+      setSessionBusy(sessionId, true);
+      await runPrompt(sessionId, text, imgs, refs);
+    },
+
+    async branchSession(prompt) {
+      const parentId = get().activeId;
+      const parent = parentId ? get().sessions[parentId] : null;
+      // A conversation the agent has never seen (an optimistic "+" tab) has
+      // nothing to fork, and a turn in flight is not in the transcript yet — the
+      // fork would silently drop it, so it is refused rather than half-copied.
+      if (!parentId || !parent || parentId.startsWith("pending-")) return false;
+      if (get().busySessionIds[parentId]) { set({ tip: "Wait for this turn to finish before branching." }); return false; }
+      // Nothing to ask the branch means nothing would ever be written in it — the
+      // one state this feature cannot render. See the action's doc comment.
+      if (!prompt.text.trim() && !prompt.images?.length && !prompt.files?.length) return false;
+
+      // The window opens NOW, on a provisional id, and the fork round trip
+      // happens behind it. Everything it shows is already in memory (the copy is
+      // the parent's own thread), so waiting on the agent before painting would
+      // be a second of nothing for no reason — the same optimistic-then-remap
+      // move sendPrompt makes for a first message. The window renders its
+      // composer as a waiting strip until the real id lands, because a
+      // provisional session is one the agent cannot be prompted about yet.
+      const provisionalId = PROVISIONAL();
+      set((st) => {
+        // The fork copies the transcript agent-side, but that copy is not on
+        // disk until the branch's first turn — so the window is filled from the
+        // parent's items in memory rather than from the history API. It is a
+        // copy, not a hand-over: the parent stays exactly as it is. Streaming
+        // cursors and the busy flag are reset because a mid-turn parent must not
+        // hand its half-open bubble to the branch, and `historyStart` rides
+        // along untouched: the agent's copy really does have those older
+        // messages, so the affordance is honest once the transcript lands.
+        const source = st.sessions[parentId] ?? parent;
+        const copy: Session = {
+          ...remapSession(source, provisionalId),
+          title: branchTitle(source.title),
+          createdAt: Date.now(), lastActiveAt: Date.now(),
+          working: false, curAssistantId: null, curThoughtId: null,
+          viewOnly: false, suppressReplay: false, loadingOlder: false,
+        };
+        // Where the copy ends and the branch's own turns begin. Without it the
+        // window reads as a conversation that always had this history, and the
+        // one thing the reader needs to know about a branch — that everything
+        // above is shared with its parent, and nothing below is — is invisible.
+        const seq = copy.seq + 1;
+        const marked: Session = {
+          ...copy, seq,
+          items: [...copy.items, {
+            id: copy.id + ":" + seq, kind: "note",
+            text: "· branched from \u201c" + source.title + "\u201d — everything above is copied",
+          }],
+        };
+        return {
+          // Deliberately NOT applyModelsModes anywhere in here: the store's
+          // models/modes lists describe the conversation on screen, and the
+          // fork's own result reports the values it came up at — before the
+          // gateway puts the parent's back. The branch inherits the parent's,
+          // which the copy already carries.
+          sessions: evictExcess({ ...st.sessions, [provisionalId]: marked }, st.activeId, MAX_LIVE_SESSIONS),
+          branch: { parentId, sessionId: provisionalId },
+          tip: "",
+        };
+      });
+
       try {
-        // text block first (when non-empty), then one image block per attachment,
-        // then a block per file reference.
-        const prompt: Array<Record<string, unknown>> = [];
-        if (text.trim()) prompt.push({ type: "text", text });
-        for (const im of imgs) {
-          prompt.push(im.data
-            ? { type: "image", mimeType: im.mimeType, data: im.data }
-            : { type: "image", mimeType: im.mimeType, uri: im.uri });
-        }
-        // A whole file is a resource_link — the agent reads it itself, and
-        // sending a large file inline would spend the context on a file it may
-        // only need one function out of. A line range is the opposite case:
-        // the lines ARE the point, so they ride along as an embedded resource.
-        // Both adapters turn that into a link plus a <context ref="…"> block
-        // (claude-agent-acp promptToClaude, codex-acp buildPromptItems), which
-        // is how the selection reaches the model without a second read.
-        for (const f of refs) {
-          prompt.push(f.text !== undefined
-            ? { type: "resource", resource: { uri: f.uri, mimeType: "text/plain", text: f.text } }
-            : { type: "resource_link", uri: f.uri, name: f.name });
-        }
-        const res = (await acp.request("session/prompt", { sessionId: activeId, prompt })) as { stopReason?: string };
-        patch(activeId, (s) => ({ ...s, curAssistantId: null, curThoughtId: null }));
-        if (res?.stopReason && res.stopReason !== "end_turn") {
-          patch(activeId, (s) => ({ ...s, seq: s.seq + 1, items: [...s.items, { id: s.id + ":" + (s.seq + 1), kind: "note", text: "· " + res.stopReason }] }));
-        }
-      } catch (e: any) {
-        if (!e?.__disconnected) patch(activeId!, (s) => ({ ...s, seq: s.seq + 1, items: [...s.items, { id: s.id + ":" + (s.seq + 1), kind: "note", variant: "error", text: "Error: " + msg(e) }] }));
-      } finally {
-        setSessionBusy(activeId!, false);
-        patch(activeId!, (s) => ({ ...s, working: false }));
+        const cwd = parent.cwd || get().cwd || "";
+        const res = (await acp.request("session/fork", { sessionId: parentId, cwd, mcpServers: [] })) as NewSessionResult;
+        if (!res?.sessionId) throw new Error("no session id");
+        set((st) => {
+          // Closed while the fork was in flight (or evicted): the branch exists
+          // agent-side and stays reachable from the sidebar, but nothing here
+          // should reopen a window the user just dismissed.
+          const provisional = st.sessions[provisionalId];
+          if (!provisional) return {};
+          const sessions = { ...st.sessions };
+          delete sessions[provisionalId];
+          sessions[res.sessionId] = remapSession(provisional, res.sessionId);
+          return {
+            sessions: evictExcess(sessions, st.activeId, MAX_LIVE_SESSIONS),
+            branch: st.branch?.sessionId === provisionalId ? { parentId, sessionId: res.sessionId } : st.branch,
+            tip: "",
+          };
+        });
+        // The message that motivated the branch is its first turn. That is also
+        // what writes the fork's transcript (the agent copies the history into it
+        // then, not at fork time) and what records it in the recents list — so a
+        // branch only ever reaches the sidebar with something behind it. Not
+        // awaited: the caller needs to know the fork landed, not how the turn goes.
+        void get().sendPromptTo(res.sessionId, prompt.text, prompt.images, prompt.files);
+        return true;
+      } catch (e) {
+        // Take the optimistic window back down with the failure — leaving a
+        // window that can never be prompted would be worse than never opening it.
+        set((st) => {
+          const sessions = { ...st.sessions };
+          delete sessions[provisionalId];
+          return {
+            sessions,
+            branch: st.branch?.sessionId === provisionalId ? null : st.branch,
+            tip: "Couldn't branch conversation: " + msg(e),
+          };
+        });
+        return false;
       }
     },
+
+    closeBranch() { set({ branch: null }); },
 
     setModel(id) {
       const st = get(); const sid = st.activeId; if (!sid) return;
@@ -1657,7 +1866,9 @@ export const useStore = create<State>((set, get) => {
         .then((r: any) => { if (r?.configOptions) set({ configOptions: r.configOptions }); })
         .catch((e) => { set({ configOptions: prev, tip: "Couldn't change " + opt.name + ": " + msg(e) }); });
     },
-    cancel() { const sid = get().activeId; if (sid) { touchSessionActivity(sid); acp.notify("session/cancel", { sessionId: sid }); } },
+    // No argument = the conversation on screen; an id = any of them, which is how
+    // the branch window's own composer stops its own turn.
+    cancel(sessionId) { const sid = sessionId ?? get().activeId; if (sid) { touchSessionActivity(sid); acp.notify("session/cancel", { sessionId: sid }); } },
 
     // Called when the page returns to the foreground (visibilitychange/pageshow).
     // iOS suspends a backgrounded tab: the socket can drop with its onclose-driven

@@ -547,3 +547,83 @@ test("the agent's configured defaults are applied to a new session, and an unusa
   assert.deepEqual(controlsIn(agent().sent), [{ configId: "model", value: "opus" }], "the gateway's default replaces the CLI's, the unusable one is dropped");
   await shutdown(streams, close);
 });
+
+// --- a forked conversation ----------------------------------------------------
+// claude-agent-acp's session/fork answers with a NEW session id, so the gateway has
+// to register that id exactly as it registers a session/new — the request itself
+// only names the SOURCE. And a fork continues one specific conversation, so it
+// inherits that conversation's controls instead of coming up on this agent's
+// configured defaults the way a genuinely new session does.
+
+// Branch a live conversation. `options` are the controls the forked session reports
+// itself running — the CLI's current global config, as any fresh session does. The
+// cwd differs from openSession's so the pairing is provably the fork's own.
+async function forkSession(
+  port: number, agent: () => Agent, conn: string, sourceSid: string, sid: string, reqId: number, options?: unknown[],
+): Promise<void> {
+  await post(port, conn, { jsonrpc: "2.0", id: reqId, method: "session/fork", params: { sessionId: sourceSid, cwd: "/fork", mcpServers: [] } });
+  const fwd = agent().sent.map(parse).filter((o) => o.method === "session/fork").at(-1)!;
+  const result = options ? { sessionId: sid, configOptions: options } : { sessionId: sid };
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: fwd.id, result })));
+  await new Promise((r) => setTimeout(r, 20)); // controls are applied just after the response routes
+}
+
+// Bounded for the same reason the revive test is: the subscription half waits on a
+// frame the gateway only routes once the fork is registered, so a regression has to
+// fail here rather than hang the suite.
+test("a session/fork response registers the new session against the forking client", { timeout: 5_000 }, async () => {
+  const { port, agent, running, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  const { conn, stream } = await openSession(port, agent, "S1", streams);
+  await forkSession(port, agent, conn, "S1", "S2", 5);
+
+  await post(port, conn, { jsonrpc: "2.0", id: 6, method: "session/prompt", params: { sessionId: "S2", prompt: [{ type: "text", text: "go" }] } });
+  assert.deepEqual(
+    running().find((t) => t.sessionId === "S2"),
+    { agentName: "claude", sessionId: "S2", state: "active", cwd: "/fork", title: "go" },
+    "the fork's own cwd is paired onto the session its response created",
+  );
+
+  // An agent->client request goes to a session's viewers only, so one arriving
+  // proves the forking conn was subscribed to an id it never named itself.
+  agent().emit(Buffer.from(JSON.stringify({
+    jsonrpc: "2.0", id: 77, method: "session/request_permission",
+    params: { sessionId: "S2", toolCall: { title: "Run a tool" }, options: [] },
+  })));
+  const evt = await stream.next((e) => !!e.data && parse(e.data).id === 77);
+  assert.equal((parse(evt.data).params as { sessionId: string }).sessionId, "S2", "the fork's frames reach the client that asked for it");
+
+  await shutdown(streams, close);
+});
+
+test("a forked session inherits the source conversation's controls, not the agent's defaults", async () => {
+  const { port, agent, close } = await makeTestServer({ defaults: { model: "haiku" } });
+  const streams: Stream[] = [];
+  // S1 doesn't offer `haiku`, so the configured default is dropped there and the
+  // conversation runs on what the client then chose.
+  const { conn } = await openSession(port, agent, "S1", streams, [option("model", "sonnet", ["default", "opus", "sonnet"])]);
+  await setControl(port, agent, conn, "S1", "model", "opus", 2);
+  agent().sent.length = 0;
+
+  // The fork comes up on the CLI's global config, like every fresh session — and
+  // offers `haiku`, so a fork routed through the defaults would land there instead.
+  await forkSession(port, agent, conn, "S1", "S2", 3, [option("model", "sonnet", ["default", "opus", "sonnet", "haiku"])]);
+
+  assert.deepEqual(controlsIn(agent().sent), [{ configId: "model", value: "opus" }], "the branch continues on the model the source ran");
+  await ackControls(agent);
+  await shutdown(streams, close);
+});
+
+test("a fork of a source with nothing recorded is left at its own values", async () => {
+  const { port, agent, close } = await makeTestServer({ defaults: { model: "opus" } });
+  const streams: Stream[] = [];
+  // A bare session/new result records nothing — the same state a conversation the
+  // CLI created and the gateway adopted from history is in.
+  const { conn } = await openSession(port, agent, "S1", streams);
+  agent().sent.length = 0;
+
+  await forkSession(port, agent, conn, "S1", "S2", 3, [option("model", "sonnet", ["default", "opus", "sonnet"])]);
+
+  assert.deepEqual(controlsIn(agent().sent), [], "nothing to inherit means nothing is pushed — the defaults are not a fallback");
+  await shutdown(streams, close);
+});

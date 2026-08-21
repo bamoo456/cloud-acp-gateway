@@ -22,6 +22,13 @@ function cmKey(view: EditorView, key: string, opts: KeyboardEventInit = {}) {
   view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...opts }));
 }
 
+// Composer's props are all optional (bound mode opts in with `sessionId`), and
+// createElement's overload inference can't derive P from an all-optional,
+// defaulted props parameter — it silently falls back to bare `Attributes` and
+// rejects `sessionId` as unknown. Spelling the shape out here as an explicit
+// type argument sidesteps that without giving up prop type-checking.
+type ComposerProps = { sessionId?: string; compact?: boolean };
+
 describe("Composer session busy state", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
@@ -515,4 +522,216 @@ describe("Composer session busy state", () => {
     expect(container.textContent).not.toContain("Auto");
     expect(container.textContent).not.toContain("Approval Preset");
   });
+
+  test("a bound instance sends through sendPromptTo with its own session id, not sendPrompt", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    const sendPrompt = vi.fn();
+    const sendPromptTo = vi.fn();
+    useStore.setState({ agentReady: true, sendPrompt, sendPromptTo } as any);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, { sessionId: "branch-1" }));
+    });
+
+    await act(async () => { cmSet(cmView(container), "hello"); });
+    const send = container.querySelector<HTMLButtonElement>("button.send")!;
+    await act(async () => { send.click(); });
+
+    expect(sendPromptTo).toHaveBeenCalledWith("branch-1", "hello", [], []);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  test("a bound instance's file attachments are isolated from the store's attachedFiles", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    useStore.setState({
+      agentReady: true,
+      promptCapabilities: { embeddedContext: true },
+      // Stands in for a file the panel attached to the (unbound) main composer —
+      // it must not leak into this bound instance's chip strip.
+      attachedFiles: [{ name: "panel.md", uri: "file:///panel.md" }],
+    } as any);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ name: "branch.md", uri: "file:///data/uploads/branch.md" }),
+    } as Response));
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, { sessionId: "branch-1" }));
+    });
+
+    // The store's file (from the file panel) does not show up as a chip here.
+    expect(container.querySelector(".file-chip .nm")).toBeNull();
+
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["# hi"], "branch.md", { type: "text/markdown" });
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    // The upload landed in this instance's own chip strip...
+    expect(container.querySelector(".file-chip .nm")?.textContent).toBe("branch.md");
+    // ...and never touched the store's list.
+    expect(useStore.getState().attachedFiles).toEqual([{ name: "panel.md", uri: "file:///panel.md" }]);
+  });
+
+  test("clearing after send only clears the bound instance's own file list", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    const sendPromptTo = vi.fn();
+    useStore.setState({
+      agentReady: true,
+      promptCapabilities: { embeddedContext: true },
+      attachedFiles: [{ name: "panel.md", uri: "file:///panel.md" }],
+      sendPromptTo,
+    } as any);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ name: "branch.md", uri: "file:///data/uploads/branch.md" }),
+    } as Response));
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, { sessionId: "branch-1" }));
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["# hi"], "branch.md", { type: "text/markdown" });
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(container.querySelector(".file-chip .nm")?.textContent).toBe("branch.md");
+
+    await act(async () => { cmSet(cmView(container), "go"); });
+    const send = container.querySelector<HTMLButtonElement>("button.send")!;
+    await act(async () => { send.click(); });
+
+    expect(sendPromptTo).toHaveBeenCalledWith(
+      "branch-1", "go", [], [{ name: "branch.md", uri: "file:///data/uploads/branch.md" }],
+    );
+    // The bound instance's own chip is gone...
+    expect(container.querySelector(".file-chip")).toBeNull();
+    // ...but the store's list (the file panel's own state) is untouched.
+    expect(useStore.getState().attachedFiles).toEqual([{ name: "panel.md", uri: "file:///panel.md" }]);
+  });
+
+  test("cancel in a bound instance passes its session id", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    const cancel = vi.fn();
+    useStore.setState({
+      agentReady: true,
+      // The parent conversation is active but idle; the branch is the one
+      // running, which is exactly the case bound busy-state has to tell apart
+      // from unbound (activeId-based) busy-state.
+      activeId: "parent-1",
+      busySessionIds: { "branch-1": true },
+      cancel,
+    } as any);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, { sessionId: "branch-1" }));
+    });
+
+    const stop = container.querySelector<HTMLButtonElement>("button.send.stop");
+    expect(stop).not.toBeNull(); // busy read from busySessionIds[sessionId], not activeId
+    await act(async () => { stop!.click(); });
+
+    expect(cancel).toHaveBeenCalledWith("branch-1");
+  });
+
+  // The branch button is one click from send and spends a few seconds spawning a
+  // CLI, so it arms before it fires.
+  type BranchPrompt = { text: string; images?: unknown[]; files?: unknown[] };
+  async function mountWithFork(
+    props: ComposerProps = {},
+    fork: (p: BranchPrompt) => Promise<boolean> = async () => true,
+  ) {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    const branchSession = vi.fn(fork);
+    useStore.setState({
+      agentReady: true,
+      agentName: "claude",
+      cfg: { ...useStore.getState().cfg, agents: [{ name: "claude", cwd: "/p", sessionFork: true }] },
+      activeId: "s1",
+      sessions: { s1: makeSession("s1"), b1: makeSession("b1") },
+      branch: null,
+      runningTasks: [],
+      busySessionIds: {},
+      branchSession,
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, props));
+    });
+    return { branchSession };
+  }
+
+  test("the branch button arms on the first click and only forks on the second", async () => {
+    const { branchSession } = await mountWithFork();
+
+    // Branching sends: with nothing typed there is nothing to open a branch with,
+    // so the control is refused until there is.
+    expect(container.querySelector<HTMLButtonElement>(".branch-btn")!).toBeDisabled();
+    await act(async () => { cmSet(cmView(container), "try it the other way"); });
+
+    const btn = container.querySelector<HTMLButtonElement>(".branch-btn")!;
+    expect(btn).not.toBeDisabled();
+    expect(btn.textContent).toContain("branch");
+    expect(container.querySelector(".branch-hint")).toBeNull();
+
+    await act(async () => { btn.click(); });
+    expect(branchSession).not.toHaveBeenCalled();
+    expect(container.querySelector(".branch-hint")).not.toBeNull();
+    expect(container.querySelector(".branch-btn")!.textContent).toContain("confirm");
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    // The typed message is what the branch opens with — and the box is cleared
+    // only because the fork reported success.
+    expect(branchSession).toHaveBeenCalledTimes(1);
+    expect(branchSession.mock.calls[0][0]).toMatchObject({ text: "try it the other way" });
+    expect(container.querySelector(".branch-hint")).toBeNull();
+    expect(cmView(container).state.doc.toString()).toBe("");
+  });
+
+  test("a fork that fails leaves the typed message in the box", async () => {
+    const { branchSession } = await mountWithFork({}, async () => false);
+    await act(async () => { cmSet(cmView(container), "would have been lost"); });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    expect(branchSession).toHaveBeenCalledTimes(1);
+    expect(cmView(container).state.doc.toString()).toBe("would have been lost");
+  });
+
+  test("an armed branch button gives up on Escape", async () => {
+    const { branchSession } = await mountWithFork();
+
+    await act(async () => { cmSet(cmView(container), "never mind"); });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    expect(container.querySelector(".branch-hint")).not.toBeNull();
+
+    await act(async () => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    expect(container.querySelector(".branch-hint")).toBeNull();
+    expect(branchSession).not.toHaveBeenCalled();
+  });
+
+  test("a bound instance never offers to branch the conversation behind it", async () => {
+    await mountWithFork({ sessionId: "b1" });
+    expect(container.querySelector(".branch-btn")).toBeNull();
+  });
+
 });
