@@ -508,6 +508,16 @@ export async function togglePinnedFolder(path: string): Promise<string[]> {
   return Array.isArray(r.pinned) ? r.pinned : [];
 }
 
+// Hidden folders live on the server too (see /folders/pinned above) — a filter
+// set up on one device must carry to every other one, which localStorage can't.
+// There is no reader here on purpose: GET /prefs already hydrates the list on
+// startup, and this toggle returns the updated one.
+export async function toggleHiddenFolder(path: string): Promise<string[]> {
+  const url = base() + "/folders/hidden?path=" + encodeURIComponent(path);
+  const r = await readJson(await fetch(url, { method: "POST" }), "Couldn't update hidden folders.");
+  return Array.isArray(r.hidden) ? r.hidden : [];
+}
+
 // Cross-device UI prefs that used to live in this browser's localStorage now live
 // on the gateway (shared across devices/IPs — see lib/recentFolders, lib/lock).
 // getPrefs hydrates all of them in one request on startup; the mutators below
@@ -518,21 +528,23 @@ export interface PrefsDto {
   lock: unknown | null;
   recentSessions: Array<Record<string, unknown>>;
   recentFolders: Array<Record<string, unknown>>;
+  hiddenFolders: string[];
 }
 
 export async function getPrefs(): Promise<PrefsDto> {
   try {
     const r = await fetch(base() + "/prefs");
-    if (!r.ok) return { textSize: null, lock: null, recentSessions: [], recentFolders: [] };
+    if (!r.ok) return { textSize: null, lock: null, recentSessions: [], recentFolders: [], hiddenFolders: [] };
     const j = await r.json();
     return {
       textSize: typeof j?.textSize === "string" ? j.textSize : null,
       lock: j?.lock ?? null,
       recentSessions: Array.isArray(j?.recentSessions) ? j.recentSessions : [],
       recentFolders: Array.isArray(j?.recentFolders) ? j.recentFolders : [],
+      hiddenFolders: Array.isArray(j?.hiddenFolders) ? j.hiddenFolders : [],
     };
   } catch {
-    return { textSize: null, lock: null, recentSessions: [], recentFolders: [] };
+    return { textSize: null, lock: null, recentSessions: [], recentFolders: [], hiddenFolders: [] };
   }
 }
 

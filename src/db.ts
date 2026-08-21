@@ -96,6 +96,14 @@ export class Db {
       path TEXT PRIMARY KEY,
       pinned_at TEXT NOT NULL
     )`);
+    // Folders the reader has explicitly asked never to see in the sidebar,
+    // persisted server-side like pinned_folders so the choice follows the
+    // account across devices. Deliberately no seeding: unlike pins (which
+    // default to the agents' own cwds), there is no sane default hidden set.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS hidden_folders (
+      path TEXT PRIMARY KEY,
+      hidden_at TEXT NOT NULL
+    )`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -430,6 +438,29 @@ export class Db {
       this.db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('pinned_seeded', ?)").run(now);
     }
     return this.pinnedFolders();
+  }
+
+  // Hidden folders — same shape as pinned, minus seeding (see the table comment
+  // above): oldest-hidden first for a stable display order.
+  hiddenFolders(): string[] {
+    const rows = this.db
+      .prepare("SELECT path FROM hidden_folders ORDER BY hidden_at, path")
+      .all() as Array<{ path: string }>;
+    return rows.map((r) => r.path);
+  }
+
+  isHidden(p: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM hidden_folders WHERE path = ?").get(p);
+  }
+
+  hide(p: string): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO hidden_folders (path, hidden_at) VALUES (?, ?)")
+      .run(p, new Date().toISOString());
+  }
+
+  unhide(p: string): void {
+    this.db.prepare("DELETE FROM hidden_folders WHERE path = ?").run(p);
   }
 
   // ----------------------------------------------------------------- inbox ----

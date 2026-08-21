@@ -113,6 +113,19 @@ export function IconChevronRight() {
   );
 }
 
+// Hiding a folder. A circle-slash rather than a crossed-out eye: at the 13-19px
+// these render at, an eye's lid/pupil/slash strokes collapse into a smudge,
+// while this reads at any size — and IconSlash is already spoken for by the
+// composer's slash-command button.
+export function IconHide() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M6 18 18 6" />
+    </svg>
+  );
+}
+
 export function IconSlash() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">

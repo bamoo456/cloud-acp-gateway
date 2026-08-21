@@ -11,11 +11,11 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, WorkingDots,
+import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, WorkingDots,
   Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
-import { homeFrom } from "../lib/folderKey.ts";
-import { groupByFolder, latestWithPinned, type GroupableRow } from "../lib/sessionGroups.ts";
+import { folderKey, homeFrom } from "../lib/folderKey.ts";
+import { groupByFolder, latestWithPinned, splitByAge, hideFolders, type GroupableRow } from "../lib/sessionGroups.ts";
 import {
   readSessionsView, saveSessionsView, readFolderOverrides, saveFolderOverrides, type SessionsView,
 } from "../lib/sessionsView.ts";
@@ -93,11 +93,11 @@ function SessionRow({ className, onOpen, target, running, active, onAskDelete, o
 // The row's right-click / long-press menu: FileMenu's sheet-or-dropdown
 // pattern with a single destructive action.
 const MENU_W = 214;
-const MENU_H = 168;
+const MENU_H = 210; // header + 3 rows now that Hide folder joins Rename/Delete
 const SHEET_QUERY = "(max-width: 640px)"; // matches .wf-menu's own sheet breakpoint
-function SessionRowMenu({ target, onRename, onDelete, onClose }: {
+function SessionRowMenu({ target, onRename, onHideFolder, onDelete, onClose }: {
   target: RowTarget & { x: number; y: number };
-  onRename: () => void; onDelete: () => void; onClose: () => void;
+  onRename: () => void; onHideFolder?: () => void; onDelete: () => void; onClose: () => void;
 }) {
   // Read once, on open: the menu lives for a few seconds and a device does not
   // cross the breakpoint inside them.
@@ -121,6 +121,13 @@ function SessionRowMenu({ target, onRename, onDelete, onClose }: {
         <button className="wf-menu-row" role="menuitem" onClick={onRename}>
           <IconPencil /><span>Rename conversation</span>
         </button>
+        {/* Only offered for a row from a folder other than the current one — same
+            reason the folder header's hide affordance skips it (see below). */}
+        {onHideFolder && (
+          <button className="wf-menu-row" role="menuitem" onClick={onHideFolder}>
+            <IconHide /><span>Hide folder “{basename(target.cwd)}”</span>
+          </button>
+        )}
         <button className="wf-menu-row danger" role="menuitem" onClick={onDelete}>
           <IconTrash /><span>Delete conversation</span>
         </button>
@@ -552,13 +559,26 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   for (const it of (showMore ? allItems : allItems.filter((x) => withinRecentWindow(x.updatedAt))))
     push(it.agentName, it.sessionId, s.cwd, it.updatedAt, renderItem(it), false);
   for (const it of currentItems) push(s.agentName, it.id, it.cwd || s.cwd, it.createdAt, renderCurrentItem(it), false);
+  const home = homeFrom(s.cwd, s.cfg.fsRoot, s.cfg.agents[0]?.cwd);
+  // Filtered once, here, so the qty count, hasMoreRows and both views below all
+  // agree on the same list. This deliberately overrides sessionGroups.ts's
+  // "must not sink out of sight" rule — a hidden folder's rows disappear even
+  // when running or needing you — because hiding is explicit (chosen from the
+  // folder's own header or a row menu), the durable inbox still surfaces those
+  // prompts elsewhere,
+  // and the "N hidden" affordance in .sb-head keeps the cut non-silent.
+  const visibleRows = hideFolders(rows, s.hiddenFolders, s.cwd, home);
+  const hiddenCount = rows.length - visibleRows.length;
   // The cap applies to the flat view only: by folder, hiding rows would leave a
   // folder header claiming a count its children don't add up to.
-  const hasMoreRows = rows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt));
-  const folders = groupByFolder(rows, s.cwd, homeFrom(s.cwd, s.cfg.fsRoot, s.cfg.agents[0]?.cwd));
-  const { pinned, rest } = latestWithPinned(rows);
+  const hasMoreRows = visibleRows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt));
+  const folders = groupByFolder(visibleRows, s.cwd, home);
+  const { pinned, rest } = latestWithPinned(visibleRows);
   const latestRest = showMore ? rest : rest.slice(0, RECENT_LIMIT);
-  const listEmpty = rows.length === 0;
+  // Split the flat recency list into "just happened" and "sometime since" so a
+  // long tail of quiet sessions doesn't read as one undifferentiated wall.
+  const { fresh, older } = splitByAge(latestRest, now);
+  const listEmpty = visibleRows.length === 0;
 
   return (
     <>
@@ -602,7 +622,15 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                     in words, so nothing has to be learned from an icon. */}
                 <div className="sb-head">
                   <span>Sessions</span>
-                  <span className="qty">{rows.length}</span>
+                  <span className="qty">{visibleRows.length}</span>
+                  {/* Non-silent truncation: hiding is explicit, but a count
+                      that vanishes without a trace would read as a bug.
+                      Hidden folders are now managed in the folder picker. */}
+                  {hiddenCount > 0 && (
+                    <button type="button" className="view-btn" onClick={() => { onOpenPicker(); onClose(); }}>
+                      {hiddenCount} hidden
+                    </button>
+                  )}
                   <span className="sp" />
                   <div className="view-wrap">
                     <button className="view-btn" aria-haspopup="menu" aria-expanded={viewMenu}
@@ -644,6 +672,16 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                             <span className={"run-dot" + (g.needsYou ? " awaiting" : "")}
                               title={g.needsYou ? "Needs input" : "Working"} />
                           )}
+                          {/* hideFolders() always exempts the folder you're working in, so
+                              a toggle here would look broken — offer it on every group but
+                              this one. `.fgroup` is itself a <button>, so this is a <span
+                              role="button">, same as the folder picker's `.arow .hide`. */}
+                          {!g.current && (
+                            <span className="hide" role="button" aria-label="Hide folder"
+                              onClick={(e) => { e.stopPropagation(); s.toggleHiddenFolder(g.cwd); }}>
+                              <IconHide />
+                            </span>
+                          )}
                         </button>
                         {!shut && <div className="fkids recent-list">{g.rows.map((r) => r.data)}</div>}
                       </div>
@@ -658,9 +696,16 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                           <div className="pin-div" />
                         </div>
                       )}
-                      {latestRest.length > 0 && (
+                      {fresh.length > 0 && (
                         <div className="recent-section">
-                          <div className="recent-list">{latestRest.map((r) => r.data)}</div>
+                          <div className="listhead"><span>Last hour</span></div>
+                          <div className="recent-list">{fresh.map((r) => r.data)}</div>
+                        </div>
+                      )}
+                      {older.length > 0 && (
+                        <div className="recent-section">
+                          <div className="listhead"><span>Earlier</span></div>
+                          <div className="recent-list">{older.map((r) => r.data)}</div>
                         </div>
                       )}
                     </>
@@ -718,6 +763,12 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         {rowMenu && (
           <SessionRowMenu target={rowMenu} onClose={() => setRowMenu(null)}
             onRename={() => { startRename(rowMenu); setRowMenu(null); }}
+            // Same exemption as the folder header's hide affordance: hiding the
+            // folder you're in wouldn't do anything visible (hideFolders() always
+            // exempts it), so the row menu doesn't offer it there either.
+            onHideFolder={folderKey(rowMenu.cwd, home) !== folderKey(s.cwd, home)
+              ? () => { s.toggleHiddenFolder(rowMenu.cwd); setRowMenu(null); }
+              : undefined}
             onDelete={() => { setConfirmDel(rowMenu); setRowMenu(null); }} />
         )}
         {renaming && (

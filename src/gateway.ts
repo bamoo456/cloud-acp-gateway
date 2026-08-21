@@ -4663,6 +4663,33 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     }
     return;
   }
+  // Hidden folders, persisted server-side like pinned folders (see above), so a
+  // filter the reader set up on one device carries to every other one.
+  // GET returns the list (no seeding — hidden starts empty); POST ?path= toggles.
+  if (consoleEnabled && pathname === "/folders/hidden") {
+    try {
+      if (req.method === "POST") {
+        const q = new URL(req.url ?? "/", "http://x").searchParams;
+        const raw = q.get("path") ?? "";
+        // Unhiding an existing entry is always allowed; hiding a new path must
+        // resolve within FS_ROOT — the same guard the folder picker enforces.
+        if (db().isHidden(raw)) {
+          db().unhide(raw);
+        } else {
+          const safe = resolveWithinRoot(raw);
+          if (!safe) { res.writeHead(400); res.end(); return; }
+          db().hide(safe);
+        }
+      } else if (req.method !== "GET") {
+        res.writeHead(405); res.end(); return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ hidden: db().hiddenFolders() }));
+    } catch (e) {
+      res.writeHead(500); res.end(JSON.stringify({ error: String(e) }));
+    }
+    return;
+  }
   // Cross-device UI state that used to live in browser localStorage (text size,
   // screen-lock config, recent sessions/folders). Persisted server-side so the
   // single gateway account sees the same prefs from any device — like SSHing into
@@ -4680,6 +4707,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         lock,
         recentSessions: db().recentSessions(),
         recentFolders: db().recentFolders(),
+        hiddenFolders: db().hiddenFolders(),
       }));
     } catch (e) {
       res.writeHead(500); res.end(JSON.stringify({ error: String(e) }));

@@ -36,6 +36,7 @@ describe("FolderPicker", () => {
       getPinnedFolders: vi.fn().mockResolvedValue([]),
       togglePinnedFolder: vi.fn().mockResolvedValue([]),
       postRecentFolder: vi.fn().mockResolvedValue(undefined),
+      toggleHiddenFolder: vi.fn().mockResolvedValue([]),
     }));
   });
 
@@ -49,7 +50,7 @@ describe("FolderPicker", () => {
 
   async function api() {
     return await import("../lib/api.ts") as unknown as {
-      getPinnedFolders: Mock; togglePinnedFolder: Mock;
+      getPinnedFolders: Mock; togglePinnedFolder: Mock; toggleHiddenFolder: Mock;
     };
   }
 
@@ -119,5 +120,79 @@ describe("FolderPicker", () => {
     const browse = [...container.querySelectorAll("button.arow")].find((b) => b.textContent?.includes("Browse all folders"));
     await act(async () => { browse?.dispatchEvent(new MouseEvent("click", { bubbles: true })); await Promise.resolve(); });
     expect(container.querySelector("#fb")).not.toBeNull();
+  });
+
+  // Hiding moved to the sidebar — the picker no longer offers a "Hide a
+  // folder…" browse flow at all.
+  test("has no 'Hide a folder…' row", async () => {
+    await render();
+    const rows = [...container.querySelectorAll("button.arow")].map((b) => b.textContent || "");
+    expect(rows.some((t) => t.includes("Hide a folder"))).toBe(false);
+  });
+
+  // Hidden folders live on the store now (hydrated from the gateway, see
+  // store.ts's bootstrap) — seed it directly, the way the picker's own toggle would.
+  test("a hidden folder renders under Hidden, not under Pinned or Recent", async () => {
+    (await api()).getPinnedFolders.mockResolvedValue(["/repo"]);
+    await seedRecentFolders([{ path: "/other", lastUsedAt: "2026-06-10T02:00:00.000Z" }]);
+    await render();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => { useStore.setState({ hiddenFolders: ["/repo"] }); });
+
+    const hiddenSection = container.querySelector(".fp-hidden");
+    expect(hiddenSection).not.toBeNull();
+    expect(hiddenSection!.textContent).toContain("repo");
+    expect(container.querySelector(".fp-pinned")).toBeNull();
+  });
+
+  // Un-hiding is the only hide-affordance meaning left in the picker — hiding
+  // itself moved to the sidebar (folder header / row menu).
+  test("the un-hide affordance in Hidden calls the toggle without closing the picker", async () => {
+    (await api()).getPinnedFolders.mockResolvedValue([]);
+    const onClose = await render();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => { useStore.setState({ hiddenFolders: ["/repo"] }); });
+
+    const unhideBtn = container.querySelector<HTMLElement>('[aria-label="Unhide folder"]');
+    expect(unhideBtn).not.toBeNull();
+    await act(async () => {
+      unhideBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve(); await Promise.resolve();
+    });
+    expect((await api()).toggleHiddenFolder).toHaveBeenCalledWith("/repo");
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // Which sections offer the affordance, and as what: Recent hides, Hidden
+  // un-hides, Pinned never offers it, and the current folder's Recent row
+  // doesn't either (hideFolders exempts it, so the toggle would do nothing).
+  test("Recent rows hide, Hidden rows un-hide, Pinned rows offer neither", async () => {
+    (await api()).getPinnedFolders.mockResolvedValue(["/pinned-one"]);
+    await seedRecentFolders([
+      { path: "/other", lastUsedAt: "2026-06-10T02:00:00.000Z" },
+      { path: "/repo", lastUsedAt: "2026-06-10T01:00:00.000Z" },
+    ]);
+    await render();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => { useStore.setState({ hiddenFolders: ["/hidden-one"] }); });
+
+    expect(container.querySelector(".fp-pinned .hide")).toBeNull();
+    expect(container.querySelectorAll(".fp-recent .hide[aria-label='Hide folder']")).toHaveLength(1);
+    expect(container.querySelector(".fp-hidden .hide[aria-label='Unhide folder']")).not.toBeNull();
+  });
+
+  test("hiding from a Recent row calls the toggle with that folder", async () => {
+    (await api()).getPinnedFolders.mockResolvedValue([]);
+    await seedRecentFolders([{ path: "/other", lastUsedAt: "2026-06-10T02:00:00.000Z" }]);
+    const onClose = await render();
+
+    const hideBtn = container.querySelector<HTMLElement>('.fp-recent [aria-label="Hide folder"]');
+    expect(hideBtn).not.toBeNull();
+    await act(async () => {
+      hideBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve(); await Promise.resolve();
+    });
+    expect((await api()).toggleHiddenFolder).toHaveBeenCalledWith("/other");
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
