@@ -2237,7 +2237,11 @@
      below turns it into a floating card instead of a bigger sheet, because a
      window you drag around by its header is a desktop-pointer idea. */
   .branch-win {
-    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 36; overflow: hidden;
+    /* z-index 38 puts it above BOTH side panels (25 as desktop columns, 36 as
+       the mobile overlay) and below the popovers and scrims at 40+: a floating
+       window belongs on top of the layout it floats over, but not on top of a
+       menu the reader just opened. */
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 38; overflow: hidden;
     display: flex; flex-direction: column; background: var(--surface);
     animation: sheetup .27s cubic-bezier(.32,.72,0,1);
     padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
@@ -2269,13 +2273,12 @@
   }
   @media (min-width: 860px) {
     .branch-win {
-      /* Absolute inside .content (already position:relative), not fixed to the
-         viewport: the card belongs to the conversation column, so it must not
-         drift over the file panel — which is a SIBLING of .content with the same
-         z-index, so a viewport-anchored card lands underneath it and stops
-         taking clicks entirely. Confining it here also gives the drag something
-         honest to clamp against: its own column. */
-      position: absolute;
+      /* Stays fixed to the VIEWPORT, not confined to the conversation column:
+         the window is global chrome, free to sit over the sessions list and the
+         file panel alike, and draggable anywhere on screen. That only works
+         because of the z-index above — at the panels' own 25 it would land
+         under the file panel (later sibling, same layer) and stop taking
+         clicks entirely. */
       top: auto; left: auto; right: 20px;
       /* Approximate, not exact: clears the dock (28px) and a single-line
          composer, not one that has grown to several. The card is draggable
@@ -2285,7 +2288,7 @@
       width: 380px; max-width: calc(100vw - 40px);
       height: 480px; max-height: calc(100vh - 140px);
       border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
-      z-index: 25; animation: pop .14s ease-out;
+      animation: pop .14s ease-out;
       padding-top: 0; padding-bottom: 0;
     }
     /* The drag handle. Cursor only — the pointermove/pointerup wiring that
@@ -2297,6 +2300,20 @@
        card. Scoped to this breakpoint like .resizing is: nothing is draggable
        below it. */
     body.branch-dragging { user-select: none; cursor: grabbing; }
+  }
+
+  /* Stands in for the composer until the fork comes back with a real session
+     id: the window opens optimistically on the copied thread, and this says why
+     it cannot be typed into yet. Same height as the compact composer, so the
+     swap doesn't jump the card's contents. */
+  .branch-win-wait {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
+    color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--border);
+  }
+  .branch-win-wait .spinner {
+    width: 14px; height: 14px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite;
   }
 
   /* The branch's own composer (footer, in BranchWindow.tsx) — anchored inside

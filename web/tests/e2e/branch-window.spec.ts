@@ -6,13 +6,16 @@ import { SEED_SSE } from "./seed-sse.ts";
 // are all layout facts jsdom cannot answer (no layout engine), so the unit tests
 // cover the store/render logic and this covers the browser half.
 
-// Open the conversation menu and branch the open conversation.
+// Branch the open conversation from the header button.
 async function branch(page: import("@playwright/test").Page) {
   await page.goto("/");
   await expect(page.locator("footer .cm-editor")).toBeVisible();
-  await page.click('button[title="Conversation menu"]');
-  await page.click(".arow:has-text('Branch conversation')");
+  await page.click('button[aria-label="Branch conversation"]');
   await expect(page.locator(".branch-win")).toBeVisible();
+  // The window opens optimistically, on a provisional session, and swaps in the
+  // real one when session/fork answers — wait for the composer that replaces the
+  // waiting strip, or every geometry assert below races that swap.
+  await expect(page.locator(".branch-win footer .cm-editor")).toBeVisible();
   // Both forms animate in (a slide-up sheet, a popped card). Measuring the box
   // mid-animation reads the start of the transform, not where it lands, so wait
   // the animation out before asserting on geometry.
@@ -26,25 +29,26 @@ test("the branch window floats inside the viewport and drags without escaping it
   await branch(page);
 
   const card = page.locator(".branch-win");
-  // Its own composer, targeting the branch — not the app's, which is outside it.
-  await expect(card.locator("footer .cm-editor")).toBeVisible();
   // The parent thread is still there behind it: the window floats over its
   // parent rather than replacing it.
   await expect(page.locator("#main")).toBeVisible();
 
-  // It lives in the conversation column, clear of the file panel column beside
-  // it — a card floating over that panel would be both wrong and unclickable.
-  const column = (await page.locator(".content").boundingBox())!;
   const before = (await card.boundingBox())!;
-  expect(before.x).toBeGreaterThanOrEqual(column.x);
-  expect(before.x + before.width).toBeLessThanOrEqual(column.x + column.width + 1);
-  // Nothing is on top of it: the header is what a click at that point hits.
+  expect(before.x + before.width).toBeLessThanOrEqual(1280);
+  expect(before.y + before.height).toBeLessThanOrEqual(900);
+  // Global floating: it defaults over the file panel column (open at this width)
+  // and is the topmost thing there — anchored under the panels instead, it took
+  // no clicks at all.
+  const panel = (await page.locator("#files").boundingBox())!;
+  expect(before.x + before.width).toBeGreaterThan(panel.x);
   const hit = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest(".branch-win") !== null,
     { x: before.x + 40, y: before.y + 20 });
   expect(hit).toBe(true);
 
-  // Drag the header at the very corner of the viewport: the card wants to go
+  // Drag the header to the very corner of the viewport: the card wants to go
   // further left and up than there is room for, so this is the clamp under test.
+  // Landing there also proves the drag is not confined to the chat column — it
+  // ends up over the sessions list.
   // (The pointer stays inside the viewport — a browser does not dispatch pointer
   // events at negative coordinates, so dragging "off screen" would test nothing.)
   const head = card.locator(".branch-win-head");
@@ -55,9 +59,11 @@ test("the branch window floats inside the viewport and drags without escaping it
   await page.mouse.up();
 
   const after = (await card.boundingBox())!;
-  expect(after.x).toBeLessThan(before.x);            // it really moved
-  expect(after.x).toBeCloseTo(column.x, 0);          // and stopped at its column's edge
-  expect(after.y).toBeCloseTo(column.y, 0);
+  expect(after.x).toBeLessThan(before.x);   // it really moved
+  expect(after.x).toBeCloseTo(0, 0);        // and stopped at the viewport edge
+  expect(after.y).toBeCloseTo(0, 0);
+  const sidebar = (await page.locator("#panel").boundingBox())!;
+  expect(after.x).toBeLessThan(sidebar.x + sidebar.width); // now over the sessions column
 
   // Escape closes it, and the branch survives as an ordinary conversation.
   await page.keyboard.press("Escape");
