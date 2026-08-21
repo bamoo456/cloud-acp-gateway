@@ -6,7 +6,7 @@ import { copyText } from "../lib/clipboard.ts";
 import { setLockPin, clearLock, MIN_PIN_LENGTH } from "../lib/lock.ts";
 import { IDENTITY_OPTIONS, applyIdentity, readIdentity, type Identity } from "../lib/identity.ts";
 import { THEME_OPTIONS, applyTheme, readTheme, type Theme } from "../lib/theme.ts";
-import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconCircle, IconPencil, IconTrash, IconType, IconLock, IconX } from "../lib/icons.tsx";
+import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconCircle, IconPencil, IconShare, IconTrash, IconType, IconLock, IconX } from "../lib/icons.tsx";
 import type { ConfigOption } from "../types.ts";
 
 function configRank(option: ConfigOption): number {
@@ -64,6 +64,12 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   const resumeHint = hasHistory
     ? "continue this conversation in your terminal"
     : "this agent's conversations can't be resumed";
+  // Only offered for agents that report ACP session/fork support (store.ts sets
+  // agentRef.sessionFork from the agent's own initialize result — never guessed
+  // by name), and only for a session with something to fork: no pending "+" tab,
+  // and no turn in flight (that reply is not in the transcript yet, so forking
+  // mid-turn would silently drop it).
+  const canBranch = !!agentRef?.sessionFork && !!resumableId && !isRunning;
   // Model, thinking level and permission mode are the dock's job — it reads
   // them out above the composer and switches them there, so listing them here
   // too would be the same fact in two places (§1.4). Filtered by the ids the
@@ -95,6 +101,12 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
     const cmd = resumeCommand(resumableId!, s.cwd, agentRef?.kind);
     const ok = await copyText(cmd);
     s.setTip(ok ? "Resume command copied — paste in your terminal on the host running the gateway." : cmd);
+    onClose();
+  }
+
+  async function branchConversation() {
+    if (!canBranch) return;
+    await s.branchSession();
     onClose();
   }
 
@@ -161,6 +173,9 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
             </button>
             <button className="arow" onClick={() => { setRenameText(sess && sess.title !== "Untitled" ? sess.title : ""); setView("rename"); }} disabled={!resumableId}>
               <IconPencil />Rename
+            </button>
+            <button className="arow" onClick={branchConversation} disabled={!canBranch}>
+              <IconShare /><span className="col"><span>Branch conversation</span><span className="sub">forks the whole conversation into a floating window</span></span>
             </button>
             <button className="arow danger" onClick={() => setView("delete")} disabled={!resumableId || isRunning}>
               <IconTrash /><span className="col"><span>Delete conversation</span>{isRunning && <span className="sub">still running — stop it first</span>}</span>

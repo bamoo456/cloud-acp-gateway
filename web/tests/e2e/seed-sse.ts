@@ -54,7 +54,22 @@ export const SEED_SSE = (turns: number): string => `
   const handle = (m) => {
     if (m.id == null || !m.method) return; // notifications need no reply
     let result = {};
-    if (m.method === "session/new") {
+    if (m.method === "initialize") {
+      // Only what the branch affordance needs: the app reads
+      // agentCapabilities.sessionCapabilities.fork to decide whether the agent
+      // can branch a conversation at all. Everything else is left at the
+      // defaults the store applies for an absent field.
+      result = { protocolVersion: 1, authMethods: [],
+        agentCapabilities: { sessionCapabilities: { fork: {} } } };
+    } else if (m.method === "session/fork") {
+      // A fork answers like session/new, with a fresh id — the branch's history
+      // is copied by the agent, and the app fills the window from the parent's
+      // thread in memory, so nothing needs streaming here.
+      nextSession += 1;
+      result = { sessionId: "sess-" + nextSession,
+        models: { availableModels: [{ modelId: "m", name: "Default (recommended)" }], currentModelId: "m" },
+        modes: { availableModes: [{ id: "default", name: "Default" }], currentModeId: "default" } };
+    } else if (m.method === "session/new") {
       nextSession += 1;
       const sid = "sess-" + nextSession;
       result = { sessionId: sid,

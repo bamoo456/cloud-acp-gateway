@@ -2228,3 +2228,79 @@
     .wf-root-pick { min-height: 34px; }
     .wf-root .linkish { padding: 8px 4px; }
   }
+
+  /* ---- branch conversation window ----
+     A conversation forked off the open one (store.ts's `branch`), shown as a
+     floating overlay rather than a second sidebar entry — it is meant to be
+     glanced at beside its parent, not switched to. Mobile-first like the file
+     panel: the base rule is the phone's full-screen sheet, and the breakpoint
+     below turns it into a floating card instead of a bigger sheet, because a
+     window you drag around by its header is a desktop-pointer idea. */
+  .branch-win {
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 36; overflow: hidden;
+    display: flex; flex-direction: column; background: var(--surface);
+    animation: sheetup .27s cubic-bezier(.32,.72,0,1);
+    padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
+  }
+  .branch-win-head {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    min-height: 48px; padding: 5px 6px 5px 14px; border-bottom: 1px solid var(--border);
+  }
+  .branch-win-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 650;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .branch-win-time { flex: 0 0 auto; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .branch-win-head .icon-btn { width: 32px; height: 32px; }
+  .branch-win-head .icon-btn svg { width: 18px; height: 18px; }
+  /* A real <main>, not a <div> with a class — see BranchWindow.tsx for why:
+     Thread finds its own scroll container with ref.current.closest("main"), so
+     anything else here would leave every one of its scroll effects (auto-follow,
+     reveal-on-scroll-up, jump-to-latest) a silent no-op. flex+min-height:0 is
+     what makes THIS box the thing that scrolls, instead of the card growing to
+     fit whatever the thread contains. */
+  .branch-win-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+  /* Composer's own <footer> is a bare tag with no class of its own, so without
+     this it inherits the app-wide footer rule above: a gradient keyed to the
+     PAGE background (--bg), wrong once footer sits on a card whose own surface
+     is --surface. The safe-area term stays — the phone sheet really does sit on
+     the real bottom edge, same as the app's own composer does there. */
+  .branch-win footer {
+    background: linear-gradient(to top, var(--surface) 70%, transparent);
+    padding: 6px 10px calc(8px + env(safe-area-inset-bottom));
+  }
+  @media (min-width: 860px) {
+    .branch-win {
+      /* Absolute inside .content (already position:relative), not fixed to the
+         viewport: the card belongs to the conversation column, so it must not
+         drift over the file panel — which is a SIBLING of .content with the same
+         z-index, so a viewport-anchored card lands underneath it and stops
+         taking clicks entirely. Confining it here also gives the drag something
+         honest to clamp against: its own column. */
+      position: absolute;
+      top: auto; left: auto; right: 20px;
+      /* Approximate, not exact: clears the dock (28px) and a single-line
+         composer, not one that has grown to several. The card is draggable
+         precisely so a taller composer overlapping it is a one-drag fix, not
+         a bug to chase with pixel-perfect math. */
+      bottom: 108px;
+      width: 380px; max-width: calc(100vw - 40px);
+      height: 480px; max-height: calc(100vh - 140px);
+      border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+      z-index: 25; animation: pop .14s ease-out;
+      padding-top: 0; padding-bottom: 0;
+    }
+    /* The drag handle. Cursor only — the pointermove/pointerup wiring that
+       actually moves the card lives in BranchWindow.tsx and is never attached
+       below this breakpoint ("no drag handling in sheet mode"). */
+    .branch-win-head { cursor: grab; touch-action: none; }
+    /* Set on <body> for the length of a drag — without it, dragging fast
+       selects the title text underneath the pointer instead of moving the
+       card. Scoped to this breakpoint like .resizing is: nothing is draggable
+       below it. */
+    body.branch-dragging { user-select: none; cursor: grabbing; }
+  }
+
+  /* The branch's own composer (footer, in BranchWindow.tsx) — anchored inside
+     a ~380px card rather than centred at 760px like the main one, so it only
+     needs less padding and a shorter growth cap, not a different look. */
+  .composer.compact { padding: 5px 5px 5px 8px; }
+  .composer.compact .cm-scroller { max-height: 110px; }
