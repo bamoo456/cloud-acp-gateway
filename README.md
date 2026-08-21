@@ -20,6 +20,13 @@ available on the same host or inside the same container as the gateway.
   checkout, so shell-generated files aren't invisible), what it only read,
   per-file diffs, image previews, and live HTML previews with their assets
   inlined.
+- Branch a conversation: type the message you want to ask somewhere else, hit
+  `branch` instead of `send`, and it opens in a fork of the thread (the whole
+  history, copied agent-side via ACP `session/fork`) inside a floating window
+  over its parent — with its own composer, so two lines of attack run side by
+  side. Branching always carries a message, which is what gives the fork a
+  transcript and a place in the sidebar. Offered only for agents that advertise
+  `sessionCapabilities.fork` (Claude today).
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
 - History browsing for supported agents: Claude Code, Codex, and opencode.

@@ -1,13 +1,13 @@
 import { useRef, useState, useEffect } from "react";
-import { hasCodexSkin, useStore } from "../store/store.ts";
+import { branchGate, hasCodexSkin, useStore } from "../store/store.ts";
 import { Menu } from "./Menu.tsx";
-import { IconSlash, IconSend, IconStop, IconAt, IconFile } from "../lib/icons.tsx";
+import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconGitBranch } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
 import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.ts";
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
 import { listFiles, uploadFile } from "../lib/api.ts";
-import type { MessageImage } from "../types.ts";
+import type { MessageImage, MessageFile } from "../types.ts";
 
 // Touch / coarse-pointer devices (phones, tablets) have no Shift key on their
 // virtual keyboard, so there is no way to type Shift+Enter for a newline. On
@@ -16,7 +16,7 @@ import type { MessageImage } from "../types.ts";
 const isTouchDevice = typeof window !== "undefined" &&
   (window.matchMedia?.("(pointer: coarse)").matches || "ontouchstart" in window);
 
-export function Composer() {
+export function Composer({ sessionId, compact }: { sessionId?: string; compact?: boolean } = {}) {
   const mi = useRef<MarkdownInputHandle>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -37,15 +37,39 @@ export function Composer() {
   const [fileQuery, setFileQuery] = useState<string | null>(null);
   const [fileItems, setFileItems] = useState<string[]>([]);
   const [fileActive, setFileActive] = useState(0);
+  // Branching is one click from a control that sits next to send, and it spends a
+  // few seconds spawning a CLI — cheap to undo, but not free to trigger by
+  // accident. So the first click only arms it: the button says what will happen
+  // and waits for a second one. `armed` holds the timer that gives up on its own.
+  const [armed, setArmed] = useState(false);
   const s = useStore();
-  // "@ file" references, uploads, and anything attached from the file panel.
-  // The panel adds to the same strip, so the list lives in the store.
-  const files = s.attachedFiles;
-  const activeBusy = !!(s.activeId && s.busySessionIds[s.activeId]);
+  // A bound instance (the branch window) targets a conversation that isn't the
+  // store's active one, so its file references can't live in the store's
+  // `attachedFiles` list — that list stays global on purpose (the file panel
+  // writes into it) and keeps feeding the unbound composer only. Local state
+  // stands in for it here, with the same dedup-on-uri / by-index semantics as
+  // the store's attachFiles/removeAttachedFile/clearAttachedFiles.
+  const [localFiles, setLocalFiles] = useState<MessageFile[]>([]);
+  const files = sessionId ? localFiles : s.attachedFiles;
+  const attach = sessionId
+    ? (added: MessageFile[]) => setLocalFiles((prev) => {
+        const next = [...prev];
+        for (const f of added) if (!next.some((p) => p.uri === f.uri)) next.push(f);
+        return next;
+      })
+    : s.attachFiles;
+  const removeAt = sessionId ? (i: number) => setLocalFiles((prev) => prev.filter((_, idx) => idx !== i)) : s.removeAttachedFile;
+  const clearFiles = sessionId ? () => setLocalFiles([]) : s.clearAttachedFiles;
+  const activeBusy = sessionId ? !!s.busySessionIds[sessionId] : !!(s.activeId && s.busySessionIds[s.activeId]);
+  const branch = branchGate(s);
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
   const canSend = activeBusy || ((!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady && !uploading);
+  // A branch is a send into a conversation that does not exist yet, so it wants
+  // the same thing send does: something to say. Without the `activeBusy` term —
+  // a branch of a conversation mid-turn is refused by branchGate anyway.
+  const branchable = (!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady && !uploading;
   const placeholder = hasCodexSkin(s) ? "Reply to Codex…" : "Reply to Claude…";
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
@@ -123,7 +147,19 @@ export function Composer() {
     setText(value);
     syncMention(value, caret);
     syncCommand(value, caret);
+    setArmed(false); // going back to typing is an answer: not now
   }
+
+  // An armed branch button gives up by itself, and on Escape. Both because the
+  // arming is a question nobody has to answer: leaving a primed control sitting
+  // there is how a stray later click becomes a fork nobody asked for.
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), 3000);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setArmed(false); };
+    document.addEventListener("keydown", onKey);
+    return () => { clearTimeout(timer); document.removeEventListener("keydown", onKey); };
+  }, [armed]);
 
   // Pick a command: replace the leading "/command" (or "$skill") token the user
   // is editing with the picked token (or insert it when the menu was opened with
@@ -166,7 +202,7 @@ export function Composer() {
     for (const f of picks) {
       setUploading((n) => n + 1);
       try {
-        s.attachFiles([await uploadFile(f)]);
+        attach([await uploadFile(f)]);
       } catch (e) {
         s.setTip(e instanceof Error ? e.message : "Couldn't upload the file.");
       } finally {
@@ -200,7 +236,7 @@ export function Composer() {
   function removeImage(i: number) { setImages((prev) => prev.filter((_, idx) => idx !== i)); }
 
   function addReferencedFile(rel: string) {
-    s.attachFiles([makeMessageFile(s.cwd, rel)]);
+    attach([makeMessageFile(s.cwd, rel)]);
   }
 
   // Pick a file from the "@" menu: drop the "@token" from the text (the file shows
@@ -227,16 +263,31 @@ export function Composer() {
     mi.current?.focus();
   }
 
+  // Branching sends: the message in the box becomes the new branch's first turn,
+  // which is what gives it a transcript and a place in the sidebar. The box is
+  // only cleared once the fork has actually landed — until then this is the only
+  // copy of what was typed, and the tip explaining the failure is no use to
+  // someone whose paragraph just vanished.
+  async function branchWith() {
+    if (uploading) return;
+    const t = text; const imgs = images; const refs = files;
+    if (!t.trim() && !imgs.length && !refs.length) return;
+    if (await s.branchSession({ text: t, images: imgs, files: refs })) {
+      setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
+    }
+  }
+
   function submit() {
-    if (activeBusy) { s.cancel(); return; }
+    if (activeBusy) { s.cancel(sessionId); return; }
     // Enter bypasses the Send button's `disabled={!canSend}`, so it needs its own
     // guard: sending mid-upload would clear `files` out from under the pending
     // upload, and the file would land as a chip on the *next* message instead.
     if (uploading) return;
     const t = text; const imgs = images; const refs = files;
     if (!t.trim() && !imgs.length && !refs.length) return;
-    setText(""); setImages([]); s.clearAttachedFiles(); setFileQuery(null); setCmdQuery(null);
-    s.sendPrompt(t, imgs, refs);
+    setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
+    if (sessionId) s.sendPromptTo(sessionId, t, imgs, refs);
+    else s.sendPrompt(t, imgs, refs);
   }
 
   // Live callbacks the editor's keymap reads (rebuilt each render so they close
@@ -289,7 +340,7 @@ export function Composer() {
         </div>
       )}
       <div
-        className={"composer" + (dragging ? " dragover" : "")}
+        className={"composer" + (compact ? " compact" : "") + (dragging ? " dragover" : "")}
         onDragOver={canAttachImages ? (e) => { e.preventDefault(); setDragging(true); } : undefined}
         onDragLeave={canAttachImages ? () => setDragging(false) : undefined}
         onDrop={canAttachImages ? (e) => { e.preventDefault(); setDragging(false); void addFiles(e.dataTransfer?.files); } : undefined}
@@ -310,7 +361,7 @@ export function Composer() {
               <span className="file-chip" key={f.uri || f.name} title={f.uri || f.name}>
                 <IconFile /><span className="nm">{f.name}</span>
                 {f.range && <span className="rng">{f.range}</span>}
-                <button className="chip-x" title="Remove file" onClick={() => s.removeAttachedFile(i)}>✕</button>
+                <button className="chip-x" title="Remove file" onClick={() => removeAt(i)}>✕</button>
               </span>
             ))}
           </div>
@@ -341,7 +392,27 @@ export function Composer() {
           )}
           <input ref={fileRef} type="file" multiple hidden
             onChange={(e) => { void addAttachments(e.target.files); e.target.value = ""; }} />
+          {armed && !branch.disabled && (
+            <span className="branch-hint">branch this conversation? click again · Esc cancels</span>
+          )}
           <span className="spacer" />
+          {/* Beside send, wearing send's shape in outline — the same trick
+              `.send.stop` uses to say "same control, not the primary one". Never
+              rendered in a bound instance: the branch window's own composer would
+              be offering to branch the conversation BEHIND it. */}
+          {!sessionId && branch.show && (
+            <button className={"send branch-btn" + (armed ? " armed" : " ghost")}
+              title={armed ? "Click again to branch" : branchable ? branch.why : "Type the message to open the branch with"}
+              aria-label={armed ? "Confirm branching this conversation" : "Branch conversation"}
+              disabled={branch.disabled || !branchable}
+              onClick={() => {
+                if (!armed) { setArmed(true); return; }
+                setArmed(false);
+                void branchWith();
+              }}>
+              <IconGitBranch />{armed ? "confirm" : "branch"}
+            </button>
+          )}
           <button className={"send" + (activeBusy ? " stop" : "")} title={activeBusy ? "Stop" : "Send"}
             disabled={!canSend} onClick={submit}>
             {activeBusy ? <><IconStop />stop</> : <>send<IconSend /></>}

@@ -6,6 +6,7 @@ import { Sidebar } from "./components/Sidebar.tsx";
 import { FilePanel } from "./components/FilePanel.tsx";
 import { Thread } from "./components/Thread.tsx";
 import { Composer } from "./components/Composer.tsx";
+import { BranchWindow } from "./components/BranchWindow.tsx";
 import { EngineDock } from "./components/EngineDock.tsx";
 import { FolderPicker } from "./components/FolderPicker.tsx";
 import { LockScreen } from "./components/LockScreen.tsx";
@@ -191,6 +192,11 @@ export function App() {
               and on what, plus the control that changes it (§3 P3). */}
           <EngineDock onOpenLogin={(a) => setLoginAgent(a)} />
           <Composer />
+          {/* Floats over the thread above, following whichever conversation is
+              active (store.ts's `branch`) — always mounted, like FilePanel
+              below: the component itself decides whether there is anything to
+              show. */}
+          <BranchWindow />
         </div>
         {/* Right of the chat column on desktop, an overlay on mobile. Always
             mounted: it holds the fetched change list across open/close so
