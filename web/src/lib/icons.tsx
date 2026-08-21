@@ -190,6 +190,19 @@ export function IconPanel({ left = false }: { left?: boolean }) {
   );
 }
 
+// Picture-in-picture: a second conversation floating in the corner of the one
+// on screen. Not IconPanel — that glyph's divided rect is the sidebar toggle,
+// and reusing it would read as "show the sidebar" in a conversation's menu. The
+// inner rect is filled so it reads as an occupant rather than a nested frame.
+export function IconSideChat() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <rect x="11" y="12" width="8" height="6" rx="1" fill="currentColor" />
+    </svg>
+  );
+}
+
 // A file's glyph, chosen from its type (see lib/fileKind.ts): a document with
 // the mark of what it holds. One component rather than six exports because the
 // caller always has a FileIcon string, never a specific icon in mind.

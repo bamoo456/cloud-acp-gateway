@@ -1612,4 +1612,36 @@ describe("Sidebar recent conversations", () => {
       .find((b) => b.textContent?.includes("Hide folder"));
     expect(hideItemForCurrent).toBeUndefined();
   });
+  // The repro for "I right-clicked a row and there was no Open as side chat":
+  // the row's own agent and the conversation on screen are both part of whether
+  // the item can appear at all, so both cases are pinned here.
+  test("latest view: a row's context menu offers Open as side chat, except for the conversation already open", async () => {
+    const openSideChat = vi.fn(async () => {});
+    seedLatestView();
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "Cross folder work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ openSideChat } as any);
+
+    const rows = () => Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"));
+    const otherRow = rows().find((el) => el.textContent?.includes("Cross folder work"))!;
+    await act(async () => { otherRow.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    const sideItem = Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
+      .find((b) => b.textContent?.includes("Open as side chat"));
+    expect(sideItem).not.toBeUndefined();
+    await act(async () => { sideItem!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    // The row's OWN folder travels with it: session/load is asked about that cwd,
+    // not the one on screen.
+    expect(openSideChat).toHaveBeenCalledWith({
+      sessionId: "x1", agentName: "claude", cwd: "/other-repo", title: "Cross folder work",
+    });
+
+    // The open conversation can't sit beside itself.
+    const curRow = rows().find((el) => el.textContent?.includes("Recent conversation sidebar"))!;
+    await act(async () => { curRow.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    expect(Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
+      .find((b) => b.textContent?.includes("Open as side chat"))).toBeUndefined();
+  });
 });

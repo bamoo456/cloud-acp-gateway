@@ -98,13 +98,16 @@ interface State {
   tip: string;
   sessions: Record<string, Session>;
   activeId: string | null;
-  // A conversation branched off another one (ACP `session/fork`), rendered as a
-  // floating window over its parent's thread. The branch is an ordinary live
-  // session in `sessions` — this only records that it is a branch OF `parentId`,
+  // Whoever occupies the floating window, and the conversation it floats over.
+  // Two ways in: a fork of `parentId` (`branchSession`) or an existing
+  // conversation opened beside it (`openSideChat`) — the window renders both the
+  // same way, because from the reader's side they are the same thing: a second
+  // live conversation next to the one on screen. The occupant is an ordinary live
+  // session in `sessions`; this only records that it is paired WITH `parentId`,
   // which is what lets the window follow its parent: it shows while that parent
   // is the open conversation and hides (rather than closes) while another one is,
-  // so switching away and back does not throw the branch away. Null when none is
-  // open. Memory-only, so a reload leaves the branch as a normal conversation.
+  // so switching away and back does not throw the pairing away. Null when none is
+  // open. Memory-only, so a reload leaves both as normal conversations.
   branch: { parentId: string; sessionId: string } | null;
   models: Model[];
   modes: Mode[];
@@ -203,6 +206,13 @@ interface State {
   // conversation that fails to open. Resolves true when the fork landed — on
   // false the caller still holds the only copy of that message.
   branchSession: (prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => Promise<boolean>;
+  // Open an EXISTING conversation in the same floating window, beside the one
+  // that stays in the main column — the sidebar row's "Open as side chat". Not a
+  // fork and not a navigation: the open conversation is untouched (`activeId` and
+  // the global `cwd` both stand), and the target is resumed live so it can be
+  // chatted in. The row carries its own agent and folder, which is why the target
+  // has to name all three: `cwd` is what session/load is asked about.
+  openSideChat: (target: { sessionId: string; agentName: string; cwd: string; title: string | null }) => Promise<void>;
   closeBranch: () => void;
   setModel: (id: string) => void;
   setMode: (id: string) => void;
@@ -282,7 +292,9 @@ export function branchGate(state: State): BranchGate {
   const open = !!state.branch && state.branch.parentId === state.activeId;
   const why = !ready ? "Send a message first"
     : running ? "Wait for this turn to finish"
-    : open ? "A branch of this conversation is already open"
+    // Neutral about which way the window was filled: a side chat occupies it too,
+    // and "a branch is already open" would name something the reader never opened.
+    : open ? "A conversation is already open beside this one"
     : "Branch conversation — forks it into a floating window";
   return { show, disabled: !ready || running || open, why };
 }
@@ -1833,6 +1845,78 @@ export const useStore = create<State>((set, get) => {
           };
         });
         return false;
+      }
+    },
+
+    async openSideChat(target) {
+      const parentId = get().activeId;
+      const id = target.sessionId;
+      // The sidebar gates the menu row on exactly these, and this checks them
+      // again anyway — same belt-to-the-braces as sendPromptTo. A conversation the
+      // agent has never seen has nothing to sit beside; a row under another agent
+      // lives on a connection we don't hold (opening it would need the deep-link
+      // reconnect, which replaces the whole page's session set); and pairing a
+      // conversation with itself would put the same thread in both columns.
+      if (!parentId || parentId.startsWith("pending-") || id === parentId) return;
+      if (target.agentName !== get().agentName || !agentCanLoadSession()) return;
+
+      // Already live here and promptable: the pairing is the whole change. A
+      // view-only session does NOT qualify — sendPromptTo refuses one, so
+      // shortcutting would open a window with a dead composer; that one is
+      // re-loaded live below like any other.
+      const live = get().sessions[id];
+      if (live && !live.viewOnly) { set({ branch: { parentId, sessionId: id } }); return; }
+
+      // The window opens NOW, on an empty shell, and the load round trip happens
+      // behind it — a menu click that does nothing for a round trip reads as a
+      // click that missed. `suppressReplay` from the start: the agent replays the
+      // whole conversation on session/load, and the thread is rendered from the
+      // history API instead (same trade as joinSession).
+      set((st) => {
+        let shell = makeSession(id, Date.now(), { agentName: target.agentName, cwd: target.cwd });
+        if (target.title) shell = setTitle(shell, target.title);
+        return {
+          sessions: evictExcess({ ...st.sessions, [id]: { ...shell, suppressReplay: true } }, st.activeId, MAX_LIVE_SESSIONS),
+          branch: { parentId, sessionId: id },
+          tip: "",
+        };
+      });
+
+      try {
+        // The ROW's cwd, not the store's: the conversation may live in a folder
+        // this client isn't in, and the folder on screen must not move for it.
+        await acp.request("session/load", { sessionId: id, cwd: target.cwd, mcpServers: [] });
+        const r = await getMessages(target.agentName, target.cwd, id, historyPageFor());
+        set((st) => {
+          // Closed (or evicted) while the load was in flight: like a branch, the
+          // conversation stays live and reachable, but nothing here reopens a
+          // window the reader just dismissed.
+          const shell = st.sessions[id];
+          if (!shell) return {};
+          const base = makeSession(id, shell.createdAt, { agentName: target.agentName, cwd: target.cwd });
+          const cur = applyHistoryMessages({ ...base, title: shell.title, historyStart: r.start }, r.messages);
+          const ready = appendPendingPermissions({ ...cur, suppressReplay: false, viewOnly: false }, st.pendingPermissions);
+          // Deliberately NOT applyModelsModes on the load result, unlike
+          // joinSession: the store's models/modes lists describe the conversation
+          // in the MAIN column, and this one isn't it — applying them would
+          // repaint that conversation's pickers with the side chat's values.
+          // branchSession leaves them alone for the same reason.
+          return { sessions: evictExcess({ ...st.sessions, [id]: ready }, st.activeId, MAX_LIVE_SESSIONS), tip: "" };
+        });
+      } catch (e) {
+        // Take the optimistic window back down with the failure — a window that
+        // can never be prompted is worse than never having opened one. activeId
+        // was never touched, so unlike joinSession there is nothing to recover:
+        // the conversation on screen is still the conversation on screen.
+        set((st) => {
+          const sessions = { ...st.sessions };
+          delete sessions[id];
+          return {
+            sessions,
+            branch: st.branch?.sessionId === id ? null : st.branch,
+            tip: "Couldn't open side chat: " + msg(e),
+          };
+        });
       }
     },
 
