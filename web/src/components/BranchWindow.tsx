@@ -51,11 +51,15 @@ export function BranchWindow() {
   useEffect(() => () => endDrag.current?.(), []);
   // This component is always mounted (App.tsx) and hides by rendering null, so
   // a dragged position would otherwise survive forever — branch B would open
-  // wherever branch A was last left. Reset on every new pairing; hiding and
-  // showing the SAME branch (switching away from and back to its parent)
-  // leaves `sessionId` unchanged, so the position survives that as intended.
-  const branchSessionId = s.branch?.sessionId;
-  useEffect(() => { setPos(null); }, [branchSessionId]);
+  // wherever branch A was last left. Keyed on the PARENT, not on the branch's
+  // own id: that id changes once, when the optimistic provisional id is swapped
+  // for the one session/fork returns, and resetting there yanked a window the
+  // reader had already dragged back to the default corner mid-gesture. The
+  // parent is what identifies the window for its whole life. Hiding and showing
+  // the same branch (switching away from its parent and back) leaves it
+  // unchanged too, so a dragged position survives that as intended.
+  const branchParentId = s.branch?.parentId;
+  useEffect(() => { setPos(null); }, [branchParentId]);
 
   // Escape closes it, as a dialog should. On the document rather than the card
   // (the way ActionMenu does it) because the focus is usually somewhere else

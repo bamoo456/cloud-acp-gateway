@@ -70,6 +70,33 @@ test("the branch window floats inside the viewport and drags without escaping it
   await expect(card).toBeHidden();
 });
 
+test("the card resizes by its own grip, down to a floor", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.addInitScript(SEED_SSE(2));
+  await page.goto("about:blank");
+  await branch(page);
+
+  const card = page.locator(".branch-win");
+  await expect(card).toHaveCSS("resize", "both");
+  const before = (await card.boundingBox())!;
+
+  // Drag the browser's grip (the card's bottom-right corner) inward. It stops at
+  // the min-width/min-height floor rather than collapsing to a sliver.
+  await page.mouse.move(before.x + before.width - 3, before.y + before.height - 3);
+  await page.mouse.down();
+  await page.mouse.move(before.x + 60, before.y + 40, { steps: 10 });
+  await page.mouse.up();
+
+  const after = (await card.boundingBox())!;
+  expect(after.width).toBeLessThan(before.width);
+  expect(after.height).toBeLessThan(before.height);
+  expect(after.width).toBeGreaterThanOrEqual(300);
+  expect(after.height).toBeGreaterThanOrEqual(240);
+  // Still usable at that size: the thread and its composer are both there.
+  await expect(card.locator(".branch-win-body")).toBeVisible();
+  await expect(card.locator("footer .cm-editor")).toBeVisible();
+});
+
 test("on a phone the branch is a full-screen sheet over the thread", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));
@@ -82,6 +109,8 @@ test("on a phone the branch is a full-screen sheet over the thread", async ({ pa
   expect(box.height).toBeCloseTo(844, 0);
   expect(box.x).toBeCloseTo(0, 0);
   expect(box.y).toBeCloseTo(0, 0);
-  // No drag handle at this width — the sheet is not a window you move around.
+  // No drag handle and nothing to resize at this width — the sheet is not a
+  // window you move around or reshape, it is the whole screen.
   await expect(page.locator(".branch-win-head")).toHaveCSS("cursor", "auto");
+  await expect(page.locator(".branch-win")).toHaveCSS("resize", "none");
 });
