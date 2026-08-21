@@ -11,7 +11,7 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, WorkingDots,
+import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, IconSideChat, WorkingDots,
   Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { folderKey, homeFrom } from "../lib/folderKey.ts";
@@ -93,11 +93,11 @@ function SessionRow({ className, onOpen, target, running, active, onAskDelete, o
 // The row's right-click / long-press menu: FileMenu's sheet-or-dropdown
 // pattern with a single destructive action.
 const MENU_W = 214;
-const MENU_H = 210; // header + 3 rows now that Hide folder joins Rename/Delete
+const MENU_H = 250; // header + 4 rows now that Open as side chat joins Rename/Hide folder/Delete
 const SHEET_QUERY = "(max-width: 640px)"; // matches .wf-menu's own sheet breakpoint
-function SessionRowMenu({ target, onRename, onHideFolder, onDelete, onClose }: {
+function SessionRowMenu({ target, onSideChat, onRename, onHideFolder, onDelete, onClose }: {
   target: RowTarget & { x: number; y: number };
-  onRename: () => void; onHideFolder?: () => void; onDelete: () => void; onClose: () => void;
+  onSideChat?: () => void; onRename: () => void; onHideFolder?: () => void; onDelete: () => void; onClose: () => void;
 }) {
   // Read once, on open: the menu lives for a few seconds and a device does not
   // cross the breakpoint inside them.
@@ -118,6 +118,14 @@ function SessionRowMenu({ target, onRename, onHideFolder, onDelete, onClose }: {
       <div className="wf-menu-scrim" onPointerDown={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
       <div className={"wf-menu" + (sheet ? " sheet" : "")} style={style} role="menu" aria-label={rowLabel(target)}>
         <div className="wf-menu-head"><div className="nm">{rowLabel(target)}</div></div>
+        {/* First because it's the only row that opens something rather than
+            administering it — and it's offered only when the pairing is possible
+            at all (same agent, resumable, a real conversation to sit beside). */}
+        {onSideChat && (
+          <button className="wf-menu-row" role="menuitem" onClick={onSideChat}>
+            <IconSideChat /><span>Open as side chat</span>
+          </button>
+        )}
         <button className="wf-menu-row" role="menuitem" onClick={onRename}>
           <IconPencil /><span>Rename conversation</span>
         </button>
@@ -762,6 +770,26 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         )}
         {rowMenu && (
           <SessionRowMenu target={rowMenu} onClose={() => setRowMenu(null)}
+            // Offered only when the store could actually honour it: a row under
+            // another agent lives on a connection this page doesn't hold, an agent
+            // that can't resume a session has nothing to open live, and there has
+            // to be a real conversation on screen for it to sit beside — one that
+            // isn't this same row. `name || null` because a row's `name` is "" when
+            // the conversation has no title, and the short-id label the row shows
+            // instead is display-only: persisting it would name the conversation
+            // after its own id.
+            onSideChat={rowMenu.agentName === s.agentName
+              && s.cfg.agents.find((a) => a.name === rowMenu.agentName)?.sessionLoad !== false
+              && !!s.activeId && !s.activeId.startsWith("pending-")
+              && rowMenu.sessionId !== s.activeId
+              ? () => {
+                void s.openSideChat({
+                  sessionId: rowMenu.sessionId, agentName: rowMenu.agentName,
+                  cwd: rowMenu.cwd, title: rowMenu.name || null,
+                });
+                setRowMenu(null);
+              }
+              : undefined}
             onRename={() => { startRename(rowMenu); setRowMenu(null); }}
             // Same exemption as the folder header's hide affordance: hiding the
             // folder you're in wouldn't do anything visible (hideFolders() always

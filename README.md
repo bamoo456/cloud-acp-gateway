@@ -27,6 +27,11 @@ available on the same host or inside the same container as the gateway.
   side. Branching always carries a message, which is what gives the fork a
   transcript and a place in the sidebar. Offered only for agents that advertise
   `sessionCapabilities.fork` (Claude today).
+- Open a conversation as a side chat: right-click (or long-press) any sidebar row
+  and pick `Open as side chat` to resume that conversation live in the same
+  floating window, beside the one that stays in the main column. The folder on
+  screen and the conversation in it are both left alone. Offered for rows under
+  the agent that's connected, since another agent's row would need a reconnect.
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
 - History browsing for supported agents: Claude Code, Codex, and opencode.
