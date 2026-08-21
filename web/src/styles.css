@@ -1138,6 +1138,12 @@
      question rather than a done deal. */
   .send.ghost { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
   .send.ghost:hover { background: var(--surface-2); }
+  /* With nothing to send there is nothing to branch either, and the two controls
+     have to say that the same way: drop the outline so a refused branch reads
+     exactly like a refused send, instead of an empty box sitting next to it.
+     (This rule has to come after .send:disabled to beat .send.ghost's own
+     box-shadow at equal specificity.) */
+  .send.ghost:disabled { box-shadow: none; color: var(--faint); }
   .send.armed { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .send.armed:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .crow .branch-btn { margin-right: 6px; }

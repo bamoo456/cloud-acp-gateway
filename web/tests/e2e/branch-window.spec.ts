@@ -13,7 +13,11 @@ async function branch(page: import("@playwright/test").Page) {
   await page.goto("/");
   await expect(page.locator("footer .cm-editor")).toBeVisible();
   const btn = page.locator("footer .branch-btn");
+  // Nothing typed: refused, and wearing exactly what a refused send wears — no
+  // outline, faint label — so the pair reads as one control in two flavours.
   await expect(btn).toBeDisabled();
+  await expect(btn).toHaveCSS("box-shadow", "none");
+  await expect(btn).toHaveCSS("color", await page.locator("footer .send:not(.branch-btn)").evaluate((el) => getComputedStyle(el).color));
   await page.locator("footer .cm-editor").click();
   await page.keyboard.type("try it the other way");
   await btn.click();
