@@ -66,6 +66,10 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
   const canSend = activeBusy || ((!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady && !uploading);
+  // A branch is a send into a conversation that does not exist yet, so it wants
+  // the same thing send does: something to say. Without the `activeBusy` term —
+  // a branch of a conversation mid-turn is refused by branchGate anyway.
+  const branchable = (!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady && !uploading;
   const placeholder = hasCodexSkin(s) ? "Reply to Codex…" : "Reply to Claude…";
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
@@ -259,6 +263,20 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     mi.current?.focus();
   }
 
+  // Branching sends: the message in the box becomes the new branch's first turn,
+  // which is what gives it a transcript and a place in the sidebar. The box is
+  // only cleared once the fork has actually landed — until then this is the only
+  // copy of what was typed, and the tip explaining the failure is no use to
+  // someone whose paragraph just vanished.
+  async function branchWith() {
+    if (uploading) return;
+    const t = text; const imgs = images; const refs = files;
+    if (!t.trim() && !imgs.length && !refs.length) return;
+    if (await s.branchSession({ text: t, images: imgs, files: refs })) {
+      setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
+    }
+  }
+
   function submit() {
     if (activeBusy) { s.cancel(sessionId); return; }
     // Enter bypasses the Send button's `disabled={!canSend}`, so it needs its own
@@ -384,13 +402,13 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
               be offering to branch the conversation BEHIND it. */}
           {!sessionId && branch.show && (
             <button className={"send branch-btn" + (armed ? " armed" : " ghost")}
-              title={armed ? "Click again to branch" : branch.why}
+              title={armed ? "Click again to branch" : branchable ? branch.why : "Type the message to open the branch with"}
               aria-label={armed ? "Confirm branching this conversation" : "Branch conversation"}
-              disabled={branch.disabled}
+              disabled={branch.disabled || !branchable}
               onClick={() => {
                 if (!armed) { setArmed(true); return; }
                 setArmed(false);
-                void s.branchSession();
+                void branchWith();
               }}>
               <IconGitBranch />{armed ? "confirm" : "branch"}
             </button>

@@ -196,10 +196,13 @@ interface State {
   // so none of that resolution applies and a caller naming a session that isn't
   // live is a no-op rather than a silent new conversation.
   sendPromptTo: (sessionId: string, text: string, images?: MessageImage[], files?: MessageFile[]) => Promise<void>;
-  // Fork the open conversation into a new one (whole history, agent-side) and
-  // open it as the branch window. Only offered for agents that advertise
-  // `sessionCapabilities.fork`.
-  branchSession: () => Promise<void>;
+  // Fork the open conversation into a new one (whole history, agent-side), open
+  // it as the branch window, and ask the fork the message the caller was
+  // holding. The prompt is the point, not a convenience: a branch nobody says
+  // anything in has no transcript on disk, so it can only ever surface as a
+  // conversation that fails to open. Resolves true when the fork landed — on
+  // false the caller still holds the only copy of that message.
+  branchSession: (prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => Promise<boolean>;
   closeBranch: () => void;
   setModel: (id: string) => void;
   setMode: (id: string) => void;
@@ -1730,14 +1733,17 @@ export const useStore = create<State>((set, get) => {
       await runPrompt(sessionId, text, imgs, refs);
     },
 
-    async branchSession() {
+    async branchSession(prompt) {
       const parentId = get().activeId;
       const parent = parentId ? get().sessions[parentId] : null;
       // A conversation the agent has never seen (an optimistic "+" tab) has
       // nothing to fork, and a turn in flight is not in the transcript yet — the
       // fork would silently drop it, so it is refused rather than half-copied.
-      if (!parentId || !parent || parentId.startsWith("pending-")) return;
-      if (get().busySessionIds[parentId]) { set({ tip: "Wait for this turn to finish before branching." }); return; }
+      if (!parentId || !parent || parentId.startsWith("pending-")) return false;
+      if (get().busySessionIds[parentId]) { set({ tip: "Wait for this turn to finish before branching." }); return false; }
+      // Nothing to ask the branch means nothing would ever be written in it — the
+      // one state this feature cannot render. See the action's doc comment.
+      if (!prompt.text.trim() && !prompt.images?.length && !prompt.files?.length) return false;
 
       // The window opens NOW, on a provisional id, and the fork round trip
       // happens behind it. Everything it shows is already in memory (the copy is
@@ -1807,13 +1813,13 @@ export const useStore = create<State>((set, get) => {
             tip: "",
           };
         });
-        // Deliberately NOT recorded in the recents list here. The fork's own
-        // transcript does not exist until the branch's first turn — the agent
-        // copies the history into it then, not at fork time — so a row added now
-        // is a sidebar entry that can only fail to open: the history API 404s and
-        // the reader gets "Couldn't load conversation" for a branch they never
-        // typed into. The first prompt through sendPromptTo records it, by which
-        // point there is a transcript behind it.
+        // The message that motivated the branch is its first turn. That is also
+        // what writes the fork's transcript (the agent copies the history into it
+        // then, not at fork time) and what records it in the recents list — so a
+        // branch only ever reaches the sidebar with something behind it. Not
+        // awaited: the caller needs to know the fork landed, not how the turn goes.
+        void get().sendPromptTo(res.sessionId, prompt.text, prompt.images, prompt.files);
+        return true;
       } catch (e) {
         // Take the optimistic window back down with the failure — leaving a
         // window that can never be prompted would be worse than never opening it.
@@ -1826,6 +1832,7 @@ export const useStore = create<State>((set, get) => {
             tip: "Couldn't branch conversation: " + msg(e),
           };
         });
+        return false;
       }
     },
 

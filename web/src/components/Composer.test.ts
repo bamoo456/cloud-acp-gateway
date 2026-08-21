@@ -654,11 +654,15 @@ describe("Composer session busy state", () => {
 
   // The branch button is one click from send and spends a few seconds spawning a
   // CLI, so it arms before it fires.
-  async function mountWithFork(props: ComposerProps = {}) {
+  type BranchPrompt = { text: string; images?: unknown[]; files?: unknown[] };
+  async function mountWithFork(
+    props: ComposerProps = {},
+    fork: (p: BranchPrompt) => Promise<boolean> = async () => true,
+  ) {
     const { Composer } = await import("./Composer.tsx");
     const { useStore } = await import("../store/store.ts");
     const { makeSession } = await import("../store/reducers.ts");
-    const branchSession = vi.fn(async () => {});
+    const branchSession = vi.fn(fork);
     useStore.setState({
       agentReady: true,
       agentName: "claude",
@@ -680,8 +684,13 @@ describe("Composer session busy state", () => {
   test("the branch button arms on the first click and only forks on the second", async () => {
     const { branchSession } = await mountWithFork();
 
+    // Branching sends: with nothing typed there is nothing to open a branch with,
+    // so the control is refused until there is.
+    expect(container.querySelector<HTMLButtonElement>(".branch-btn")!).toBeDisabled();
+    await act(async () => { cmSet(cmView(container), "try it the other way"); });
+
     const btn = container.querySelector<HTMLButtonElement>(".branch-btn")!;
-    expect(btn).not.toBeNull();
+    expect(btn).not.toBeDisabled();
     expect(btn.textContent).toContain("branch");
     expect(container.querySelector(".branch-hint")).toBeNull();
 
@@ -691,13 +700,27 @@ describe("Composer session busy state", () => {
     expect(container.querySelector(".branch-btn")!.textContent).toContain("confirm");
 
     await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    // The typed message is what the branch opens with — and the box is cleared
+    // only because the fork reported success.
     expect(branchSession).toHaveBeenCalledTimes(1);
+    expect(branchSession.mock.calls[0][0]).toMatchObject({ text: "try it the other way" });
     expect(container.querySelector(".branch-hint")).toBeNull();
+    expect(cmView(container).state.doc.toString()).toBe("");
+  });
+
+  test("a fork that fails leaves the typed message in the box", async () => {
+    const { branchSession } = await mountWithFork({}, async () => false);
+    await act(async () => { cmSet(cmView(container), "would have been lost"); });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    expect(branchSession).toHaveBeenCalledTimes(1);
+    expect(cmView(container).state.doc.toString()).toBe("would have been lost");
   });
 
   test("an armed branch button gives up on Escape", async () => {
     const { branchSession } = await mountWithFork();
 
+    await act(async () => { cmSet(cmView(container), "never mind"); });
     await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
     expect(container.querySelector(".branch-hint")).not.toBeNull();
 
