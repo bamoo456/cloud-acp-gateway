@@ -1807,7 +1807,13 @@ export const useStore = create<State>((set, get) => {
             tip: "",
           };
         });
-        touchSessionActivity(res.sessionId);
+        // Deliberately NOT recorded in the recents list here. The fork's own
+        // transcript does not exist until the branch's first turn — the agent
+        // copies the history into it then, not at fork time — so a row added now
+        // is a sidebar entry that can only fail to open: the history API 404s and
+        // the reader gets "Couldn't load conversation" for a branch they never
+        // typed into. The first prompt through sendPromptTo records it, by which
+        // point there is a transcript behind it.
       } catch (e) {
         // Take the optimistic window back down with the failure — leaving a
         // window that can never be prompted would be worse than never opening it.

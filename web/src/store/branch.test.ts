@@ -139,6 +139,23 @@ describe("branch conversation", () => {
     expect(st.sessions["branch-session"].items[0]).toMatchObject({ kind: "user", text: "first question" });
   });
 
+  test("a branch stays out of the recents list until it has a turn of its own", async () => {
+    const { useStore, ws } = await bootstrap();
+    const branching = useStore.getState().branchSession();
+    await flush();
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
+    await branching;
+    await flush();
+
+    // The forked transcript is not on disk until the first turn, so a recents row
+    // now would be a sidebar entry whose only possible outcome is a 404.
+    expect(useStore.getState().recentSessions.some((r) => r.sessionId === "branch-session")).toBe(false);
+
+    useStore.getState().sendPromptTo("branch-session", "now it has something to say");
+    await flush();
+    expect(useStore.getState().recentSessions.some((r) => r.sessionId === "branch-session")).toBe(true);
+  });
+
   test("closing the window mid-fork keeps the branch but does not reopen it", async () => {
     const { useStore, ws } = await bootstrap();
     const branching = useStore.getState().branchSession();
