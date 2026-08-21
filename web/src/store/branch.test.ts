@@ -81,7 +81,7 @@ describe("branch conversation", () => {
     ws.recv({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "end_turn" } });
     await flush();
 
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
     const fork = lastSent(ws, "session/fork");
     expect(fork.params).toMatchObject({ sessionId: "parent-session", cwd: "/repo" });
@@ -94,16 +94,24 @@ describe("branch conversation", () => {
     expect(st.branch).toEqual({ parentId: "parent-session", sessionId: "branch-session" });
     // The window floats over its parent: the open conversation does not change.
     expect(st.activeId).toBe("parent-session");
-    // The parent's thread is copied, not handed over.
-    expect(st.sessions["branch-session"].items).toHaveLength(st.sessions["parent-session"].items.length + 1);
+    // The parent's thread is copied, not handed over — plus the boundary note and
+    // the message the branch was opened with.
+    expect(st.sessions["branch-session"].items).toHaveLength(st.sessions["parent-session"].items.length + 2);
     expect(st.sessions["branch-session"].items[0]).toMatchObject({ kind: "user", text: "first question" });
     expect(st.sessions["branch-session"].title).toBe("first question (Branch)");
-    // The boundary between copied history and the branch's own turns is marked.
-    expect(st.sessions["branch-session"].items.at(-1)).toMatchObject({
+    // The boundary between copied history and the branch's own turns is marked,
+    // and the branch's own first turn sits after it.
+    expect(st.sessions["branch-session"].items.at(-2)).toMatchObject({
       kind: "note", text: expect.stringContaining("everything above is copied"),
     });
+    expect(st.sessions["branch-session"].items.at(-1)).toMatchObject({
+      kind: "user", text: "try the other approach",
+    });
     expect(st.sessions["branch-session"].id).toBe("branch-session");
-    expect(st.sessions["branch-session"].working).toBe(false);
+    // It arrives mid-turn — its opening message is already on the wire — while
+    // the parent it was copied from is not working at all.
+    expect(st.sessions["branch-session"].working).toBe(true);
+    expect(st.sessions["parent-session"].working).toBe(false);
   });
 
   test("the branch window opens on the copied thread before the fork answers", async () => {
@@ -113,7 +121,7 @@ describe("branch conversation", () => {
     ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/prompt").id, result: { stopReason: "end_turn" } });
     await flush();
 
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush(); // the fork request is out, but unanswered
 
     const pending = useStore.getState().branch!;
@@ -139,26 +147,46 @@ describe("branch conversation", () => {
     expect(st.sessions["branch-session"].items[0]).toMatchObject({ kind: "user", text: "first question" });
   });
 
-  test("a branch stays out of the recents list until it has a turn of its own", async () => {
+  test("a branch arrives with its first turn already sent, so it is never content-less", async () => {
     const { useStore, ws } = await bootstrap();
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
     ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
-    await branching;
+    expect(await branching).toBe(true);
     await flush();
 
-    // The forked transcript is not on disk until the first turn, so a recents row
-    // now would be a sidebar entry whose only possible outcome is a 404.
-    expect(useStore.getState().recentSessions.some((r) => r.sessionId === "branch-session")).toBe(false);
-
-    useStore.getState().sendPromptTo("branch-session", "now it has something to say");
-    await flush();
+    // The opening message went to the BRANCH, and the branch is in the recents
+    // list — which is only safe because that turn is what writes its transcript.
+    // A branch with no turn would be a sidebar row whose only outcome is a 404.
+    const prompt = lastSent(ws, "session/prompt");
+    expect(prompt.params.sessionId).toBe("branch-session");
+    expect(prompt.params.prompt).toEqual([{ type: "text", text: "try the other approach" }]);
     expect(useStore.getState().recentSessions.some((r) => r.sessionId === "branch-session")).toBe(true);
+    expect(useStore.getState().sessions["parent-session"].items).toHaveLength(0); // parent untouched
+  });
+
+  test("branching refuses an empty message and reports it did nothing", async () => {
+    const { useStore, ws } = await bootstrap();
+    expect(await useStore.getState().branchSession({ text: "   " })).toBe(false);
+    await flush();
+    expect(lastSent(ws, "session/fork")).toBeUndefined();
+    expect(useStore.getState().branch).toBeNull();
+  });
+
+  test("a failed fork reports false so the caller keeps the message", async () => {
+    const { useStore, ws } = await bootstrap();
+    const branching = useStore.getState().branchSession({ text: "would have been lost" });
+    await flush();
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, error: { code: -32601, message: "Method not found" } });
+    expect(await branching).toBe(false);
+    await flush();
+    expect(useStore.getState().branch).toBeNull();
+    expect(lastSent(ws, "session/prompt")).toBeUndefined(); // nothing was sent anywhere
   });
 
   test("closing the window mid-fork keeps the branch but does not reopen it", async () => {
     const { useStore, ws } = await bootstrap();
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
     useStore.getState().closeBranch();
 
@@ -179,7 +207,7 @@ describe("branch conversation", () => {
       sessions: { ...st.sessions, "parent-session": { ...st.sessions["parent-session"], modelId: "opus" } },
     }));
 
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
     const fork = lastSent(ws, "session/fork");
     ws.recv({
@@ -201,7 +229,7 @@ describe("branch conversation", () => {
     await flush();
     const before = ws.sent.length;
 
-    await useStore.getState().branchSession();
+    await useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
 
     expect(lastSent(ws, "session/fork")).toBeUndefined();
@@ -212,7 +240,7 @@ describe("branch conversation", () => {
 
   test("a failed fork reports it and leaves the conversation alone", async () => {
     const { useStore, ws } = await bootstrap();
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
     const fork = lastSent(ws, "session/fork");
     ws.recv({ jsonrpc: "2.0", id: fork.id, error: { code: -32601, message: "Method not found" } });
@@ -228,7 +256,7 @@ describe("branch conversation", () => {
 
   test("sendPromptTo prompts the branch without moving the open conversation", async () => {
     const { useStore, ws } = await bootstrap();
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
     ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
     await branching;
@@ -261,7 +289,7 @@ describe("branch conversation", () => {
 
   test("closeBranch forgets the pairing but keeps the branch conversation", async () => {
     const { useStore, ws } = await bootstrap();
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
     ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
     await branching;
@@ -274,7 +302,7 @@ describe("branch conversation", () => {
 
   test("deleting either side ends the pairing", async () => {
     const { useStore, ws } = await bootstrap();
-    const branching = useStore.getState().branchSession();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
     ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
     await branching;
