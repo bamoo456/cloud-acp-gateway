@@ -261,6 +261,29 @@ function activeAgentSkin(state: SkinState): AgentSkin | null {
   );
 }
 
+// Whether the "branch this conversation" affordance should be offered, and why
+// not when it shouldn't. Lives here rather than in the component that renders it
+// because the answer is entirely about store state, and the reason strings are
+// what the button says on hover — a disabled control that doesn't explain itself
+// is a dead end. `show: false` (the agent never advertised
+// `sessionCapabilities.fork`) means don't render it at all: a permanently dead
+// button teaches nothing.
+export interface BranchGate { show: boolean; disabled: boolean; why: string }
+export function branchGate(state: State): BranchGate {
+  const show = state.cfg.agents.find((a) => a.name === state.agentName)?.sessionFork === true;
+  const ready = !!state.activeId && !state.activeId.startsWith("pending-");
+  // A turn in flight is not in the transcript yet, so forking mid-turn would
+  // silently drop that reply; one parent tracks one branch at a time.
+  const running = state.runningTasks.some((t) => t.agentName === state.agentName && t.sessionId === state.activeId)
+    || (!!state.activeId && !!state.busySessionIds[state.activeId]);
+  const open = !!state.branch && state.branch.parentId === state.activeId;
+  const why = !ready ? "Send a message first"
+    : running ? "Wait for this turn to finish"
+    : open ? "A branch of this conversation is already open"
+    : "Branch conversation — forks it into a floating window";
+  return { show, disabled: !ready || running || open, why };
+}
+
 export function hasCodexSkin(state: SkinState): boolean {
   return activeAgentSkin(state) === "codex";
 }

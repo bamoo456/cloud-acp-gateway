@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
-import { hasCodexSkin, useStore } from "../store/store.ts";
+import { branchGate, hasCodexSkin, useStore } from "../store/store.ts";
 import { Menu } from "./Menu.tsx";
-import { IconSlash, IconSend, IconStop, IconAt, IconFile } from "../lib/icons.tsx";
+import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconShare } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
 import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.ts";
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
@@ -56,6 +56,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   const removeAt = sessionId ? (i: number) => setLocalFiles((prev) => prev.filter((_, idx) => idx !== i)) : s.removeAttachedFile;
   const clearFiles = sessionId ? () => setLocalFiles([]) : s.clearAttachedFiles;
   const activeBusy = sessionId ? !!s.busySessionIds[sessionId] : !!(s.activeId && s.busySessionIds[s.activeId]);
+  const branch = branchGate(s);
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
@@ -356,6 +357,14 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
           )}
           <input ref={fileRef} type="file" multiple hidden
             onChange={(e) => { void addAttachments(e.target.files); e.target.value = ""; }} />
+          {/* Branching belongs beside the other things you do to the conversation
+              you are typing into, so it sits in this row. Never in a bound
+              instance: the branch window's own composer would be offering to
+              branch the conversation BEHIND it, which is not what its row means. */}
+          {!sessionId && branch.show && (
+            <button className="cbtn" title={branch.why} aria-label="Branch conversation"
+              disabled={branch.disabled} onClick={() => { void s.branchSession(); }}><IconShare /></button>
+          )}
           <span className="spacer" />
           <button className={"send" + (activeBusy ? " stop" : "")} title={activeBusy ? "Stop" : "Send"}
             disabled={!canSend} onClick={submit}>

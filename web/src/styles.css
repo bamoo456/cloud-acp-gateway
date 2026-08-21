@@ -2272,6 +2272,11 @@
     padding: 6px 10px calc(8px + env(safe-area-inset-bottom));
   }
   @media (min-width: 860px) {
+    /* Clear the resize grip the desktop rule above turns on: it renders in this
+       corner, which is exactly where the send button and the waiting strip end. */
+    .branch-win footer, .branch-win-wait { padding-right: 22px; }
+  }
+  @media (min-width: 860px) {
     .branch-win {
       /* Stays fixed to the VIEWPORT, not confined to the conversation column:
          the window is global chrome, free to sit over the sessions list and the
@@ -2287,6 +2292,11 @@
       bottom: 108px;
       width: 380px; max-width: calc(100vw - 40px);
       height: 480px; max-height: calc(100vh - 140px);
+      /* The browser's own two-axis grip, rather than hand-rolled handles: the
+         card is already overflow:hidden, so `resize` works on it as-is, and the
+         min sizes keep it a readable thread instead of a sliver. The footer's
+         extra right padding below is what keeps the grip off the send button. */
+      resize: both; min-width: 300px; min-height: 240px;
       border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
       animation: pop .14s ease-out;
       padding-top: 0; padding-bottom: 0;

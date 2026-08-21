@@ -98,6 +98,71 @@ describe("BranchWindow", () => {
     expect(container.querySelector(".branch-win .composer.compact")).not.toBeNull();
   });
 
+  test("a dragged window keeps its place when the fork swaps the provisional id in", async () => {
+    // jsdom answers every media query with `matches: false`, which is the phone
+    // sheet — and a sheet is deliberately not draggable. Say "desktop" so the
+    // card, and its drag handle, are what renders.
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      matches: true, media, addEventListener() {}, removeEventListener() {},
+    }));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      activeId: "parent-1",
+      agentReady: true,
+      sessions: {
+        "parent-1": makeSession("parent-1", "Parent"),
+        "pending-x": makeSession("pending-x", "Parent (Branch)"),
+      },
+      branch: { parentId: "parent-1", sessionId: "pending-x" },
+    });
+    await render();
+
+    // While the fork is still in flight the composer is a waiting strip, not an
+    // input the agent could not answer.
+    expect(container.querySelector(".branch-win-wait")).not.toBeNull();
+    expect(container.querySelector(".branch-win .composer")).toBeNull();
+
+    // Drag it somewhere.
+    // MouseEvent, not PointerEvent: jsdom has no PointerEvent constructor, and
+    // neither React's synthetic layer nor the handler reads anything a plain
+    // mouse event lacks (it wants the type name and clientX/clientY).
+    const head = container.querySelector<HTMLElement>(".branch-win-head")!;
+    await act(async () => {
+      head.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 120, clientY: 80 }));
+      window.dispatchEvent(new MouseEvent("pointerup", {}));
+    });
+    const card = container.querySelector<HTMLElement>(".branch-win")!;
+    expect(card.style.left).toBe("120px");
+    expect(card.style.top).toBe("80px");
+
+    // session/fork answers: same window, real id. The place it was dragged to
+    // has to survive that swap — it used to snap back to the default corner.
+    await act(async () => {
+      useStore.setState((st) => {
+        const sessions = { ...st.sessions };
+        delete sessions["pending-x"];
+        sessions["branch-1"] = makeSession("branch-1", "Parent (Branch)");
+        return { sessions, branch: { parentId: "parent-1", sessionId: "branch-1" } };
+      });
+    });
+    const swapped = container.querySelector<HTMLElement>(".branch-win")!;
+    expect(swapped.style.left).toBe("120px");
+    expect(swapped.style.top).toBe("80px");
+    // …and the real session can be typed into.
+    expect(container.querySelector(".branch-win .composer.compact")).not.toBeNull();
+
+    // A branch of a DIFFERENT conversation is a new window: back to default.
+    await act(async () => {
+      useStore.setState((st) => ({
+        activeId: "parent-2",
+        sessions: { ...st.sessions, "parent-2": makeSession("parent-2", "Other") },
+        branch: { parentId: "parent-2", sessionId: "branch-1" },
+      }));
+    });
+    expect(container.querySelector<HTMLElement>(".branch-win")!.style.left).toBe("");
+  });
+
   test("the close button forgets the pairing but leaves the branch session live", async () => {
     const { useStore } = await import("../store/store.ts");
     useStore.setState({

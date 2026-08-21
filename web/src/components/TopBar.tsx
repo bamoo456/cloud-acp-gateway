@@ -4,7 +4,7 @@ import { ActionMenu } from "./ActionMenu.tsx";
 import { PendingPermissions } from "./PendingPermissions.tsx";
 import { basename, dirname } from "../lib/format.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
-import { IconClock, IconPlus, IconDots, IconPanel, IconSearch, IconShare } from "../lib/icons.tsx";
+import { IconClock, IconPlus, IconDots, IconPanel, IconSearch } from "../lib/icons.tsx";
 
 // The crumb answers one question — where are you — and nothing else (§1.4).
 // The folder's parents are muted, its own name is ink, the session title trails
@@ -30,21 +30,6 @@ export function TopBar({ onPanel, onPicker, findOpen, onFind }: {
   const s = useStore();
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const [menu, setMenu] = useState(false);
-  // Branching is a first-class move on the conversation, not a setting, so it
-  // lives out here rather than three rows down a menu. Hidden — not disabled —
-  // for agents that never advertised `sessionCapabilities.fork`: a permanently
-  // dead button teaches nothing. Refused (with the reason on hover) for a
-  // conversation the agent has never seen, one mid-turn (that reply is not in
-  // the transcript yet, so the fork would silently drop it), and while a branch
-  // window is already open, since one parent tracks one branch at a time.
-  const canFork = s.cfg.agents.find((a) => a.name === s.agentName)?.sessionFork === true;
-  const branchable = !!s.activeId && !s.activeId.startsWith("pending-");
-  const running = s.runningTasks.some((t) => t.agentName === s.agentName && t.sessionId === s.activeId);
-  const branchOpen = !!s.branch && s.branch.parentId === s.activeId;
-  const branchWhy = !branchable ? "Send a message first"
-    : running ? "Wait for this turn to finish"
-    : branchOpen ? "A branch of this conversation is already open"
-    : "Branch conversation — forks it into a floating window";
   return (
     <header>
       {/* One button, two doors: on desktop it collapses/expands the sidebar
@@ -65,11 +50,6 @@ export function TopBar({ onPanel, onPicker, findOpen, onFind }: {
       <PendingPermissions />
       <button className={"icon-btn" + (findOpen ? " on" : "")} title="Find in conversation"
         aria-pressed={findOpen} onClick={onFind}><IconSearch /></button>
-      {canFork && (
-        <button className={"icon-btn" + (branchOpen ? " on" : "")} title={branchWhy}
-          aria-label="Branch conversation" disabled={!branchable || running || branchOpen}
-          onClick={() => { void s.branchSession(); }}><IconShare /></button>
-      )}
       <button className="icon-btn" title="Conversation menu" onClick={() => setMenu((v) => !v)}><IconDots /></button>
       <button className="icon-btn" title="New chat" onClick={() => { if (s.agentReady) s.newSession(); }}><IconPlus /></button>
       {/* Last, against the edge the panel it opens slides out from — the same
