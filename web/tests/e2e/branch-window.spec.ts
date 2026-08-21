@@ -6,7 +6,7 @@ import { SEED_SSE } from "./seed-sse.ts";
 // are all layout facts jsdom cannot answer (no layout engine), so the unit tests
 // cover the store/render logic and this covers the browser half.
 
-// Branch the open conversation from the header button.
+// Branch the open conversation from the button in the composer's own row.
 async function branch(page: import("@playwright/test").Page) {
   await page.goto("/");
   await expect(page.locator("footer .cm-editor")).toBeVisible();
