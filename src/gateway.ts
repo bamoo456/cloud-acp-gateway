@@ -3110,12 +3110,16 @@ class Channel {
         this.initWaiters = [];
       }
       let created: string | undefined;
-      if (origin.method === "session/new") {
+      // A fork answers with a NEW session id backed by a fresh session, so it needs
+      // exactly the registration session/new gets. Its Origin carries the SOURCE id
+      // rather than the new one (a fork request's params.sessionId is what it
+      // branches from), which is what the controls below inherit from.
+      if (origin.method === "session/new" || origin.method === "session/fork") {
         const sid = (f.result as { sessionId?: unknown } | undefined)?.sessionId;
         if (typeof sid === "string") {
           this.subs.subscribe(origin.connId, sid);
           // The new session's id is known only now — pair it to the cwd the
-          // session/new request carried so running() can report the folder.
+          // request carried so running() can report the folder.
           if (origin.cwd) this.sessionCwd.set(sid, origin.cwd);
           // A new session has a fresh backing CLI — start tracking it for reaping.
           this.touchSession(sid, origin.cwd);
@@ -3129,8 +3133,12 @@ class Channel {
       // Record the session's starting controls and apply this agent's defaults over
       // them. After the response, so the client renders the session it asked for and
       // then hears the re-applied values through the usual config_option_update; the
-      // gate the re-apply takes parks the client's first prompt behind it.
-      if (created !== undefined) this.applyNewSessionControls(created, f.result);
+      // gate the re-apply takes parks the client's first prompt behind it. A fork
+      // inherits the source conversation's values instead of those defaults.
+      if (created !== undefined) {
+        if (origin.method === "session/fork") this.applyForkedSessionControls(created, origin.sessionId, f.result);
+        else this.applyNewSessionControls(created, f.result);
+      }
       // A (re)load resubscribes this client to the session — re-deliver any permission
       // still outstanding for it, so a prompt that arrived before a drop (or before a
       // fresh page load) is shown again. Safe to repeat: permGate is first-reply-wins
@@ -3520,6 +3528,26 @@ class Channel {
     if (!tracked || !this.controlDefaults.size) return;
     const wanted = new Map(tracked);
     for (const [configId, value] of this.controlDefaults) wanted.set(configId, value);
+    const diff = this.controlDiff(sid, result, wanted);
+    if (!diff.length) return;
+    const next = new Map(tracked);
+    for (const c of diff) next.set(c.configId, c.value);
+    this.trackControls(sid, next);
+    void this.reapplyControls(sid, diff);
+  }
+
+  // A session the gateway just forked: record what it came up as, then bring it to
+  // the SOURCE conversation's values instead of this agent's configured defaults —
+  // a fork continues one specific conversation, so the model/effort/mode that
+  // conversation ran is what has to carry over. A source with nothing recorded (one
+  // the CLI created and the gateway adopted from history, say) has nothing to
+  // inherit, and the fork is left at its natural values: falling back to the
+  // defaults there would move a branched conversation off the model it ran.
+  private applyForkedSessionControls(sid: string, sourceSid: string | undefined, result: unknown): void {
+    this.seedControls(sid, result);
+    const tracked = this.trackedControls(sid);
+    const wanted = sourceSid ? this.trackedControls(sourceSid) : undefined;
+    if (!tracked || !wanted) return;
     const diff = this.controlDiff(sid, result, wanted);
     if (!diff.length) return;
     const next = new Map(tracked);

@@ -22,6 +22,13 @@ function cmKey(view: EditorView, key: string, opts: KeyboardEventInit = {}) {
   view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...opts }));
 }
 
+// Composer's props are all optional (bound mode opts in with `sessionId`), and
+// createElement's overload inference can't derive P from an all-optional,
+// defaulted props parameter — it silently falls back to bare `Attributes` and
+// rejects `sessionId` as unknown. Spelling the shape out here as an explicit
+// type argument sidesteps that without giving up prop type-checking.
+type ComposerProps = { sessionId?: string; compact?: boolean };
+
 describe("Composer session busy state", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
@@ -514,5 +521,134 @@ describe("Composer session busy state", () => {
     expect(container.textContent).not.toContain("Reasoning Effort");
     expect(container.textContent).not.toContain("Auto");
     expect(container.textContent).not.toContain("Approval Preset");
+  });
+
+  test("a bound instance sends through sendPromptTo with its own session id, not sendPrompt", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    const sendPrompt = vi.fn();
+    const sendPromptTo = vi.fn();
+    useStore.setState({ agentReady: true, sendPrompt, sendPromptTo } as any);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, { sessionId: "branch-1" }));
+    });
+
+    await act(async () => { cmSet(cmView(container), "hello"); });
+    const send = container.querySelector<HTMLButtonElement>("button.send")!;
+    await act(async () => { send.click(); });
+
+    expect(sendPromptTo).toHaveBeenCalledWith("branch-1", "hello", [], []);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  test("a bound instance's file attachments are isolated from the store's attachedFiles", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    useStore.setState({
+      agentReady: true,
+      promptCapabilities: { embeddedContext: true },
+      // Stands in for a file the panel attached to the (unbound) main composer —
+      // it must not leak into this bound instance's chip strip.
+      attachedFiles: [{ name: "panel.md", uri: "file:///panel.md" }],
+    } as any);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ name: "branch.md", uri: "file:///data/uploads/branch.md" }),
+    } as Response));
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, { sessionId: "branch-1" }));
+    });
+
+    // The store's file (from the file panel) does not show up as a chip here.
+    expect(container.querySelector(".file-chip .nm")).toBeNull();
+
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["# hi"], "branch.md", { type: "text/markdown" });
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    // The upload landed in this instance's own chip strip...
+    expect(container.querySelector(".file-chip .nm")?.textContent).toBe("branch.md");
+    // ...and never touched the store's list.
+    expect(useStore.getState().attachedFiles).toEqual([{ name: "panel.md", uri: "file:///panel.md" }]);
+  });
+
+  test("clearing after send only clears the bound instance's own file list", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    const sendPromptTo = vi.fn();
+    useStore.setState({
+      agentReady: true,
+      promptCapabilities: { embeddedContext: true },
+      attachedFiles: [{ name: "panel.md", uri: "file:///panel.md" }],
+      sendPromptTo,
+    } as any);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ name: "branch.md", uri: "file:///data/uploads/branch.md" }),
+    } as Response));
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, { sessionId: "branch-1" }));
+    });
+
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["# hi"], "branch.md", { type: "text/markdown" });
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [file], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(container.querySelector(".file-chip .nm")?.textContent).toBe("branch.md");
+
+    await act(async () => { cmSet(cmView(container), "go"); });
+    const send = container.querySelector<HTMLButtonElement>("button.send")!;
+    await act(async () => { send.click(); });
+
+    expect(sendPromptTo).toHaveBeenCalledWith(
+      "branch-1", "go", [], [{ name: "branch.md", uri: "file:///data/uploads/branch.md" }],
+    );
+    // The bound instance's own chip is gone...
+    expect(container.querySelector(".file-chip")).toBeNull();
+    // ...but the store's list (the file panel's own state) is untouched.
+    expect(useStore.getState().attachedFiles).toEqual([{ name: "panel.md", uri: "file:///panel.md" }]);
+  });
+
+  test("cancel in a bound instance passes its session id", async () => {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    const cancel = vi.fn();
+    useStore.setState({
+      agentReady: true,
+      // The parent conversation is active but idle; the branch is the one
+      // running, which is exactly the case bound busy-state has to tell apart
+      // from unbound (activeId-based) busy-state.
+      activeId: "parent-1",
+      busySessionIds: { "branch-1": true },
+      cancel,
+    } as any);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, { sessionId: "branch-1" }));
+    });
+
+    const stop = container.querySelector<HTMLButtonElement>("button.send.stop");
+    expect(stop).not.toBeNull(); // busy read from busySessionIds[sessionId], not activeId
+    await act(async () => { stop!.click(); });
+
+    expect(cancel).toHaveBeenCalledWith("branch-1");
   });
 });

@@ -7,7 +7,7 @@ import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
 import { listFiles, uploadFile } from "../lib/api.ts";
-import type { MessageImage } from "../types.ts";
+import type { MessageImage, MessageFile } from "../types.ts";
 
 // Touch / coarse-pointer devices (phones, tablets) have no Shift key on their
 // virtual keyboard, so there is no way to type Shift+Enter for a newline. On
@@ -16,7 +16,7 @@ import type { MessageImage } from "../types.ts";
 const isTouchDevice = typeof window !== "undefined" &&
   (window.matchMedia?.("(pointer: coarse)").matches || "ontouchstart" in window);
 
-export function Composer() {
+export function Composer({ sessionId, compact }: { sessionId?: string; compact?: boolean } = {}) {
   const mi = useRef<MarkdownInputHandle>(null);
   const editorRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -38,10 +38,24 @@ export function Composer() {
   const [fileItems, setFileItems] = useState<string[]>([]);
   const [fileActive, setFileActive] = useState(0);
   const s = useStore();
-  // "@ file" references, uploads, and anything attached from the file panel.
-  // The panel adds to the same strip, so the list lives in the store.
-  const files = s.attachedFiles;
-  const activeBusy = !!(s.activeId && s.busySessionIds[s.activeId]);
+  // A bound instance (the branch window) targets a conversation that isn't the
+  // store's active one, so its file references can't live in the store's
+  // `attachedFiles` list — that list stays global on purpose (the file panel
+  // writes into it) and keeps feeding the unbound composer only. Local state
+  // stands in for it here, with the same dedup-on-uri / by-index semantics as
+  // the store's attachFiles/removeAttachedFile/clearAttachedFiles.
+  const [localFiles, setLocalFiles] = useState<MessageFile[]>([]);
+  const files = sessionId ? localFiles : s.attachedFiles;
+  const attach = sessionId
+    ? (added: MessageFile[]) => setLocalFiles((prev) => {
+        const next = [...prev];
+        for (const f of added) if (!next.some((p) => p.uri === f.uri)) next.push(f);
+        return next;
+      })
+    : s.attachFiles;
+  const removeAt = sessionId ? (i: number) => setLocalFiles((prev) => prev.filter((_, idx) => idx !== i)) : s.removeAttachedFile;
+  const clearFiles = sessionId ? () => setLocalFiles([]) : s.clearAttachedFiles;
+  const activeBusy = sessionId ? !!s.busySessionIds[sessionId] : !!(s.activeId && s.busySessionIds[s.activeId]);
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
@@ -166,7 +180,7 @@ export function Composer() {
     for (const f of picks) {
       setUploading((n) => n + 1);
       try {
-        s.attachFiles([await uploadFile(f)]);
+        attach([await uploadFile(f)]);
       } catch (e) {
         s.setTip(e instanceof Error ? e.message : "Couldn't upload the file.");
       } finally {
@@ -200,7 +214,7 @@ export function Composer() {
   function removeImage(i: number) { setImages((prev) => prev.filter((_, idx) => idx !== i)); }
 
   function addReferencedFile(rel: string) {
-    s.attachFiles([makeMessageFile(s.cwd, rel)]);
+    attach([makeMessageFile(s.cwd, rel)]);
   }
 
   // Pick a file from the "@" menu: drop the "@token" from the text (the file shows
@@ -228,15 +242,16 @@ export function Composer() {
   }
 
   function submit() {
-    if (activeBusy) { s.cancel(); return; }
+    if (activeBusy) { s.cancel(sessionId); return; }
     // Enter bypasses the Send button's `disabled={!canSend}`, so it needs its own
     // guard: sending mid-upload would clear `files` out from under the pending
     // upload, and the file would land as a chip on the *next* message instead.
     if (uploading) return;
     const t = text; const imgs = images; const refs = files;
     if (!t.trim() && !imgs.length && !refs.length) return;
-    setText(""); setImages([]); s.clearAttachedFiles(); setFileQuery(null); setCmdQuery(null);
-    s.sendPrompt(t, imgs, refs);
+    setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
+    if (sessionId) s.sendPromptTo(sessionId, t, imgs, refs);
+    else s.sendPrompt(t, imgs, refs);
   }
 
   // Live callbacks the editor's keymap reads (rebuilt each render so they close
@@ -289,7 +304,7 @@ export function Composer() {
         </div>
       )}
       <div
-        className={"composer" + (dragging ? " dragover" : "")}
+        className={"composer" + (compact ? " compact" : "") + (dragging ? " dragover" : "")}
         onDragOver={canAttachImages ? (e) => { e.preventDefault(); setDragging(true); } : undefined}
         onDragLeave={canAttachImages ? () => setDragging(false) : undefined}
         onDrop={canAttachImages ? (e) => { e.preventDefault(); setDragging(false); void addFiles(e.dataTransfer?.files); } : undefined}
@@ -310,7 +325,7 @@ export function Composer() {
               <span className="file-chip" key={f.uri || f.name} title={f.uri || f.name}>
                 <IconFile /><span className="nm">{f.name}</span>
                 {f.range && <span className="rng">{f.range}</span>}
-                <button className="chip-x" title="Remove file" onClick={() => s.removeAttachedFile(i)}>✕</button>
+                <button className="chip-x" title="Remove file" onClick={() => removeAt(i)}>✕</button>
               </span>
             ))}
           </div>
