@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { groupByFolder, latestWithPinned, type GroupableRow } from "./sessionGroups.ts";
+import { groupByFolder, latestWithPinned, splitByAge, hideFolders, type GroupableRow } from "./sessionGroups.ts";
 
 const HOME = "/Users/dev";
 const HOUR = 3600_000;
@@ -82,5 +82,74 @@ describe("groupByFolder", () => {
     expect(g).toMatchObject({ needsYou: true, running: false });
     // and inside a folder the same ordering applies
     expect(g.rows.map((r) => r.key)).toEqual(["b", "a"]);
+  });
+});
+
+describe("splitByAge", () => {
+  test("a session exactly one hour old is still fresh, not older", () => {
+    const { fresh, older } = splitByAge([row("edge", "/a", 1)], NOW);
+    expect(fresh.map((r) => r.key)).toEqual(["edge"]);
+    expect(older).toEqual([]);
+  });
+
+  test("no usable timestamp lands in older, not fresh", () => {
+    const noTime: GroupableRow<string> = {
+      key: "no-time", cwd: "/a", when: 0, running: false, needsYou: false, data: "no-time",
+    };
+    const { fresh, older } = splitByAge([noTime], NOW);
+    expect(fresh).toEqual([]);
+    expect(older.map((r) => r.key)).toEqual(["no-time"]);
+  });
+
+  test("splits fresh from older around the window", () => {
+    const { fresh, older } = splitByAge([row("recent", "/a", 0.5), row("stale", "/a", 3)], NOW);
+    expect(fresh.map((r) => r.key)).toEqual(["recent"]);
+    expect(older.map((r) => r.key)).toEqual(["stale"]);
+  });
+});
+
+describe("hideFolders", () => {
+  test("hides the exact folder chosen", () => {
+    const rows = [
+      row("a", "/Users/dev/scratch", 1),
+      row("b", "/Users/dev/other", 1),
+    ];
+    const out = hideFolders(rows, ["/Users/dev/scratch"], "/elsewhere", HOME);
+    expect(out.map((r) => r.key)).toEqual(["b"]);
+  });
+
+  test("hiding a parent folder hides everything under it", () => {
+    const rows = [
+      row("a", "/Users/dev/git/worktrees/foo", 1),
+      row("b", "/Users/dev/git/repo", 1),
+    ];
+    const out = hideFolders(rows, ["/Users/dev/git/worktrees"], "/elsewhere", HOME);
+    expect(out.map((r) => r.key)).toEqual(["b"]);
+  });
+
+  test("hiding /x/repo does NOT hide /x/repo-2 (no substring matching)", () => {
+    const rows = [
+      row("a", "/Users/dev/repo", 1),
+      row("b", "/Users/dev/repo-2", 1),
+    ];
+    const out = hideFolders(rows, ["/Users/dev/repo"], "/elsewhere", HOME);
+    expect(out.map((r) => r.key)).toEqual(["b"]);
+  });
+
+  test("a hidden entry spelled with ~ still hides the folder spelled absolutely", () => {
+    const rows = [row("a", "/Users/dev/scratch", 1)];
+    const out = hideFolders(rows, ["~/scratch"], "/elsewhere", HOME);
+    expect(out).toEqual([]);
+  });
+
+  test("never hides the folder you are currently working in", () => {
+    const rows = [row("mine", "/Users/dev/here", 1)];
+    const out = hideFolders(rows, ["/Users/dev/here"], "/Users/dev/here", HOME);
+    expect(out.map((r) => r.key)).toEqual(["mine"]);
+  });
+
+  test("an empty list is a no-op", () => {
+    const rows = [row("a", "/Users/dev/anything", 1)];
+    expect(hideFolders(rows, [], "/elsewhere", HOME)).toBe(rows);
   });
 });

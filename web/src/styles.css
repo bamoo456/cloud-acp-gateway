@@ -451,6 +451,12 @@
   }
   .fgroup .fcount { flex: 0 0 auto; font-family: var(--mono);
     font-size: 10.5px; color: var(--faint); }
+  /* A 13px glyph is a miss-prone touch target sitting next to the collapse
+     toggle, so the box is padded out well past the icon it draws. */
+  .fgroup .hide { flex: 0 0 auto; width: 24px; height: 24px; margin: -4px -3px -4px 0;
+    display: grid; place-items: center; color: var(--faint); border-radius: 6px; }
+  .fgroup .hide svg { width: 13px; height: 13px; }
+  .fgroup .hide:hover { background: var(--surface); color: var(--text); }
   .fkids { position: relative; padding-bottom: 4px; }
   .fkids::before { content: ""; position: absolute; left: 16px; top: 0; bottom: 6px; width: 1px; background: var(--border); }
   .fkids .sess-item { padding-left: 26px; }
@@ -1405,7 +1411,13 @@
   .amenu.fp { width: 330px; max-height: min(70vh, 560px); overflow-y: auto; }
   /* desktop: a centered modal (the trigger is the sidebar folder bar, not the menu button) */
   @media (min-width: 860px) {
-    .amenu.fp { top: 16vh; left: 50%; right: auto; width: 380px; margin-left: -190px; transform-origin: top center; }
+    /* Centred with auto margins rather than left:50% + translateX: .amenu's own
+       `pop` keyframe animates transform, so a centring transform here would be
+       dropped for the animation's 140ms and the modal would jump sideways.
+       Wide enough that a path like /Users/x/git/my-apps/some-long-repo-name
+       stays on one line — at 380px most of them wrapped to two or three. */
+    .amenu.fp { top: 16vh; left: 0; right: 0; width: min(520px, calc(100vw - 32px));
+      margin-inline: auto; transform-origin: top center; }
   }
   /* the folder chip exists below 860px — present the picker as a bottom sheet there,
      not just below the 640px breakpoint the action menu uses */
@@ -1431,6 +1443,11 @@
   .fp .arow .star:hover { background: var(--surface-2); }
   .fp .arow .star svg { width: 16px; height: 16px; color: var(--muted); display: block; }
   .fp .arow:not(:has(.when)) .star { margin-left: auto; }
+  /* Same affordance shape as .star, sitting right after it. */
+  .fp .arow .hide { flex: 0 0 auto; width: 34px; height: 34px; margin: -5px -8px -5px 0;
+    border-radius: 9px; display: grid; place-items: center; }
+  .fp .arow .hide:hover { background: var(--surface-2); }
+  .fp .arow .hide svg { width: 16px; height: 16px; color: var(--muted); display: block; }
   .fp .arow.cur, .fp .arow.cur .nm { color: var(--accent); }
   @media (max-width: 640px) {
     .amenu-scrim { background: #00000070; backdrop-filter: blur(2px); }

@@ -40,7 +40,7 @@ describe("App usage strip", () => {
       getMessages: vi.fn().mockResolvedValue({ messages: [], total: 0, truncated: false }),
       renameSession: vi.fn(),
       listDir: vi.fn().mockResolvedValue({ root: "/", path: "/", parent: null, dirs: [] }),
-      getPrefs: vi.fn().mockResolvedValue({ textSize: null, lock: null, recentSessions: [], recentFolders: [] }),
+      getPrefs: vi.fn().mockResolvedValue({ textSize: null, lock: null, recentSessions: [], recentFolders: [], hiddenFolders: [] }),
       putTextSize: vi.fn().mockResolvedValue(undefined),
       // The status bar's diffstat: the file panel reads the checkout even
       // while it is shut, so App-level renders touch this route too.
