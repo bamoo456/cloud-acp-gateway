@@ -57,6 +57,17 @@ export function IconType() {
   );
 }
 
+// The version-control branch glyph: a trunk with two commits and a third
+// commit on a line curving away from it. Reads as "this history splits here".
+export function IconGitBranch() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7" cy="6" r="2" /><circle cx="7" cy="18" r="2" /><circle cx="17" cy="9" r="2" />
+      <path d="M7 8v8" /><path d="M17 11c0 4-10 2-10 5" />
+    </svg>
+  );
+}
+
 export function IconShare() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">

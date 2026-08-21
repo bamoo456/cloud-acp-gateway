@@ -6,11 +6,16 @@ import { SEED_SSE } from "./seed-sse.ts";
 // are all layout facts jsdom cannot answer (no layout engine), so the unit tests
 // cover the store/render logic and this covers the browser half.
 
-// Branch the open conversation from the button in the composer's own row.
+// Branch the open conversation from the button beside send. Two clicks: the
+// first arms the confirm, the second forks.
 async function branch(page: import("@playwright/test").Page) {
   await page.goto("/");
   await expect(page.locator("footer .cm-editor")).toBeVisible();
-  await page.click('button[aria-label="Branch conversation"]');
+  const btn = page.locator("footer .branch-btn");
+  await btn.click();
+  await expect(page.locator(".branch-hint")).toBeVisible();
+  await expect(page.locator(".branch-win")).toBeHidden(); // one click does not fork
+  await btn.click();
   await expect(page.locator(".branch-win")).toBeVisible();
   // The window opens optimistically, on a provisional session, and swaps in the
   // real one when session/fork answers — wait for the composer that replaces the
