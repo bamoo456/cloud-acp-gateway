@@ -10,6 +10,13 @@ import { DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth } from "../lib/sidebarWidt
 // the stylesheet's default corner" — drag only ever switches the card into
 // pixel-tracked mode, never back.
 interface DragPos { left: number; top: number; }
+interface CardSize { w: number; h: number; }
+// Which corner is being pulled. The two letters are the edges it moves, so the
+// handler derives everything from them instead of switching on four cases.
+type Corner = "nw" | "ne" | "sw" | "se";
+// Floors, matching the stylesheet's min-width/min-height: below this the thread
+// stops being readable and the composer starts wrapping onto itself.
+const MIN_W = 300, MIN_H = 240;
 
 // The open branch (store.ts's `branch`), floating over its parent's thread. A
 // card on desktop, a full-screen sheet on a phone — never resizable in this
@@ -43,6 +50,7 @@ export function BranchWindow() {
 
   const cardRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<DragPos | null>(null);
+  const [size, setSize] = useState<CardSize | null>(null);
   // Ends a drag in progress. Held in a ref so unmounting mid-drag (closing the
   // branch with the pointer still down) can run it: the listeners live on
   // `window` and the grab cursor on <body>, so neither goes away with the card,
@@ -59,7 +67,7 @@ export function BranchWindow() {
   // the same branch (switching away from its parent and back) leaves it
   // unchanged too, so a dragged position survives that as intended.
   const branchParentId = s.branch?.parentId;
-  useEffect(() => { setPos(null); }, [branchParentId]);
+  useEffect(() => { setPos(null); setSize(null); }, [branchParentId]);
 
   // Escape closes it, as a dialog should. On the document rather than the card
   // (the way ActionMenu does it) because the focus is usually somewhere else
@@ -74,6 +82,48 @@ export function BranchWindow() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [open]);
+
+  // Pull a corner. Every corner is the same arithmetic once the card is switched
+  // to left/top anchoring on pointerdown: the two edges the corner does NOT touch
+  // stay put, which is the whole expectation behind dragging a corner. (The
+  // stylesheet anchors the card by right/bottom, so without that switch a
+  // south-east pull would move the left edge instead of the right one.)
+  const onCornerPointerDown = (corner: Corner) => (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation(); // a corner is not the header: never start a move as well
+    const card = cardRef.current;
+    if (!card) return;
+    const r = card.getBoundingClientRect();
+    const startX = e.clientX, startY = e.clientY;
+    const west = corner === "nw" || corner === "sw";
+    const north = corner === "nw" || corner === "ne";
+    document.body.classList.add("branch-dragging");
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX, dy = ev.clientY - startY;
+      let w = Math.max(MIN_W, west ? r.width - dx : r.width + dx);
+      let h = Math.max(MIN_H, north ? r.height - dy : r.height + dy);
+      // Pin the opposite edges, then give back whatever ran off the viewport, so
+      // a corner pulled past the screen stops instead of hiding half the card.
+      let left = west ? r.right - w : r.left;
+      let top = north ? r.bottom - h : r.top;
+      if (left < 0) { w += left; left = 0; }
+      if (top < 0) { h += top; top = 0; }
+      setPos({ left, top });
+      setSize({
+        w: Math.max(MIN_W, Math.min(w, window.innerWidth - left)),
+        h: Math.max(MIN_H, Math.min(h, window.innerHeight - top)),
+      });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.classList.remove("branch-dragging");
+      endDrag.current = null;
+    };
+    endDrag.current = up;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
 
   const onHeaderPointerDown = (e: React.PointerEvent) => {
     e.preventDefault();
@@ -117,7 +167,12 @@ export function BranchWindow() {
       // Only meaningful once dragged, and only on desktop — a phone sheet is
       // always full-screen, so a stale pixel position from an earlier desktop
       // drag must never leak into it after a resize.
-      style={desktop && pos ? { left: pos.left, top: pos.top, right: "auto", bottom: "auto" } : undefined}>
+      style={desktop
+        ? {
+            ...(pos ? { left: pos.left, top: pos.top, right: "auto", bottom: "auto" } : {}),
+            ...(size ? { width: size.w, height: size.h } : {}),
+          }
+        : undefined}>
       <div className="branch-win-head" onPointerDown={desktop ? onHeaderPointerDown : undefined}>
         <span className="branch-win-title" id="branch-win-title" title={branchSession.title}>{branchSession.title}</span>
         <span className="branch-win-time">{timeAgo(new Date(branchSession.lastActiveAt).toISOString())}</span>
@@ -143,6 +198,12 @@ export function BranchWindow() {
       {branch.sessionId.startsWith("pending-")
         ? <div className="branch-win-wait" role="status"><span className="spinner" />Creating the branch…</div>
         : <Composer sessionId={branch.sessionId} compact />}
+      {/* One grip per corner, rather than the browser's own `resize`, which only
+          ever draws the south-east one. Sheet mode gets none: a full-screen sheet
+          has no corner to pull. */}
+      {desktop && (["nw", "ne", "sw", "se"] as Corner[]).map((c) => (
+        <div key={c} className={"branch-win-grip " + c} onPointerDown={onCornerPointerDown(c)} aria-hidden="true" />
+      ))}
     </div>
   );
 }

@@ -83,29 +83,53 @@ test("the branch window floats inside the viewport and drags without escaping it
   await expect(card).toBeHidden();
 });
 
-test("the card resizes by its own grip, down to a floor", async ({ page }) => {
+test("the card resizes from any corner, pinning the opposite one", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.addInitScript(SEED_SSE(2));
   await page.goto("about:blank");
   await branch(page);
 
   const card = page.locator(".branch-win");
-  await expect(card).toHaveCSS("resize", "both");
-  const before = (await card.boundingBox())!;
+  await expect(card.locator(".branch-win-grip")).toHaveCount(4);
 
-  // Drag the browser's grip (the card's bottom-right corner) inward. It stops at
-  // the min-width/min-height floor rather than collapsing to a sliver.
-  await page.mouse.move(before.x + before.width - 3, before.y + before.height - 3);
+  // The grips are invisible until the card is hovered, which is the only hint
+  // they exist — a CSS refactor that loses this leaves four secret handles.
+  const bracket = () => page.evaluate(() =>
+    getComputedStyle(document.querySelector(".branch-win-grip.nw")!, "::after").opacity);
+  const box = (await card.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 20);
+  await expect.poll(bracket, { timeout: 2000 }).toBe("1"); // polled: it fades in
+
+  const start = (await card.boundingBox())!;
+
+  // North-west: pulling up and left grows the card while its south-east corner
+  // stays exactly where it was — that pinning is the whole point of a corner.
+  const nw = (await card.locator(".branch-win-grip.nw").boundingBox())!;
+  await page.mouse.move(nw.x + 4, nw.y + 4);
   await page.mouse.down();
-  await page.mouse.move(before.x + 60, before.y + 40, { steps: 10 });
+  await page.mouse.move(nw.x - 120, nw.y - 90, { steps: 10 });
   await page.mouse.up();
 
-  const after = (await card.boundingBox())!;
-  expect(after.width).toBeLessThan(before.width);
-  expect(after.height).toBeLessThan(before.height);
-  expect(after.width).toBeGreaterThanOrEqual(300);
-  expect(after.height).toBeGreaterThanOrEqual(240);
-  // Still usable at that size: the thread and its composer are both there.
+  const grown = (await card.boundingBox())!;
+  expect(grown.width).toBeGreaterThan(start.width);
+  expect(grown.height).toBeGreaterThan(start.height);
+  expect(grown.x + grown.width).toBeCloseTo(start.x + start.width, 0);
+  expect(grown.y + grown.height).toBeCloseTo(start.y + start.height, 0);
+
+  // South-east, inward, past the floor: it stops at the minimum rather than
+  // collapsing, and the north-west corner is the one that holds still.
+  const se = (await card.locator(".branch-win-grip.se").boundingBox())!;
+  await page.mouse.move(se.x + 12, se.y + 12);
+  await page.mouse.down();
+  await page.mouse.move(grown.x + 40, grown.y + 30, { steps: 10 });
+  await page.mouse.up();
+
+  const shrunk = (await card.boundingBox())!;
+  expect(shrunk.width).toBeCloseTo(300, 0);
+  expect(shrunk.height).toBeCloseTo(240, 0);
+  expect(shrunk.x).toBeCloseTo(grown.x, 0);
+  expect(shrunk.y).toBeCloseTo(grown.y, 0);
+  // Still usable at the floor: the thread and its composer are both there.
   await expect(card.locator(".branch-win-body")).toBeVisible();
   await expect(card.locator("footer .cm-editor")).toBeVisible();
 });
@@ -122,8 +146,8 @@ test("on a phone the branch is a full-screen sheet over the thread", async ({ pa
   expect(box.height).toBeCloseTo(844, 0);
   expect(box.x).toBeCloseTo(0, 0);
   expect(box.y).toBeCloseTo(0, 0);
-  // No drag handle and nothing to resize at this width — the sheet is not a
-  // window you move around or reshape, it is the whole screen.
+  // No drag handle and no grips at this width — the sheet is not a window you
+  // move around or reshape, it is the whole screen.
   await expect(page.locator(".branch-win-head")).toHaveCSS("cursor", "auto");
-  await expect(page.locator(".branch-win")).toHaveCSS("resize", "none");
+  await expect(page.locator(".branch-win-grip")).toHaveCount(0);
 });

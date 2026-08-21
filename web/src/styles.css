@@ -2289,9 +2289,29 @@
     padding: 6px 10px calc(8px + env(safe-area-inset-bottom));
   }
   @media (min-width: 860px) {
-    /* Clear the resize grip the desktop rule above turns on: it renders in this
-       corner, which is exactly where the send button and the waiting strip end. */
+    /* Keep the send button and the waiting strip clear of the south-east grip:
+       both end exactly where it sits, and a click meant for send must not start
+       a resize. */
     .branch-win footer, .branch-win-wait { padding-right: 22px; }
+    /* The grips themselves: invisible until the card is hovered, then a faint
+       bracket in each corner. 16px is a comfortable pointer target without
+       eating into the header's own buttons. */
+    .branch-win-grip {
+      position: absolute; width: 16px; height: 16px; z-index: 3; touch-action: none;
+    }
+    .branch-win-grip::after {
+      content: ""; position: absolute; inset: 4px; opacity: 0; transition: opacity .12s;
+      border: 1.5px solid var(--border-strong);
+    }
+    .branch-win:hover .branch-win-grip::after { opacity: 1; }
+    .branch-win-grip.nw { top: 0; left: 0; cursor: nwse-resize; }
+    .branch-win-grip.nw::after { border-right: 0; border-bottom: 0; border-top-left-radius: 3px; }
+    .branch-win-grip.ne { top: 0; right: 0; cursor: nesw-resize; }
+    .branch-win-grip.ne::after { border-left: 0; border-bottom: 0; border-top-right-radius: 3px; }
+    .branch-win-grip.sw { bottom: 0; left: 0; cursor: nesw-resize; }
+    .branch-win-grip.sw::after { border-right: 0; border-top: 0; border-bottom-left-radius: 3px; }
+    .branch-win-grip.se { bottom: 0; right: 0; cursor: nwse-resize; }
+    .branch-win-grip.se::after { border-left: 0; border-top: 0; border-bottom-right-radius: 3px; }
   }
   @media (min-width: 860px) {
     .branch-win {
@@ -2309,11 +2329,11 @@
       bottom: 108px;
       width: 380px; max-width: calc(100vw - 40px);
       height: 480px; max-height: calc(100vh - 140px);
-      /* The browser's own two-axis grip, rather than hand-rolled handles: the
-         card is already overflow:hidden, so `resize` works on it as-is, and the
-         min sizes keep it a readable thread instead of a sliver. The footer's
-         extra right padding below is what keeps the grip off the send button. */
-      resize: both; min-width: 300px; min-height: 240px;
+      /* Resizing is four corner grips (BranchWindow.tsx), not the browser's own
+         `resize` — that one only ever draws the south-east corner. The min sizes
+         are the floor those grips clamp to; they live here as well so the card
+         cannot be born smaller than them. */
+      min-width: 300px; min-height: 240px;
       border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
       animation: pop .14s ease-out;
       padding-top: 0; padding-bottom: 0;
