@@ -1688,7 +1688,12 @@ export const useStore = create<State>((set, get) => {
 
     async sendPromptTo(sessionId, text, images, files) {
       const target = get().sessions[sessionId];
-      if (!target || target.viewOnly || !get().agentReady) return;
+      // A provisional id belongs to a conversation the agent has not created yet
+      // (a branch whose session/fork is still in flight) — prompting it would be
+      // a request about a session that does not exist. The branch window already
+      // shows a waiting strip instead of a composer; this is the belt to that
+      // braces, for any other caller.
+      if (!target || target.viewOnly || sessionId.startsWith("pending-") || !get().agentReady) return;
       if (get().busySessionIds[sessionId]) return;
       const imgs = get().promptCapabilities.image ? (images || []) : [];
       const refs = get().promptCapabilities.embeddedContext ? (files || []) : [];
@@ -1710,54 +1715,88 @@ export const useStore = create<State>((set, get) => {
       // fork would silently drop it, so it is refused rather than half-copied.
       if (!parentId || !parent || parentId.startsWith("pending-")) return;
       if (get().busySessionIds[parentId]) { set({ tip: "Wait for this turn to finish before branching." }); return; }
-      set({ tip: "Branching conversation…" });
+
+      // The window opens NOW, on a provisional id, and the fork round trip
+      // happens behind it. Everything it shows is already in memory (the copy is
+      // the parent's own thread), so waiting on the agent before painting would
+      // be a second of nothing for no reason — the same optimistic-then-remap
+      // move sendPrompt makes for a first message. The window renders its
+      // composer as a waiting strip until the real id lands, because a
+      // provisional session is one the agent cannot be prompted about yet.
+      const provisionalId = PROVISIONAL();
+      set((st) => {
+        // The fork copies the transcript agent-side, but that copy is not on
+        // disk until the branch's first turn — so the window is filled from the
+        // parent's items in memory rather than from the history API. It is a
+        // copy, not a hand-over: the parent stays exactly as it is. Streaming
+        // cursors and the busy flag are reset because a mid-turn parent must not
+        // hand its half-open bubble to the branch, and `historyStart` rides
+        // along untouched: the agent's copy really does have those older
+        // messages, so the affordance is honest once the transcript lands.
+        const source = st.sessions[parentId] ?? parent;
+        const copy: Session = {
+          ...remapSession(source, provisionalId),
+          title: branchTitle(source.title),
+          createdAt: Date.now(), lastActiveAt: Date.now(),
+          working: false, curAssistantId: null, curThoughtId: null,
+          viewOnly: false, suppressReplay: false, loadingOlder: false,
+        };
+        // Where the copy ends and the branch's own turns begin. Without it the
+        // window reads as a conversation that always had this history, and the
+        // one thing the reader needs to know about a branch — that everything
+        // above is shared with its parent, and nothing below is — is invisible.
+        const seq = copy.seq + 1;
+        const marked: Session = {
+          ...copy, seq,
+          items: [...copy.items, {
+            id: copy.id + ":" + seq, kind: "note",
+            text: "· branched from \u201c" + source.title + "\u201d — everything above is copied",
+          }],
+        };
+        return {
+          // Deliberately NOT applyModelsModes anywhere in here: the store's
+          // models/modes lists describe the conversation on screen, and the
+          // fork's own result reports the values it came up at — before the
+          // gateway puts the parent's back. The branch inherits the parent's,
+          // which the copy already carries.
+          sessions: evictExcess({ ...st.sessions, [provisionalId]: marked }, st.activeId, MAX_LIVE_SESSIONS),
+          branch: { parentId, sessionId: provisionalId },
+          tip: "",
+        };
+      });
+
       try {
         const cwd = parent.cwd || get().cwd || "";
         const res = (await acp.request("session/fork", { sessionId: parentId, cwd, mcpServers: [] })) as NewSessionResult;
         if (!res?.sessionId) throw new Error("no session id");
         set((st) => {
-          // The fork copies the transcript agent-side, but that copy is not on
-          // disk until the branch's first turn — so the window is filled from the
-          // parent's items in memory rather than from the history API. It is a
-          // copy, not a hand-over: the parent stays exactly as it is. Streaming
-          // cursors and the busy flag are reset because a mid-turn parent must not
-          // hand its half-open bubble to the branch, and `historyStart` rides
-          // along untouched: the agent's copy really does have those older
-          // messages, so the affordance is honest once the transcript lands.
-          const source = st.sessions[parentId] ?? parent;
-          const copy: Session = {
-            ...remapSession(source, res.sessionId),
-            title: branchTitle(source.title),
-            createdAt: Date.now(), lastActiveAt: Date.now(),
-            working: false, curAssistantId: null, curThoughtId: null,
-            viewOnly: false, suppressReplay: false, loadingOlder: false,
-          };
-          // Where the copy ends and the branch's own turns begin. Without it the
-          // window reads as a conversation that always had this history, and the
-          // one thing the reader needs to know about a branch — that everything
-          // above is shared with its parent, and nothing below is — is invisible.
-          const seq = copy.seq + 1;
-          const marked: Session = {
-            ...copy, seq,
-            items: [...copy.items, {
-              id: copy.id + ":" + seq, kind: "note",
-              text: "· branched from \u201c" + source.title + "\u201d — everything above is copied",
-            }],
-          };
+          // Closed while the fork was in flight (or evicted): the branch exists
+          // agent-side and stays reachable from the sidebar, but nothing here
+          // should reopen a window the user just dismissed.
+          const provisional = st.sessions[provisionalId];
+          if (!provisional) return {};
+          const sessions = { ...st.sessions };
+          delete sessions[provisionalId];
+          sessions[res.sessionId] = remapSession(provisional, res.sessionId);
           return {
-            // Deliberately NOT applyModelsModes: the store's models/modes lists
-            // describe the conversation on screen, and the fork's own result
-            // reports the values it came up at — before the gateway puts the
-            // parent's back. The branch inherits the parent's, which the copy
-            // already carries.
-            sessions: evictExcess({ ...st.sessions, [res.sessionId]: marked }, st.activeId, MAX_LIVE_SESSIONS),
-            branch: { parentId, sessionId: res.sessionId },
+            sessions: evictExcess(sessions, st.activeId, MAX_LIVE_SESSIONS),
+            branch: st.branch?.sessionId === provisionalId ? { parentId, sessionId: res.sessionId } : st.branch,
             tip: "",
           };
         });
         touchSessionActivity(res.sessionId);
       } catch (e) {
-        set({ tip: "Couldn't branch conversation: " + msg(e) });
+        // Take the optimistic window back down with the failure — leaving a
+        // window that can never be prompted would be worse than never opening it.
+        set((st) => {
+          const sessions = { ...st.sessions };
+          delete sessions[provisionalId];
+          return {
+            sessions,
+            branch: st.branch?.sessionId === provisionalId ? null : st.branch,
+            tip: "Couldn't branch conversation: " + msg(e),
+          };
+        });
       }
     },
 

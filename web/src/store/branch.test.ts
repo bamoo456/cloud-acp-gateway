@@ -106,6 +106,54 @@ describe("branch conversation", () => {
     expect(st.sessions["branch-session"].working).toBe(false);
   });
 
+  test("the branch window opens on the copied thread before the fork answers", async () => {
+    const { useStore, ws } = await bootstrap();
+    useStore.getState().sendPrompt("first question");
+    await flush();
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/prompt").id, result: { stopReason: "end_turn" } });
+    await flush();
+
+    const branching = useStore.getState().branchSession();
+    await flush(); // the fork request is out, but unanswered
+
+    const pending = useStore.getState().branch!;
+    expect(pending.parentId).toBe("parent-session");
+    // A provisional id: the window is up, the agent has not answered yet.
+    expect(pending.sessionId.startsWith("pending-")).toBe(true);
+    const shown = useStore.getState().sessions[pending.sessionId];
+    expect(shown.items[0]).toMatchObject({ kind: "user", text: "first question" });
+    expect(shown.title).toBe("first question (Branch)");
+    // Nothing can be sent into it yet, however it is asked.
+    await useStore.getState().sendPromptTo(pending.sessionId, "too early");
+    await flush();
+    expect(lastSent(ws, "session/prompt").params.sessionId).toBe("parent-session");
+
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
+    await branching;
+    await flush();
+
+    // The provisional session is replaced by the real one, thread intact.
+    const st = useStore.getState();
+    expect(st.branch).toEqual({ parentId: "parent-session", sessionId: "branch-session" });
+    expect(st.sessions[pending.sessionId]).toBeUndefined();
+    expect(st.sessions["branch-session"].items[0]).toMatchObject({ kind: "user", text: "first question" });
+  });
+
+  test("closing the window mid-fork keeps the branch but does not reopen it", async () => {
+    const { useStore, ws } = await bootstrap();
+    const branching = useStore.getState().branchSession();
+    await flush();
+    useStore.getState().closeBranch();
+
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
+    await branching;
+    await flush();
+
+    const st = useStore.getState();
+    expect(st.branch).toBeNull();                            // the window stays closed
+    expect(st.sessions["branch-session"]).toBeDefined();     // the conversation is still live
+  });
+
   test("branchSession inherits the parent's model instead of re-reading the fork result", async () => {
     const { useStore, ws } = await bootstrap();
     // The parent is on a non-default model; the gateway puts that back onto the

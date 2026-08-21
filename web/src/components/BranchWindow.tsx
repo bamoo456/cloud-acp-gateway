@@ -132,7 +132,13 @@ export function BranchWindow() {
         <Thread session={branchSession} agentReady={s.agentReady} loading={false}
           findOpen={false} focusFind={0} onCloseFind={() => {}} />
       </main>
-      <Composer sessionId={branch.sessionId} compact />
+      {/* The window opens before the fork answers (store.ts's branchSession),
+          so until the provisional id is swapped for the real one there is no
+          session the agent could be prompted about — say so where the input
+          would be, rather than offering a composer that would fail. */}
+      {branch.sessionId.startsWith("pending-")
+        ? <div className="branch-win-wait" role="status"><span className="spinner" />Creating the branch…</div>
+        : <Composer sessionId={branch.sessionId} compact />}
     </div>
   );
 }
