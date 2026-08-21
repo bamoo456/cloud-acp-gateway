@@ -651,4 +651,64 @@ describe("Composer session busy state", () => {
 
     expect(cancel).toHaveBeenCalledWith("branch-1");
   });
+
+  // The branch button is one click from send and spends a few seconds spawning a
+  // CLI, so it arms before it fires.
+  async function mountWithFork(props: ComposerProps = {}) {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    const branchSession = vi.fn(async () => {});
+    useStore.setState({
+      agentReady: true,
+      agentName: "claude",
+      cfg: { ...useStore.getState().cfg, agents: [{ name: "claude", cwd: "/p", sessionFork: true }] },
+      activeId: "s1",
+      sessions: { s1: makeSession("s1"), b1: makeSession("b1") },
+      branch: null,
+      runningTasks: [],
+      busySessionIds: {},
+      branchSession,
+    } as any);
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, props));
+    });
+    return { branchSession };
+  }
+
+  test("the branch button arms on the first click and only forks on the second", async () => {
+    const { branchSession } = await mountWithFork();
+
+    const btn = container.querySelector<HTMLButtonElement>(".branch-btn")!;
+    expect(btn).not.toBeNull();
+    expect(btn.textContent).toContain("branch");
+    expect(container.querySelector(".branch-hint")).toBeNull();
+
+    await act(async () => { btn.click(); });
+    expect(branchSession).not.toHaveBeenCalled();
+    expect(container.querySelector(".branch-hint")).not.toBeNull();
+    expect(container.querySelector(".branch-btn")!.textContent).toContain("confirm");
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    expect(branchSession).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".branch-hint")).toBeNull();
+  });
+
+  test("an armed branch button gives up on Escape", async () => {
+    const { branchSession } = await mountWithFork();
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    expect(container.querySelector(".branch-hint")).not.toBeNull();
+
+    await act(async () => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    expect(container.querySelector(".branch-hint")).toBeNull();
+    expect(branchSession).not.toHaveBeenCalled();
+  });
+
+  test("a bound instance never offers to branch the conversation behind it", async () => {
+    await mountWithFork({ sessionId: "b1" });
+    expect(container.querySelector(".branch-btn")).toBeNull();
+  });
+
 });

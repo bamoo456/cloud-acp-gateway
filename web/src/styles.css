@@ -1132,6 +1132,17 @@
   .send:active { transform: scale(.96); }
   .send:disabled { background: transparent; color: var(--faint); cursor: default; }
   .send svg { width: 14px; height: 14px; }
+  /* Branch sits next to send and borrows its shape, in the same outline form
+     stop uses: a sibling action, not a second primary one. `armed` is the middle
+     of its two-step confirm — main colour, still an outline, because it is a
+     question rather than a done deal. */
+  .send.ghost { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
+  .send.ghost:hover { background: var(--surface-2); }
+  .send.armed { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .send.armed:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .crow .branch-btn { margin-right: 6px; }
+  .crow .branch-hint { font-family: var(--mono); font-size: 11px; color: var(--muted);
+    padding-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Stop is not a failure and not a fifth colour — it is the same control
      wearing an outline instead of a fill, so it can't be mistaken for send. */
   .send.stop { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
