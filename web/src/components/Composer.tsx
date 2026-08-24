@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from "react";
-import { branchGate, hasCodexSkin, useStore } from "../store/store.ts";
+import { branchGate, hasCodexSkin, useStore, engineOf } from "../store/store.ts";
 import { Menu } from "./Menu.tsx";
 import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconGitBranch } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
@@ -75,11 +75,15 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // Commands filtered by what's been typed after "/". The menu is shown whenever
   // a query is set (open), even if nothing matches, so the "no commands" hint
   // stays visible while the user edits.
-  const cmdItems = cmdQuery === null ? [] : filterCommands(s.commands, cmdQuery);
+  // This conversation's own commands: a bound instance (a floating window) is a
+  // different session, and available_commands_update is per session like every
+  // other engine list (store.ts's engineOf).
+  const commands = engineOf(s, sessionId).commands;
+  const cmdItems = cmdQuery === null ? [] : filterCommands(commands, cmdQuery);
   const cmdMenuOpen = cmdQuery !== null;
   // Codex exposes skills as "$name" commands; only then does a leading "$"
   // open the command menu, so other agents don't pop it on a "$..." message.
-  const hasSkillCommands = s.commands.some((c) => c.name.startsWith("$"));
+  const hasSkillCommands = commands.some((c) => c.name.startsWith("$"));
 
   // dismiss the slash menu on a pointer down outside it (and outside its toggle).
   // The editor keeps it open so typing "/…" doesn't dismiss mid-pick; Esc and

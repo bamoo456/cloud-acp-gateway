@@ -1,6 +1,6 @@
 import type {
-  Session, ThreadItem, ContentBlock, SessionUpdate, NewSessionResult,
-  Model, Mode, ConfigOption, ToolContentItem, MessageImage, MessageFile,
+  Session, SessionEngine, ThreadItem, ContentBlock, SessionUpdate, NewSessionResult,
+  ToolContentItem, MessageImage, MessageFile,
 } from "../types.ts";
 import type { ViewMessage } from "../lib/api.ts";
 import { describeFileUri } from "../lib/mentions.ts";
@@ -13,13 +13,18 @@ const REPLAY_KINDS = new Set([
   "tool_call", "tool_call_update", "plan",
 ]);
 
+// A conversation nobody has asked the agent about yet: no lists, which is what
+// EngineDock and ActionMenu read out as "nothing" rather than as another
+// conversation's model. Shared because every write spreads a new object.
+export const EMPTY_ENGINE: SessionEngine = { models: [], modes: [], commands: [], configOptions: [] };
+
 export function makeSession(
   id: string,
   createdAt = 0,
   opts: { agentName?: string; cwd?: string } = {},
 ): Session {
   return {
-    id, title: "Untitled", createdAt,
+    id, title: "Untitled", createdAt, engine: EMPTY_ENGINE,
     agentName: opts.agentName ?? "",
     cwd: opts.cwd ?? "",
     lastActiveAt: createdAt,
@@ -229,21 +234,25 @@ export function applyUpdate(s: Session, up: SessionUpdate): Session {
   }
 }
 
-export function applyModelsModes(
-  s: Session, res: NewSessionResult,
-): { session: Session; models: Model[] | null; modes: Mode[] | null; configOptions: ConfigOption[] | null } {
+// Fold a session/new | session/load | session/fork result into the session it
+// describes: the current model/mode onto the session, the lists it may pick from
+// into that session's own `engine`. Nothing here is global — a result describes
+// one conversation, and which one is the whole point (see SessionEngine).
+// A result that omits a list leaves the session's existing one alone rather than
+// blanking it: agents report models on session/new and then never again.
+export function applyModelsModes(s: Session, res: NewSessionResult): Session {
   let session = s;
-  let models: Model[] | null = null, modes: Mode[] | null = null;
+  let engine = s.engine;
   if (res.models) {
-    models = res.models.availableModels ?? null;
+    if (res.models.availableModels) engine = { ...engine, models: res.models.availableModels };
     session = { ...session, modelId: res.models.currentModelId ?? session.modelId ?? null };
   }
   if (res.modes) {
-    modes = res.modes.availableModes ?? null;
+    if (res.modes.availableModes) engine = { ...engine, modes: res.modes.availableModes };
     session = { ...session, mode: res.modes.currentModeId ?? session.mode ?? null };
   }
-  const configOptions = res.configOptions ?? null;
-  return { session, models, modes, configOptions };
+  if (res.configOptions) engine = { ...engine, configOptions: res.configOptions };
+  return engine === s.engine ? session : { ...session, engine };
 }
 
 // Render a session's persisted history (from /history/messages) into thread
@@ -288,15 +297,21 @@ export function remapSession(s: Session, newId: string): Session {
 // Cap the live-session map: keep at most `max`, never evicting the active session,
 // dropping the least-recently-active first. Evicted conversations are cold — the
 // store rebuilds them from history on next select.
+// `pinned` are conversations with a floating window on screen (store.ts's
+// `sideWindows`). They have to be exempt too: a pinned window stays open while
+// the reader moves around the main column, so it is idle by construction — which
+// is exactly what least-recently-active picks first, and evicting it would blank
+// a window the reader is looking at.
 export function evictExcess(
   sessions: Record<string, Session>,
   activeId: string | null,
   max: number,
+  pinned: string[] = [],
 ): Record<string, Session> {
   const ids = Object.keys(sessions);
   if (ids.length <= max) return sessions;
   const evictable = ids
-    .filter((id) => id !== activeId)
+    .filter((id) => id !== activeId && !pinned.includes(id))
     .sort((a, b) => sessions[a].lastActiveAt - sessions[b].lastActiveAt);
   const toRemove = ids.length - max;
   const next = { ...sessions };

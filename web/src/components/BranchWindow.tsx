@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore } from "../store/store.ts";
+import { useStore, type SideWindow } from "../store/store.ts";
 import { Thread } from "./Thread.tsx";
 import { Composer } from "./Composer.tsx";
+import { EngineDock } from "./EngineDock.tsx";
 import { IconBack, IconX } from "../lib/icons.tsx";
 import { timeAgo } from "../lib/format.ts";
 import { DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
@@ -17,12 +18,40 @@ type Corner = "nw" | "ne" | "sw" | "se";
 // Floors, matching the stylesheet's min-width/min-height: below this the thread
 // stops being readable and the composer starts wrapping onto itself.
 const MIN_W = 300, MIN_H = 240;
+// How far each cascade slot offsets the default corner, so several open cards
+// don't land exactly on top of each other. The stylesheet owns slot 0.
+const SLOT_STEP = 22;
+// The card stack sits between the side panels (25 as desktop columns, 36 as the
+// mobile overlay) and the popovers and scrims at 40+ — see the .branch-win rule
+// in styles.css. Three cards fit in that gap, which is MAX_SIDE_WINDOWS.
+const Z_BASE = 37;
 
-// The open branch (store.ts's `branch`), floating over its parent's thread. A
-// card on desktop, a full-screen sheet on a phone — never resizable in this
-// version, and its position is memory-only: nothing here is persisted, so a
-// reload (or opening a different branch) always starts at the default corner.
+// The floating conversations (store.ts's `sideWindows`), over whatever thread is
+// in the main column. Cards on desktop, full-screen sheets on a phone — where
+// several stack and only the front-most is visible, which is the right answer for
+// a modal sheet and is why nothing here tries to tab between them.
 export function BranchWindow() {
+  const wins = useStore((s) => s.sideWindows);
+  // Every entry is mounted, including the one that's hidden right now (its own
+  // conversation is the one on screen): a card that unmounted would come back at
+  // the default corner, throwing away wherever the reader dragged it to. Keyed on
+  // the branch's PARENT where there is one, because a branch's own id changes once
+  // — when the provisional id is swapped for what session/fork returns — and
+  // remounting there yanked a window the reader had just dragged. The "b:"/"s:"
+  // prefixes keep a branch of X and a side chat on X from colliding.
+  return (
+    <>
+      {wins.map((w, i) => (
+        <BranchCard key={w.parentId ? "b:" + w.parentId : "s:" + w.sessionId} win={w} depth={i} />
+      ))}
+    </>
+  );
+}
+
+// One card. Its own component so its drag position, size and desktop/sheet mode
+// are its own state — the container re-renders on every raise, and shared state
+// would mean one card's drag moving all of them.
+function BranchCard({ win, depth }: { win: SideWindow; depth: number }) {
   const s = useStore();
 
   // Desktop vs phone is a fork this component has to know about, not just the
@@ -39,49 +68,45 @@ export function BranchWindow() {
     return () => mq.removeEventListener("change", sync);
   }, []);
 
-  // Renders nothing unless the branch is open, its parent is the active
-  // conversation (the window follows its parent — see store.ts's `branch` doc
-  // comment), and the live session behind it hasn't been evicted. Derived up
-  // here, not at the early return, because the Escape listener below has to know
-  // whether the window is actually on screen.
-  const branch = s.branch;
-  const branchSession = branch ? s.sessions[branch.sessionId] : undefined;
-  const open = !!branch && s.activeId === branch.parentId && !!branchSession;
+  // Hidden, not closed, while its own conversation is the one in the main column:
+  // the same thread twice reads as a duplicate, and switching away brings the
+  // window back exactly as it was. Also hidden when the live session behind it has
+  // been evicted, which leaves it nothing to render. Derived up here, not at the
+  // early return, because the Escape listener below has to know whether the window
+  // is actually on screen.
+  const session = s.sessions[win.sessionId];
+  const open = !!session && s.activeId !== win.sessionId;
 
   const cardRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<DragPos | null>(null);
   const [size, setSize] = useState<CardSize | null>(null);
   // Ends a drag in progress. Held in a ref so unmounting mid-drag (closing the
-  // branch with the pointer still down) can run it: the listeners live on
+  // window with the pointer still down) can run it: the listeners live on
   // `window` and the grab cursor on <body>, so neither goes away with the card,
   // and a stranded `branch-dragging` leaves the whole page unselectable.
   const endDrag = useRef<(() => void) | null>(null);
   useEffect(() => () => endDrag.current?.(), []);
-  // This component is always mounted (App.tsx) and hides by rendering null, so
-  // a dragged position would otherwise survive forever — branch B would open
-  // wherever branch A was last left. Keyed on the PARENT, not on the branch's
-  // own id: that id changes once, when the optimistic provisional id is swapped
-  // for the one session/fork returns, and resetting there yanked a window the
-  // reader had already dragged back to the default corner mid-gesture. The
-  // parent is what identifies the window for its whole life. Hiding and showing
-  // the same branch (switching away from its parent and back) leaves it
-  // unchanged too, so a dragged position survives that as intended.
-  const branchParentId = s.branch?.parentId;
-  useEffect(() => { setPos(null); setSize(null); }, [branchParentId]);
 
-  // Escape closes it, as a dialog should. On the document rather than the card
-  // (the way ActionMenu does it) because the focus is usually somewhere else
-  // entirely — in the parent thread, or nowhere at all right after a drag — and a
-  // handler on the card would never see the key. `defaultPrevented` is the
-  // handoff: the branch's own composer consumes Escape to dismiss its slash/file
-  // menu (Composer's onEscape returns true, which preventDefaults), so the window
-  // only takes the key nobody else wanted.
+  // Escape closes the front-most window, as a dialog should. On the document
+  // rather than the card (the way ActionMenu does it) because the focus is usually
+  // somewhere else entirely — in the main thread, or nowhere at all right after a
+  // drag — and a handler on the card would never see the key. `defaultPrevented`
+  // is the handoff: the window's own composer consumes Escape to dismiss its
+  // slash/file menu (Composer's onEscape returns true, which preventDefaults), so
+  // it only takes the key nobody else wanted. Every mounted card listens, and each
+  // ignores the key unless it is the last one on screen — that one is the card the
+  // reader means.
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) useStore.getState().closeBranch(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const st = useStore.getState();
+      const front = st.sideWindows.filter((w) => st.sessions[w.sessionId] && st.activeId !== w.sessionId).at(-1);
+      if (front?.sessionId === win.sessionId) st.closeSideWindow(win.sessionId);
+    };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [open, win.sessionId]);
 
   // Pull a corner. Every corner is the same arithmetic once the card is switched
   // to left/top anchoring on pointerdown: the two edges the corner does NOT touch
@@ -160,24 +185,41 @@ export function BranchWindow() {
     window.addEventListener("pointerup", up);
   };
 
-  if (!open || !branch || !branchSession) return null;
+  if (!open || !session) return null;
+
+  // Cascade the default corner by the card's slot so two windows opened back to
+  // back are both grabbable, and shorten the height cap by the same step so the
+  // offset can't push a full-height card off the top of the screen. Dropped the
+  // moment the card is dragged: from then on it is pixel-tracked. `depth` is the
+  // card's place in the list, which is the z-order — raising one is a reorder, so
+  // this has to come from the list rather than from the slot.
+  const style = desktop
+    ? {
+        zIndex: Z_BASE + depth,
+        ...(pos
+          ? { left: pos.left, top: pos.top, right: "auto" as const, bottom: "auto" as const }
+          : {
+              right: 20 + win.slot * SLOT_STEP,
+              bottom: 108 + win.slot * SLOT_STEP,
+              maxHeight: `calc(100vh - ${140 + win.slot * SLOT_STEP}px)`,
+            }),
+        ...(size ? { width: size.w, height: size.h } : {}),
+      }
+    : { zIndex: Z_BASE + depth };
 
   return (
-    <div ref={cardRef} className="branch-win" role="dialog" aria-labelledby="branch-win-title"
-      // Only meaningful once dragged, and only on desktop — a phone sheet is
-      // always full-screen, so a stale pixel position from an earlier desktop
-      // drag must never leak into it after a resize.
-      style={desktop
-        ? {
-            ...(pos ? { left: pos.left, top: pos.top, right: "auto", bottom: "auto" } : {}),
-            ...(size ? { width: size.w, height: size.h } : {}),
-          }
-        : undefined}>
+    <div ref={cardRef} className="branch-win" role="dialog" aria-labelledby={"branch-win-title-" + win.sessionId}
+      // Whatever is being touched belongs on top — cascaded cards overlap by
+      // design. Capture, so it fires before the header's own drag handler and
+      // before the composer swallows the event.
+      onPointerDownCapture={() => s.raiseSideWindow(win.sessionId)}
+      style={style}>
       <div className="branch-win-head" onPointerDown={desktop ? onHeaderPointerDown : undefined}>
-        <span className="branch-win-title" id="branch-win-title" title={branchSession.title}>{branchSession.title}</span>
-        <span className="branch-win-time">{timeAgo(new Date(branchSession.lastActiveAt).toISOString())}</span>
+        <span className="branch-win-title" id={"branch-win-title-" + win.sessionId} title={session.title}>{session.title}</span>
+        <span className="branch-win-time">{timeAgo(new Date(session.lastActiveAt).toISOString())}</span>
         <button type="button" className="icon-btn" onPointerDown={(e) => e.stopPropagation()}
-          aria-label={desktop ? "Close branch" : "Back to the parent conversation"} onClick={() => s.closeBranch()}>
+          aria-label={desktop ? "Close this conversation's window" : "Back to the main conversation"}
+          onClick={() => s.closeSideWindow(win.sessionId)}>
           {desktop ? <IconX /> : <IconBack />}
         </button>
       </div>
@@ -188,16 +230,24 @@ export function BranchWindow() {
           App's own <main> is the page's one main region, and a second one would
           make "jump to main content" ambiguous. */}
       <main className="branch-win-body" role="group">
-        <Thread session={branchSession} agentReady={s.agentReady} loading={false}
+        <Thread session={session} agentReady={s.agentReady} loading={false}
           findOpen={false} focusFind={0} onCloseFind={() => {}} />
       </main>
       {/* The window opens before the fork answers (store.ts's branchSession),
           so until the provisional id is swapped for the real one there is no
           session the agent could be prompted about — say so where the input
           would be, rather than offering a composer that would fail. */}
-      {branch.sessionId.startsWith("pending-")
+      {win.sessionId.startsWith("pending-")
         ? <div className="branch-win-wait" role="status"><span className="spinner" />Creating the branch…</div>
-        : <Composer sessionId={branch.sessionId} compact />}
+        : (
+          <>
+            {/* This conversation's own engine readout and pickers, bound to it —
+                a side chat runs on its own model and mode, and without a dock of
+                its own the card could only be read, never re-aimed. */}
+            <EngineDock sessionId={win.sessionId} />
+            <Composer sessionId={win.sessionId} compact />
+          </>
+        )}
       {/* One grip per corner, rather than the browser's own `resize`, which only
           ever draws the south-east one. Sheet mode gets none: a full-screen sheet
           has no corner to pull. */}

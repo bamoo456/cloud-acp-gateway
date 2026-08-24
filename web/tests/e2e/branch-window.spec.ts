@@ -134,6 +134,36 @@ test("the card resizes from any corner, pinning the opposite one", async ({ page
   await expect(card.locator("footer .cm-editor")).toBeVisible();
 });
 
+test("the card carries its own engine dock, and its menu opens inside the card", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.addInitScript(SEED_SSE(2));
+  await page.goto("about:blank");
+  await branch(page);
+
+  const card = page.locator(".branch-win");
+  const dock = card.locator(".dock");
+  // The window's own readout, on the values the fork reported for it.
+  await expect(dock.locator(".mchip .am").last()).toHaveText("Default (recommended)");
+
+  const box = (await card.boundingBox())!;
+  // The dock sits inside the card, not spilling out of it — the page dock centres
+  // itself in a 784px column, which a ~380px card has no room for.
+  const dockBox = (await dock.boundingBox())!;
+  expect(dockBox.x).toBeGreaterThanOrEqual(box.x);
+  expect(dockBox.x + dockBox.width).toBeLessThanOrEqual(box.x + box.width + 1);
+
+  // The menu is absolutely positioned in the dock and the card clips its overflow,
+  // so an uncapped menu is silently cut off instead of scrolled.
+  await dock.locator(".mchip").last().click();
+  const menu = card.locator(".engine-menu");
+  await expect(menu).toBeVisible();
+  const mb = (await menu.boundingBox())!;
+  expect(mb.y).toBeGreaterThanOrEqual(box.y);
+  expect(mb.y + mb.height).toBeLessThanOrEqual(box.y + box.height + 1);
+  expect(mb.x + mb.width).toBeLessThanOrEqual(box.x + box.width + 1);
+  await expect(menu.locator(".arow", { hasText: "Default (recommended)" })).toBeVisible();
+});
+
 test("on a phone the branch is a full-screen sheet over the thread", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));

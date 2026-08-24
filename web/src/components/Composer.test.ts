@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
+import { EMPTY_ENGINE, makeSession } from "../store/reducers.ts";
 import { EditorView } from "@codemirror/view";
 
 // The composer input is a CodeMirror editor; reach its view to simulate edits.
@@ -333,13 +334,15 @@ describe("Composer session busy state", () => {
     const { Composer } = await import("./Composer.tsx");
     const { useStore } = await import("../store/store.ts");
 
-    useStore.setState({
-      agentReady: true,
-      commands: [
+    // Commands belong to the conversation (types.ts's SessionEngine), so they go
+    // on the active session rather than on a store-global.
+    useStore.setState(() => ({
+      agentReady: true, activeId: "s1",
+      sessions: { s1: { ...makeSession("s1"), engine: { ...EMPTY_ENGINE, commands: [
         { name: "init", description: "Initialize" },
         { name: "review", description: "Review a PR" },
-      ],
-    } as any);
+      ] } } },
+    }) as any);
 
     await act(async () => {
       root = createRoot(container);
@@ -361,14 +364,16 @@ describe("Composer session busy state", () => {
     const { Composer } = await import("./Composer.tsx");
     const { useStore } = await import("../store/store.ts");
 
-    useStore.setState({
-      agentReady: true,
-      commands: [
+    // Commands belong to the conversation (types.ts's SessionEngine), so they go
+    // on the active session rather than on a store-global.
+    useStore.setState(() => ({
+      agentReady: true, activeId: "s1",
+      sessions: { s1: { ...makeSession("s1"), engine: { ...EMPTY_ENGINE, commands: [
         { name: "init", description: "Initialize" },
         { name: "review", description: "Review a PR" },
         { name: "security-review", description: "Security review" },
-      ],
-    } as any);
+      ] } } },
+    }) as any);
 
     await act(async () => {
       root = createRoot(container);
@@ -389,13 +394,15 @@ describe("Composer session busy state", () => {
     const { Composer } = await import("./Composer.tsx");
     const { useStore } = await import("../store/store.ts");
 
-    useStore.setState({
-      agentReady: true,
-      commands: [
+    // Commands belong to the conversation (types.ts's SessionEngine), so they go
+    // on the active session rather than on a store-global.
+    useStore.setState(() => ({
+      agentReady: true, activeId: "s1",
+      sessions: { s1: { ...makeSession("s1"), engine: { ...EMPTY_ENGINE, commands: [
         { name: "skills", description: "List available skills." },
         { name: "$deep-research", description: "Run deep research." },
-      ],
-    } as any);
+      ] } } },
+    }) as any);
 
     await act(async () => {
       root = createRoot(container);
@@ -415,14 +422,16 @@ describe("Composer session busy state", () => {
     const { Composer } = await import("./Composer.tsx");
     const { useStore } = await import("../store/store.ts");
 
-    useStore.setState({
-      agentReady: true,
-      commands: [
+    // Commands belong to the conversation (types.ts's SessionEngine), so they go
+    // on the active session rather than on a store-global.
+    useStore.setState(() => ({
+      agentReady: true, activeId: "s1",
+      sessions: { s1: { ...makeSession("s1"), engine: { ...EMPTY_ENGINE, commands: [
         { name: "status", description: "Session status." },
         { name: "$deep-research", description: "Run deep research." },
         { name: "$review", description: "Review a change." },
-      ],
-    } as any);
+      ] } } },
+    }) as any);
 
     await act(async () => {
       root = createRoot(container);
@@ -669,7 +678,7 @@ describe("Composer session busy state", () => {
       cfg: { ...useStore.getState().cfg, agents: [{ name: "claude", cwd: "/p", sessionFork: true }] },
       activeId: "s1",
       sessions: { s1: makeSession("s1"), b1: makeSession("b1") },
-      branch: null,
+      sideWindows: [],
       runningTasks: [],
       busySessionIds: {},
       branchSession,
