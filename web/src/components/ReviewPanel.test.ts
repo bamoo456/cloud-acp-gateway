@@ -221,6 +221,28 @@ describe("ReviewPanel", () => {
     await click(chip("Branch"));
     expect(container.textContent).toContain("git doesn't know");
     expect(container.textContent).toContain("origin/main");
+    // The regression: a failed diff also rendered "nothing changed" underneath,
+    // flatly contradicting the line above it.
+    expect(container.textContent).not.toContain("Nothing changed here");
+  });
+
+  test("a base with no common ancestor points at the fetch depth, not the ref", async () => {
+    getWorkspaceChanges.mockResolvedValue({ repo: "/repo", files: [], truncated: false, reason: "no-merge-base" });
+    await render();
+    await click(chip("Branch"));
+    expect(container.textContent).toContain("too shallow");
+    expect(container.textContent).toContain("git fetch --unshallow");
+    expect(container.textContent).not.toContain("never have been fetched");
+    expect(container.textContent).not.toContain("Nothing changed here");
+  });
+
+  test("a diff git couldn't run at all isn't reported as a clean worktree", async () => {
+    // changes() returns repo: root with reason "status-failed" — non-null repo
+    // and no files, which used to land in the "nothing uncommitted" branch.
+    getWorkspaceChanges.mockResolvedValue({ repo: "/repo", files: [], truncated: false, reason: "status-failed" });
+    await render();
+    expect(container.textContent).toContain("git couldn't read");
+    expect(container.textContent).not.toContain("Nothing uncommitted");
   });
 });
 

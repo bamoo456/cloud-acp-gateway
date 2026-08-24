@@ -317,25 +317,8 @@ export function ReviewPanel({ cwd, onCount, split, onDetail }: {
           <>
             {err && <div className="wf-empty">{err}</div>}
             {!err && loading && <div className="wf-empty">Reading changes…</div>}
-            {!err && !loading && changes?.reason === "bad-revision" && (
-              <div className="wf-empty">
-                git doesn't know <code>{spec?.base ?? spec?.commit}</code> in this checkout — it may
-                never have been fetched.
-              </div>
-            )}
-            {!err && !loading && changes?.repo === null && (
-              <div className="wf-empty">
-                {changes.reason === "git-missing"
-                  ? "git isn't installed on the gateway host, so there's nothing to review here."
-                  : "This folder isn't a git checkout, so there's nothing to review here."}
-              </div>
-            )}
-            {!err && !loading && changes?.repo && files.length === 0 && (
-              <div className="wf-empty">
-                {scope === "working"
-                  ? "Nothing uncommitted in this checkout."
-                  : "Nothing changed here — this revision is already in its base."}
-              </div>
+            {!err && !loading && changes && (
+              <EmptyState changes={changes} scope={scope} ref_={spec?.base ?? spec?.commit} />
             )}
             {files.length > 0 && <StatLine files={files} truncated={!!changes?.truncated} />}
             {files.map((f) => (
@@ -380,6 +363,41 @@ export function ReviewPanel({ cwd, onCount, split, onDetail }: {
       {detail && <div className="wf-view">{detail}</div>}
     </>
   );
+}
+
+// Exactly one empty state, ever. These used to be three independent `&&`
+// blocks, which meant a failed diff (repo non-null, no files, reason set)
+// rendered its own message *and* "nothing changed here" underneath it — the
+// second one flatly contradicting the first. Diagnosis order: couldn't run
+// git, not a checkout, git refused this revision, git failed some other way,
+// and only then a genuinely empty diff.
+function EmptyState({ changes, scope, ref_ }: {
+  changes: ChangesResult; scope: Scope; ref_?: string;
+}) {
+  const msg = (): React.ReactNode => {
+    if (changes.reason === "git-missing")
+      return "git isn't installed on the gateway host, so there's nothing to review here.";
+    if (changes.repo === null)
+      return "This folder isn't a git checkout, so there's nothing to review here.";
+    if (changes.reason === "no-merge-base")
+      return <>
+        This checkout's history is too shallow to share a common ancestor with <code>{ref_}</code>.
+        Deepen the fetch (<code>git fetch --unshallow</code>) to compare against it.
+      </>;
+    if (changes.reason === "bad-revision")
+      return <>
+        git doesn't know <code>{ref_}</code> in this checkout — it may never have been fetched.
+      </>;
+    // status-failed, and whatever else git might refuse later: still better
+    // than reporting a diff that never ran as an empty one.
+    if (changes.reason) return "git couldn't read this checkout's changes.";
+    if (changes.files.length > 0) return null;
+    return scope === "working"
+      ? "Nothing uncommitted in this checkout."
+      : "Nothing changed here — this revision is already in its base.";
+  };
+  const m = msg();
+  return m === null ? null : <div className="wf-empty">{m}</div>;
 }
 
 function StatLine({ files, truncated }: { files: ChangedFile[]; truncated: boolean }) {
