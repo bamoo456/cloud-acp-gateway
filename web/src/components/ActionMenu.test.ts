@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Simulate } from "react-dom/test-utils";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
+import type { SessionEngine } from "../types.ts";
 
 describe("ActionMenu config options", () => {
   let root: Root | null = null;
@@ -35,7 +36,8 @@ describe("ActionMenu config options", () => {
     const { ActionMenu } = await import("./ActionMenu.tsx");
     const { useStore } = await import("../store/store.ts");
     useStore.setState({
-      agentName: "codex",
+      agentName: "codex", activeId: "live-codex",
+      sessions: liveSession("live-codex", "Live Codex", {
       models: [{ modelId: "legacy-model", name: "Legacy Model" }],
       modes: [{ id: "legacy-mode", name: "Legacy Mode" }],
       configOptions: [
@@ -64,6 +66,7 @@ describe("ActionMenu config options", () => {
           options: [{ value: "xhigh", name: "Xhigh" }],
         },
       ],
+      }) as never,
     });
     root = createRoot(container);
     act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
@@ -87,10 +90,11 @@ describe("ActionMenu config options", () => {
     const { ActionMenu } = await import("./ActionMenu.tsx");
     const { useStore } = await import("../store/store.ts");
     useStore.setState({
-      agentName: "claude",
-      configOptions: [],
-      models: [{ modelId: "sonnet", name: "Claude Sonnet" }],
-      modes: [{ id: "default", name: "Default" }],
+      agentName: "claude", activeId: "live-codex",
+      sessions: liveSession("live-codex", "Live Codex", {
+        models: [{ modelId: "sonnet", name: "Claude Sonnet" }],
+        modes: [{ id: "default", name: "Default" }],
+      }) as never,
     });
     root = createRoot(container);
     act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
@@ -107,7 +111,10 @@ describe("ActionMenu config options", () => {
     expect(rowNames).not.toContain("New chat");
   });
 
-  const liveSession = (id: string, title: string) => ({
+  // The engine lists belong to the conversation now (types.ts's SessionEngine),
+  // so a test that wants a model/mode/option list gives it to the session rather
+  // than to the store.
+  const liveSession = (id: string, title: string, engine: Partial<SessionEngine> = {}) => ({
     [id]: {
       id,
       title,
@@ -123,6 +130,7 @@ describe("ActionMenu config options", () => {
       curThoughtId: null,
       toolItemId: {},
       planItemId: null, historyStart: 0, loadingOlder: false,
+      engine: { models: [], modes: [], commands: [], configOptions: [], ...engine },
     },
   });
 
@@ -133,9 +141,9 @@ describe("ActionMenu config options", () => {
       id: "agent", name: "Agent", type: "select" as const, category: "agent",
       currentValue: "default", options: [{ value: "default", name: "Default" }],
     };
-    const sessions = liveSession("saved", "Saved");
+    const sessions = liveSession("saved", "Saved", { configOptions: [AGENT_OPT] });
     useStore.setState({
-      agentName: "codex", cwd: "/p", activeId: "saved", configOptions: [AGENT_OPT],
+      agentName: "codex", cwd: "/p", activeId: "saved",
       sessions: { saved: { ...sessions.saved, viewOnly: true } } as never,
     });
     root = createRoot(container);
@@ -146,7 +154,7 @@ describe("ActionMenu config options", () => {
     // fails with "Session not found".
     expect(menuRows()).not.toContain("Agent");
 
-    act(() => { useStore.setState({ sessions }); });
+    act(() => { useStore.setState({ sessions: sessions as never }); });
     expect(menuRows()).toContain("Agent");
   });
 
@@ -166,7 +174,7 @@ describe("ActionMenu config options", () => {
     vi.doMock("../lib/clipboard.ts", () => ({ copyText }));
     const { ActionMenu } = await import("./ActionMenu.tsx");
     const { useStore } = await import("../store/store.ts");
-    useStore.setState({ agentName: "codex", cwd: "/p", activeId: "live-codex", sessions: liveSession("live-codex", "Live Codex") });
+    useStore.setState({ agentName: "codex", cwd: "/p", activeId: "live-codex", sessions: liveSession("live-codex", "Live Codex") as never });
     root = createRoot(container);
     act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
 
@@ -236,7 +244,7 @@ describe("ActionMenu config options", () => {
     const deleteSession = vi.fn(async () => {});
     useStore.setState({
       agentName: "codex", cwd: "/p", activeId: "live-codex",
-      sessions: liveSession("live-codex", "Live Codex"),
+      sessions: liveSession("live-codex", "Live Codex") as never,
       runningTasks: [], deleteSession,
     });
     root = createRoot(container);
@@ -270,7 +278,7 @@ describe("ActionMenu config options", () => {
     });
     const { ActionMenu } = await import("./ActionMenu.tsx");
     const { useStore } = await import("../store/store.ts");
-    useStore.setState({ agentName: "ephemeral", activeId: "live-eph", sessions: liveSession("live-eph", "Live") });
+    useStore.setState({ agentName: "ephemeral", activeId: "live-eph", sessions: liveSession("live-eph", "Live") as never });
     root = createRoot(container);
     act(() => root!.render(React.createElement(ActionMenu, { open: true, onClose: () => {} })));
 

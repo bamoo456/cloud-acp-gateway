@@ -1,5 +1,6 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { FakeSse, installFakeSse, setHistoryFetch, setPrefs, historyCalls } from "../test/fakeSse.ts";
+import { engineOf } from "./store.ts";
 
 // Drain microtasks plus one macrotask turn — the SSE transport's fetch→stream→parser
 // chain crosses several awaits before a pushed frame reaches the store.
@@ -1657,11 +1658,13 @@ describe("store notification routing", () => {
   });
 
   test("switching agents and back keeps the re-activated conversation's engine readout", async () => {
-    // Regression: setAgent clears the agent-scoped engine lists, and the switch-back
-    // re-activates the live conversation through activateLive — a pointer swap that
-    // issues no session/new or session/load, so nothing ever refilled them. The dock
-    // then fell back to the bare agent name permanently: replying to a live session
-    // goes straight to session/prompt, which carries no engine state either.
+    // Regression: the engine lists used to be store-global, and setAgent cleared
+    // them — the switch-back re-activates the live conversation through activateLive,
+    // a pointer swap that issues no session/new or session/load, so nothing ever
+    // refilled them and the dock fell back to the bare agent name permanently.
+    // They belong to the session now (SessionEngine), so they come back with it —
+    // no stash, and no way for them to describe a conversation other than the one
+    // they are read off (engineOf).
     document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
       token: "test-token",
       defaultAgent: "claude",
@@ -1686,7 +1689,7 @@ describe("store notification routing", () => {
     // Only a session with content is remembered across a switch.
     ws.recv({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "claude-session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } } } });
     await flush();
-    expect(useStore.getState().configOptions).toHaveLength(1);
+    expect(engineOf(useStore.getState()).configOptions).toHaveLength(1);
 
     useStore.getState().setAgent("codex");
     const ws2 = FakeSse.instances[1];
@@ -1695,8 +1698,11 @@ describe("store notification routing", () => {
     const init2 = JSON.parse(ws2.sent[0]);
     ws2.recv({ jsonrpc: "2.0", id: init2.id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } });
     await flush();
-    // The switch itself must still blank them — they describe a claude session.
-    expect(useStore.getState().configOptions).toEqual([]);
+    // The switch keeps the claude conversation on screen until codex's own session
+    // lands, and the readout follows the conversation — so it still reads that
+    // session's values rather than blanking (it used to blank, then need a stash to
+    // get them back).
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("opus");
     // Codex opens its own session and reports its own engine, so the switch back is
     // a genuine re-activation (activeId is a foreign-agent session on the way in).
     const codexNew = JSON.parse(ws2.sent[1]);
@@ -1706,6 +1712,8 @@ describe("store notification routing", () => {
     } });
     await flush();
     expect(useStore.getState().activeId).toBe("codex-session");
+    // Now the conversation on screen IS codex's, and the readout is its own.
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("gpt");
 
     useStore.getState().setAgent("claude");
     const ws3 = FakeSse.instances[2];
@@ -1716,8 +1724,8 @@ describe("store notification routing", () => {
     await flushHistory();
 
     expect(useStore.getState().activeId).toBe("claude-session");
-    expect(useStore.getState().configOptions[0]?.currentValue).toBe("opus");
-    expect(useStore.getState().models[0]?.name).toBe("Opus (1M context)");
+    expect(engineOf(useStore.getState()).configOptions[0]?.currentValue).toBe("opus");
+    expect(engineOf(useStore.getState()).models[0]?.name).toBe("Opus (1M context)");
   });
 
   test("setAgent keeps a background session's outstanding permission as the durable source", async () => {

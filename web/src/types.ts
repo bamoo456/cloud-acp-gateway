@@ -189,6 +189,19 @@ export interface PendingPermission {
   elicitation?: { message: string; fields: ElicitationField[] };
 }
 
+// What ONE conversation's engine pickers offer and read out: the lists the agent
+// reported for it (session/new, session/load, session/fork, and its own
+// config_option_update / available_commands_update frames). Per session because
+// every one of these is per session — two live conversations can sit on different
+// models, and a frame for one must never relabel another. Read through
+// store.ts's engineOf(), never off a global.
+export interface SessionEngine {
+  models: Model[];
+  modes: Mode[];
+  commands: SlashCommand[];
+  configOptions: ConfigOption[];
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -201,6 +214,10 @@ export interface Session {
   working: boolean;
   modelId?: string | null;
   mode?: string | null;
+  // The engine lists for this conversation (see SessionEngine). Empty until a
+  // session call reports them — which is also what an unresumed saved
+  // conversation reads out: nothing, rather than another session's model.
+  engine: SessionEngine;
   // Context-window occupancy from the latest usage_update. Absent until the
   // agent sends one, which it only does once a turn has produced tokens.
   contextUsed?: number;

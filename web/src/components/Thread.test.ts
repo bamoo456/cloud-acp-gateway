@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import type { Session } from "../types";
+import { EMPTY_ENGINE } from "../store/reducers.ts";
 
 describe("Thread empty state agent icon", () => {
   let root: Root | null = null;
@@ -61,7 +62,7 @@ describe("Thread empty state agent icon", () => {
     const session: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: false,
-      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1, historyStart: 0, loadingOlder: false,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, engine: EMPTY_ENGINE, seq: 1, historyStart: 0, loadingOlder: false,
       items: [{ id: "m1", kind: "assistant", text: "hello" }],
     };
 
@@ -114,7 +115,7 @@ describe("Thread empty state agent icon", () => {
     const session: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: false,
-      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1, historyStart: 0, loadingOlder: false,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, engine: EMPTY_ENGINE, seq: 1, historyStart: 0, loadingOlder: false,
       items: [{ id: "m1", kind: "assistant", text: "hello" }],
     };
 
@@ -161,7 +162,7 @@ describe("Thread empty state agent icon", () => {
     const base: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: false,
-      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1, historyStart: 0, loadingOlder: false,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, engine: EMPTY_ENGINE, seq: 1, historyStart: 0, loadingOlder: false,
       items: [{ id: "m1", kind: "assistant", text: "hello" }],
     };
 
@@ -219,7 +220,7 @@ describe("Thread empty state agent icon", () => {
     const base: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: true,
-      curAssistantId: null, curThoughtId: null, toolItemId: { c1: "t1" }, planItemId: null, seq: 1, historyStart: 0, loadingOlder: false,
+      curAssistantId: null, curThoughtId: null, toolItemId: { c1: "t1" }, planItemId: null, engine: EMPTY_ENGINE, seq: 1, historyStart: 0, loadingOlder: false,
       items: [
         { id: "m1", kind: "assistant", text: "hello" },
         { id: "t1", kind: "tool", toolCallId: "c1", title: "Read", toolKind: "read", status: "pending", locations: [], content: [] },
@@ -380,7 +381,7 @@ describe("Thread turn grouping", () => {
   const session = (items: Session["items"]): Session => ({
     id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
     hasContent: true, working: false,
-    curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null,
+    curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, engine: EMPTY_ENGINE,
     seq: 1, historyStart: 0, loadingOlder: false, items,
   });
 
@@ -526,7 +527,7 @@ describe("Thread find-in-conversation", () => {
   const longSession = (): Session => ({
     id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
     hasContent: true, working: false,
-    curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+    curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, engine: EMPTY_ENGINE, seq: 1,
     historyStart: 0, loadingOlder: false,
     items: [
       { id: "old-q", kind: "user", text: "how do we handle the zzyzx token?" },
@@ -644,7 +645,7 @@ describe("Thread find beyond the fetched history", () => {
     const session: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: false,
-      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, engine: EMPTY_ENGINE, seq: 1,
       historyStart: 10, loadingOlder: false,
       items: [{ id: "m1", kind: "assistant", text: "the zzyzx token" }],
     };
@@ -700,7 +701,7 @@ describe("Thread find beyond the fetched history", () => {
     const session: Session = {
       id: "S", title: "t", createdAt: 0, agentName: "claude", cwd: "/tmp", lastActiveAt: 0,
       hasContent: true, working: false,
-      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, seq: 1,
+      curAssistantId: null, curThoughtId: null, toolItemId: {}, planItemId: null, engine: EMPTY_ENGINE, seq: 1,
       historyStart: 150, loadingOlder: false,
       items: [{ id: "m1", kind: "assistant", text: "the zzyzx token" }],
     };
