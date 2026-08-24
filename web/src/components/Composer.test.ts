@@ -669,7 +669,7 @@ describe("Composer session busy state", () => {
       cfg: { ...useStore.getState().cfg, agents: [{ name: "claude", cwd: "/p", sessionFork: true }] },
       activeId: "s1",
       sessions: { s1: makeSession("s1"), b1: makeSession("b1") },
-      branch: null,
+      sideWindows: [],
       runningTasks: [],
       busySessionIds: {},
       branchSession,

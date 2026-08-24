@@ -93,7 +93,7 @@ describe("side chat", () => {
     await flushHistory();
 
     const st = useStore.getState();
-    expect(st.branch).toEqual({ parentId: "open-session", sessionId: "side-session" });
+    expect(st.sideWindows).toEqual([{ parentId: null, sessionId: "side-session", slot: 0 }]);
     expect(st.activeId).toBe("open-session");
     expect(st.cwd).toBe("/repo");
     expect(st.sessions["side-session"].items[0]).toMatchObject({ kind: "user", text: "what the side chat said" });
@@ -141,7 +141,7 @@ describe("side chat", () => {
 
     const st = useStore.getState();
     expect(st.sessions["side-session"]).toBeUndefined();
-    expect(st.branch).toBeNull();
+    expect(st.sideWindows).toEqual([]);
     expect(st.activeId).toBe("open-session");
     expect(st.tip).toMatch(/Couldn't open side chat/);
   });
@@ -155,7 +155,100 @@ describe("side chat", () => {
 
     expect(lastSent(ws, "session/load")).toBeUndefined();
     expect(ws.sent.length).toBe(before);
-    expect(useStore.getState().branch).toBeNull();
+    expect(useStore.getState().sideWindows).toEqual([]);
+  });
+
+  // Open one side chat end to end: the request out, the load answered, the
+  // history filled in behind it.
+  async function open(useStore: any, ws: FakeSse, sessionId: string) {
+    const opening = useStore.getState().openSideChat({ ...ROW, sessionId });
+    await flush();
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/load").id, result: {} });
+    await opening;
+    await flushHistory();
+  }
+
+  test("several side chats can be open at once, each in its own default slot", async () => {
+    const { useStore, ws } = await bootstrap();
+    await open(useStore, ws, "side-a");
+    await open(useStore, ws, "side-b");
+
+    // Both windows, both live, both promptable — and the slots differ so the
+    // cards cascade instead of landing on top of each other.
+    expect(useStore.getState().sideWindows).toEqual([
+      { parentId: null, sessionId: "side-a", slot: 0 },
+      { parentId: null, sessionId: "side-b", slot: 1 },
+    ]);
+    expect(useStore.getState().sessions["side-a"].viewOnly).toBeFalsy();
+    expect(useStore.getState().sessions["side-b"].viewOnly).toBeFalsy();
+    expect(useStore.getState().activeId).toBe("open-session");
+  });
+
+  test("one past the cap is refused rather than opened, because every window pins a session", async () => {
+    const { useStore, ws } = await bootstrap();
+    await open(useStore, ws, "side-a");
+    await open(useStore, ws, "side-b");
+    await open(useStore, ws, "side-c");
+    const before = ws.sent.length;
+
+    await useStore.getState().openSideChat({ ...ROW, sessionId: "side-d" });
+    await flushHistory();
+
+    expect(ws.sent.length).toBe(before); // no round trip for the one that can't fit
+    expect(useStore.getState().sideWindows.map((w) => w.sessionId)).toEqual(["side-a", "side-b", "side-c"]);
+    expect(useStore.getState().sessions["side-d"]).toBeUndefined();
+    expect(useStore.getState().tip).toMatch(/Close a floating conversation/);
+  });
+
+  test("reopening an already-open side chat raises it instead of opening a second card", async () => {
+    const { useStore, ws } = await bootstrap();
+    await open(useStore, ws, "side-a");
+    await open(useStore, ws, "side-b");
+    const before = ws.sent.length;
+
+    await useStore.getState().openSideChat({ ...ROW, sessionId: "side-a" });
+    await flushHistory();
+
+    expect(ws.sent.length).toBe(before); // nothing to reload — it is already live
+    // Same two windows, "side-a" now last, which is front-most.
+    expect(useStore.getState().sideWindows.map((w) => w.sessionId)).toEqual(["side-b", "side-a"]);
+    // …and its slot is unchanged: raising is a z-order change, not a move.
+    expect(useStore.getState().sideWindows.find((w) => w.sessionId === "side-a")!.slot).toBe(0);
+  });
+
+  test("a side chat whose session was evicted is reloaded, keeping its window's place", async () => {
+    const { useStore, ws } = await bootstrap();
+    await open(useStore, ws, "side-a");
+    await open(useStore, ws, "side-b");
+    // What an eviction (or a _gateway/reload trim) leaves behind: the entry with
+    // no session under it. Reopening from the sidebar has to fill it back in
+    // rather than no-op on the entry that is already there.
+    useStore.setState((st: any) => {
+      const sessions = { ...st.sessions };
+      delete sessions["side-a"];
+      return { sessions };
+    });
+
+    await open(useStore, ws, "side-a");
+
+    expect(useStore.getState().sessions["side-a"].items[0]).toMatchObject({ kind: "user" });
+    expect(useStore.getState().sideWindows).toEqual([
+      { parentId: null, sessionId: "side-a", slot: 0 },
+      { parentId: null, sessionId: "side-b", slot: 1 },
+    ]);
+  });
+
+  test("closeSideWindow closes only the one named, and frees its slot for the next", async () => {
+    const { useStore, ws } = await bootstrap();
+    await open(useStore, ws, "side-a");
+    await open(useStore, ws, "side-b");
+
+    useStore.getState().closeSideWindow("side-a");
+    expect(useStore.getState().sideWindows.map((w) => w.sessionId)).toEqual(["side-b"]);
+    expect(useStore.getState().sessions["side-a"]).toBeDefined(); // the conversation stays live
+
+    await open(useStore, ws, "side-c");
+    expect(useStore.getState().sideWindows.find((w) => w.sessionId === "side-c")!.slot).toBe(0);
   });
 
   test("the side chat can be prompted without moving the open conversation", async () => {
