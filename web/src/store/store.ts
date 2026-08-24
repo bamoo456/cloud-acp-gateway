@@ -12,9 +12,10 @@ import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
+  EMPTY_ENGINE,
 } from "./reducers.ts";
 import type {
-  Session, Model, Mode, ConfigOption, SlashCommand, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
+  Session, SessionEngine, ConfigOption, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
   AgentSkin, MessageImage, MessageFile, PromptCapabilities, ElicitationResponse, RateLimit,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
@@ -36,6 +37,27 @@ export type PreviewMode = "diff" | "file" | "render";
 // so a file browsed in another project must carry that project's root or the
 // gateway refuses to read it.
 export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode; cwd?: string }
+
+// One floating conversation window (see State's `sideWindows`).
+// `slot` is which default corner offset the card is born at, so several open at
+// once cascade instead of landing on top of each other. Assigned at open time
+// from the free slots rather than derived from the list order, because the list
+// is reordered as windows are raised and a position that moved when a *different*
+// card was clicked would read as the card jumping on its own.
+export interface SideWindow { sessionId: string; parentId: string | null; slot: number }
+
+// The engine lists to read out for a conversation: the one named, or the one in
+// the main column. Every consumer goes through this rather than through a global,
+// so a dock can only ever show the conversation it is pointed at (a card's own,
+// EngineDock's `sessionId`) — and a conversation the agent has not reported on
+// reads out empty instead of borrowing another one's values.
+export function engineOf(
+  state: Pick<State, "sessions" | "activeId">,
+  sessionId?: string,
+): SessionEngine {
+  const id = sessionId ?? state.activeId;
+  return (id ? state.sessions[id]?.engine : null) ?? EMPTY_ENGINE;
+}
 
 type PromptRequestMethod = "session/request_permission" | "elicitation/create";
 
@@ -98,21 +120,30 @@ interface State {
   tip: string;
   sessions: Record<string, Session>;
   activeId: string | null;
-  // Whoever occupies the floating window, and the conversation it floats over.
-  // Two ways in: a fork of `parentId` (`branchSession`) or an existing
-  // conversation opened beside it (`openSideChat`) — the window renders both the
-  // same way, because from the reader's side they are the same thing: a second
-  // live conversation next to the one on screen. The occupant is an ordinary live
-  // session in `sessions`; this only records that it is paired WITH `parentId`,
-  // which is what lets the window follow its parent: it shows while that parent
-  // is the open conversation and hides (rather than closes) while another one is,
-  // so switching away and back does not throw the pairing away. Null when none is
-  // open. Memory-only, so a reload leaves both as normal conversations.
-  branch: { parentId: string; sessionId: string } | null;
-  models: Model[];
-  modes: Mode[];
-  commands: SlashCommand[];
-  configOptions: ConfigOption[];
+  // The floating windows, oldest first — the last one is the front-most (see
+  // BranchWindow.tsx's z-order). Two ways in: a fork of `parentId`
+  // (`branchSession`) or an existing conversation opened beside the open one
+  // (`openSideChat`) — the window renders both the same way, because from the
+  // reader's side they are the same thing: a live conversation next to the one on
+  // screen. Each occupant is an ordinary live session in `sessions`; an entry only
+  // records that it has a window. Memory-only, so a reload leaves them all as
+  // normal conversations.
+  // A window is NOT tied to the conversation it was opened over: it stays up
+  // while the reader moves around the main column, and hides only while its own
+  // conversation is the one on screen (the same thread in both places). `parentId`
+  // is the conversation it was forked from (null for a side chat, which was forked
+  // from nothing) and is kept for three things: one branch per parent
+  // (`branchGate`), closing the window when that fork's own session is deleted,
+  // and as the card's identity across the provisional→real id swap.
+  // Capped at MAX_SIDE_WINDOWS: every entry is pinned against eviction, so an
+  // unbounded list would starve MAX_LIVE_SESSIONS' LRU.
+  sideWindows: SideWindow[];
+  // NOTE: there is deliberately no store-global models/modes/commands/
+  // configOptions. Every one of those describes ONE conversation, and holding
+  // them globally meant the last session call won: a notification for a
+  // background session relabelled the one on screen, and switching between two
+  // live conversations left the previous one's model on the dock. They live on
+  // the session now (types.ts's SessionEngine) — read them with engineOf().
   // provider kind ("claude" / "codex") -> rateLimitType -> the latest window
   // that account reported. Keyed by provider, not by the active agent: each
   // provider's quota is polled continuously regardless of which agent is on
@@ -206,17 +237,25 @@ interface State {
   // conversation that fails to open. Resolves true when the fork landed — on
   // false the caller still holds the only copy of that message.
   branchSession: (prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => Promise<boolean>;
-  // Open an EXISTING conversation in the same floating window, beside the one
-  // that stays in the main column — the sidebar row's "Open as side chat". Not a
-  // fork and not a navigation: the open conversation is untouched (`activeId` and
-  // the global `cwd` both stand), and the target is resumed live so it can be
-  // chatted in. The row carries its own agent and folder, which is why the target
-  // has to name all three: `cwd` is what session/load is asked about.
+  // Open an EXISTING conversation in a floating window, beside the one that stays
+  // in the main column — the sidebar row's "Open as side chat". Not a fork and not
+  // a navigation: the open conversation is untouched (`activeId` and the global
+  // `cwd` both stand), and the target is resumed live so it can be chatted in.
+  // The row carries its own agent and folder, which is why the target has to name
+  // all three: `cwd` is what session/load is asked about.
   openSideChat: (target: { sessionId: string; agentName: string; cwd: string; title: string | null }) => Promise<void>;
-  closeBranch: () => void;
-  setModel: (id: string) => void;
-  setMode: (id: string) => void;
-  setConfigOption: (configId: string, value: string) => void;
+  closeSideWindow: (sessionId: string) => void;
+  // Bring a window to the front, by moving it to the end of `sideWindows`. Called
+  // on pointerdown anywhere in the card, so the one being touched is the one on
+  // top — cascaded cards overlap by design.
+  raiseSideWindow: (sessionId: string) => void;
+  // No sessionId = the conversation in the main column; a sessionId = any live
+  // conversation, which is how a floating window's own dock sets ITS model, mode
+  // and options without touching the one on screen. A windowed target reads and
+  // writes that window's `engine` lists instead of the store's global ones.
+  setModel: (id: string, sessionId?: string) => void;
+  setMode: (id: string, sessionId?: string) => void;
+  setConfigOption: (configId: string, value: string, sessionId?: string) => void;
   cancel: (sessionId?: string) => void;
   setCwd: (p: string) => void;
   // Toggles a folder's hidden state via the gateway; best-effort like the
@@ -289,14 +328,14 @@ export function branchGate(state: State): BranchGate {
   // silently drop that reply; one parent tracks one branch at a time.
   const running = state.runningTasks.some((t) => t.agentName === state.agentName && t.sessionId === state.activeId)
     || (!!state.activeId && !!state.busySessionIds[state.activeId]);
-  const open = !!state.branch && state.branch.parentId === state.activeId;
+  const open = state.sideWindows.some((w) => w.parentId === state.activeId);
+  const full = state.sideWindows.length >= MAX_SIDE_WINDOWS;
   const why = !ready ? "Send a message first"
     : running ? "Wait for this turn to finish"
-    // Neutral about which way the window was filled: a side chat occupies it too,
-    // and "a branch is already open" would name something the reader never opened.
-    : open ? "A conversation is already open beside this one"
+    : open ? "This conversation already has a branch open"
+    : full ? "Close a floating conversation first"
     : "Branch conversation — forks it into a floating window";
-  return { show, disabled: !ready || running || open, why };
+  return { show, disabled: !ready || running || open || full, why };
 }
 
 export function hasCodexSkin(state: SkinState): boolean {
@@ -333,19 +372,29 @@ let pendingActivateId: string | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 function clearReconnectTimer() { if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; } }
 // agentName -> the conversation that was open under it when we switched away, so
-// switching back restores it instead of dropping into a blank new session. The
-// engine lists ride along: they are session-scoped and only ever arrive on a
-// session/new or session/load result, and restoring this conversation makes
-// neither call (activateLive is a pointer swap), so without the stash the readout
-// would come back permanently blank — see restoreEngineLists.
-type EngineLists = Pick<State, "models" | "modes" | "commands" | "configOptions">;
-const lastSessionByAgent = new Map<string, { id: string; cwd: string; engine?: EngineLists }>();
+// switching back restores it instead of dropping into a blank new session. Only
+// the id and folder: the engine lists used to be stashed here too, because they
+// were store-global and setAgent cleared them — they live on the session now
+// (SessionEngine), and sessions survive an agent switch, so they come back with it.
+const lastSessionByAgent = new Map<string, { id: string; cwd: string }>();
 // agentName -> highest SSE seq seen on that agent's stream, so switching back to
 // an agent resumes its stream after that seq and the ledger replays the frames
 // produced while we were away. Survives Acp recreation (per-agent channels).
 const agentCursors = new Map<string, number>();
 const PROVISIONAL = () => "pending-" + Math.random().toString(36).slice(2);
 const MAX_LIVE_SESSIONS = 8;
+// How many floating windows can be up at once. Not a layout limit — a cascade of
+// cards fits fine — but an eviction one: every open window pins its conversation
+// against MAX_LIVE_SESSIONS' LRU (see evictExcess's `pinned`), so this is what
+// leaves the main column slots to browse with.
+const MAX_SIDE_WINDOWS = 3;
+// The default-position slot a new window is born at (SideWindow's `slot`): the
+// lowest one nothing else holds, so cards cascade instead of landing on top of
+// each other, and closing the middle one frees its place for the next.
+function freeSlot(wins: SideWindow[]): number {
+  for (let n = 0; n < MAX_SIDE_WINDOWS; n++) if (!wins.some((w) => w.slot === n)) return n;
+  return 0;
+}
 const HISTORY_PAGE = 50;
 // A search hit deep-links to an absolute message index. Anchor its page a little
 // BEFORE the match so the lead-in to it is on screen rather than the match sitting
@@ -378,6 +427,16 @@ export const useStore = create<State>((set, get) => {
   // patch a session immutably by id
   const patch = (id: string, fn: (s: Session) => Session) =>
     set((st) => (st.sessions[id] ? { sessions: { ...st.sessions, [id]: fn(st.sessions[id]) } } : {}));
+
+  // The one way this store caps the live-session map: every conversation with a
+  // floating window is exempt as well as the active one. `wins` defaults to the
+  // current list, and is passed explicitly by the two callers that open a window
+  // and evict in the same update.
+  const trimSessions = (
+    sessions: Record<string, Session>,
+    keep: string | null,
+    wins: SideWindow[] = get().sideWindows,
+  ) => evictExcess(sessions, keep, MAX_LIVE_SESSIONS, wins.map((w) => w.sessionId));
 
   const sameReq = (a: number | string, b: number | string) => String(a) === String(b);
 
@@ -558,23 +617,6 @@ export const useStore = create<State>((set, get) => {
     return true;
   }
 
-  // Refill the engine lists setAgent cleared, for a live conversation this connect
-  // landed on without any session call. Only those paths need it: every other way
-  // into a session runs a session/new or session/load whose result carries them.
-  // Skipped when the id doesn't match the stash (the conversation isn't the one we
-  // left, so its values would mislabel it) or when configOptions already has
-  // something — this reconnect's own ledger replay may have delivered a
-  // config_option_update while we awaited initialize, which is newer than the stash.
-  // ponytail: one stash slot per agent, so switching back onto a DIFFERENT live
-  // session than the one we left still reads out blank; per-session engine state in
-  // the store is the upgrade path if that turns out to bite.
-  function restoreEngineLists(id: string): void {
-    if (get().configOptions.length) return;
-    const last = lastSessionByAgent.get(get().agentName);
-    if (last?.id !== id || !last.engine) return;
-    set(last.engine);
-  }
-
   function agentCanLoadSession(): boolean {
     // Read from live state, not the closure: the initialize handshake may have
     // flipped sessionLoad to match what the agent actually reports.
@@ -612,7 +654,7 @@ export const useStore = create<State>((set, get) => {
         // history API never carries an unanswered prompt, so without this a prompt
         // that arrived while we were elsewhere stays hidden until a page refresh.
         cur = appendPendingPermissions(cur, st.pendingPermissions);
-        return { sessions: evictExcess({ ...st.sessions, [id]: cur }, id, MAX_LIVE_SESSIONS), tip: "" };
+        return { sessions: trimSessions({ ...st.sessions, [id]: cur }, id), tip: "" };
       });
     } catch (e) { set({ tip: "Couldn't load conversation: " + msg(e) }); }
   }
@@ -631,7 +673,9 @@ export const useStore = create<State>((set, get) => {
       for (const [sid, sess] of Object.entries(st.sessions)) {
         if (sid === id || sess.agentName !== st.agentName) sessions[sid] = sess;
       }
-      return { sessions };
+      // A floating window whose session just went away has nothing to render, and
+      // a stale one would be worse: close it rather than leave a dead card up.
+      return { sessions, sideWindows: st.sideWindows.filter((w) => sessions[w.sessionId]) };
     });
     if (!s || s.viewOnly) return;
     if (agentCanLoadSession()) void resync(id!);
@@ -654,10 +698,9 @@ export const useStore = create<State>((set, get) => {
     acp?.close();
     set({
       agentReady: false, tip: "Reconnecting…",
-      sessions: {}, activeId: null, branch: null,
+      sessions: {}, activeId: null, sideWindows: [],
       // rateLimits is deliberately untouched: it's polled per provider,
       // independent of this connection, and a restart shouldn't blank it.
-      models: [], modes: [], commands: [], configOptions: [],
       promptCapabilities: {}, pendingPermissions: [],
       busy: false, busySessionIds: {},
       promptStateRevision: get().promptStateRevision + 1,
@@ -683,14 +726,6 @@ export const useStore = create<State>((set, get) => {
     if (m.method !== "session/update") return;
     const p = m.params as { sessionId?: string; update?: any } | undefined;
     if (!p?.update) return;
-    if (p.update.sessionUpdate === "available_commands_update") {
-      set({ commands: p.update.availableCommands || [] });
-      return;
-    }
-    if (p.update.sessionUpdate === "config_option_update") {
-      if (p.update.configOptions) set({ configOptions: p.update.configOptions });
-      return;
-    }
     // Rate limits ride on a usage_update but describe the account, not the
     // session — merge them before the sid check (which drops frames for
     // conversations this client isn't holding) and fall through so the same
@@ -710,6 +745,23 @@ export const useStore = create<State>((set, get) => {
     // can otherwise be appended to the newly active conversation.
     const sid = p.sessionId ? (st.sessions[p.sessionId] ? p.sessionId : "") : (st.activeId || "");
     if (!st.sessions[sid]) return;
+    // The engine lists belong to the session the frame names, like every other
+    // update here — they used to be assigned before this resolution, straight to a
+    // store-global, so whichever session the gateway last re-applied controls for
+    // relabelled the conversation on screen. The gateway does that after any
+    // client's session/load, session/new or session/fork and broadcasts it to
+    // every client (gateway.ts's broadcastConfigOptions), so another device
+    // opening a conversation was enough to move this one's model readout.
+    if (p.update.sessionUpdate === "available_commands_update") {
+      const commands = p.update.availableCommands || [];
+      patch(sid, (s) => ({ ...s, engine: { ...s.engine, commands } }));
+      return;
+    }
+    if (p.update.sessionUpdate === "config_option_update") {
+      const configOptions = p.update.configOptions;
+      if (configOptions) patch(sid, (s) => ({ ...s, engine: { ...s.engine, configOptions } }));
+      return;
+    }
     // A user_message_chunk on a live session is a prompt the gateway mirrored from
     // another device: applyUpdate renders its bubble and breaks the previous turn;
     // also show the working/typing state until the agent's first chunk clears it.
@@ -948,12 +1000,9 @@ export const useStore = create<State>((set, get) => {
 
   function adopt(res: NewSessionResult) {
     const baseSession = makeSession(res.sessionId, Date.now(), { agentName: get().agentName, cwd: get().cwd });
-    const { session, models, modes, configOptions } = applyModelsModes(baseSession, res);
+    const session = applyModelsModes(baseSession, res);
     set((st) => ({
-      sessions: evictExcess({ ...st.sessions, [res.sessionId]: session }, res.sessionId, MAX_LIVE_SESSIONS),
-      models: models ?? st.models,
-      modes: modes ?? st.modes,
-      configOptions: configOptions ?? st.configOptions,
+      sessions: trimSessions({ ...st.sessions, [res.sessionId]: session }, res.sessionId),
       activeId: res.sessionId,
     }));
   }
@@ -1000,12 +1049,9 @@ export const useStore = create<State>((set, get) => {
       set((st) => {
         const base = makeSession(id, st.sessions[id]?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd });
         const cur = applyHistoryMessages({ ...base, historyStart: r.start }, r.messages);
-        const { session, models, modes, configOptions } = applyModelsModes(cur, lr);
-        const ready = appendPendingPermissions({ ...session, suppressReplay: false, viewOnly: false }, st.pendingPermissions);
-        return {
-          sessions: evictExcess({ ...st.sessions, [id]: ready }, id, MAX_LIVE_SESSIONS),
-          models: models ?? st.models, modes: modes ?? st.modes, configOptions: configOptions ?? st.configOptions, tip: "", joining: false,
-        };
+        const ready = appendPendingPermissions(
+          { ...applyModelsModes(cur, lr), suppressReplay: false, viewOnly: false }, st.pendingPermissions);
+        return { sessions: trimSessions({ ...st.sessions, [id]: ready }, id), tip: "", joining: false };
       });
     } catch {
       set({ tip: "", joining: false });
@@ -1057,7 +1103,7 @@ export const useStore = create<State>((set, get) => {
       conn: "connecting", agentReady: false, tip,
       // rateLimits carries over: it's keyed by provider and polled independent
       // of which agent is active, so a different provider's quota is still valid.
-      sessions: {}, activeId: null, models: [], modes: [], commands: [], configOptions: [],
+      sessions: {}, activeId: null,
       promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
@@ -1137,8 +1183,10 @@ export const useStore = create<State>((set, get) => {
               ?? (haveLiveActive ? null : (lastSessionByAgent.get(get().agentName)?.id ?? null));
             pendingActivateId = null;
             if (targetId && activateLive(targetId)) {
-              // live in memory → the cursor replay (since agentCursors[agent]) catches it up
-              restoreEngineLists(targetId);
+              // live in memory → the cursor replay (since agentCursors[agent])
+              // catches it up, and its engine lists came back with the session
+              // (they are the session's own now, not a store-global this switch
+              // cleared — which is what restoreEngineLists used to put back).
             } else if (targetId) {
               const last = lastSessionByAgent.get(get().agentName);
               const recentTitle = get().recentSessions.find((r) => r.sessionId === targetId)?.title;
@@ -1155,12 +1203,6 @@ export const useStore = create<State>((set, get) => {
                   if (!cur || cur.agentName !== get().agentName) adopt(res);
                 })
                 .catch((e) => set({ tip: "Couldn't start session: " + msg(e) }));
-            } else {
-              // Already sitting on a live conversation of this agent, so nothing
-              // above activates anything — but a switch that never moved off it
-              // (the other agent never got a session of its own) still cleared the
-              // engine lists on the way out, and no session call will refill them.
-              restoreEngineLists(get().activeId!);
             }
           }
         } catch (e) { set({ tip: "Agent init failed: " + msg(e) }); }
@@ -1187,8 +1229,8 @@ export const useStore = create<State>((set, get) => {
     agentName: initialAgent?.name ?? cfg.defaultAgent,
     cwd: initialAgent?.cwd || cfg.fsRoot || "",
     conn: "connecting", agentReady: false, tip: "Connecting to the local agent…",
-    sessions: {}, activeId: null, branch: null,
-    models: [], modes: [], commands: [], configOptions: [], rateLimits: {}, quotaUnlimited: {}, quotaUnavailable: {},
+    sessions: {}, activeId: null, sideWindows: [],
+    rateLimits: {}, quotaUnlimited: {}, quotaUnavailable: {},
     promptCapabilities: {},
     pendingPermissions: [],
     promptStateRevision: 0,
@@ -1255,10 +1297,7 @@ export const useStore = create<State>((set, get) => {
       // restores that conversation instead of opening a blank new session.
       const leavingId = get().activeId;
       if (leavingId && !leavingId.startsWith("pending-") && get().sessions[leavingId]?.hasContent) {
-        const { models, modes, commands, configOptions } = get();
-        lastSessionByAgent.set(get().agentName, {
-          id: leavingId, cwd: get().cwd, engine: { models, modes, commands, configOptions },
-        });
+        lastSessionByAgent.set(get().agentName, { id: leavingId, cwd: get().cwd });
       }
       // A deep-linked ?session= belongs to the previous agent — drop it so the
       // new connection starts fresh instead of trying to join it.
@@ -1271,16 +1310,22 @@ export const useStore = create<State>((set, get) => {
         // fall back to the new agent's configured cwd when none is set yet.
         agentName: name, cwd: get().cwd || ref.cwd || cfg.fsRoot || "",
         conn: "connecting", agentReady: false, tip: "Switching to " + name + "…",
-        // KEEP sessions + activeId; only the agent-scoped lists reset (the new
-        // connection's initialize/session refills them). pendingPermissions is also
-        // KEPT — it is the durable source for outstanding prompts, and since this
-        // switch retains sessions, wiping it would drop a background session's prompt
-        // (its badge) on a switch-away/back. Entries carry their agentName so the
-        // badge only surfaces prompts answerable on the now-active agent.
+        // KEEP sessions + activeId. pendingPermissions is also KEPT — it is the
+        // durable source for outstanding prompts, and since this switch retains
+        // sessions, wiping it would drop a background session's prompt (its badge)
+        // on a switch-away/back. Entries carry their agentName so the badge only
+        // surfaces prompts answerable on the now-active agent.
         // rateLimits is NOT reset here: it's keyed by provider and polled
         // continuously regardless of which agent is on screen, so switching
         // away from Codex must not blank the Codex quota it already fetched.
-        models: [], modes: [], commands: [], configOptions: [],
+        // The engine lists are not reset either, and nothing has to put them back
+        // on the way in: they belong to the sessions this switch keeps.
+        // The floating windows DO go: their sessions live on the connection being
+        // torn down here, so their composers would be prompting an agent that has
+        // never heard of them. Unlike the main column, nothing re-resolves them on
+        // the new connection — reopen from the sidebar under the agent that owns
+        // them, which is the same rule the "Open as side chat" row is gated on.
+        sideWindows: [],
         promptCapabilities: {}, busy: false, busySessionIds: {}, joining: false,
         promptStateRevision: get().promptStateRevision + 1,
       });
@@ -1352,9 +1397,10 @@ export const useStore = create<State>((set, get) => {
         // historyNonce re-pulls both sidebar lists.
         return {
           sessions, activeId: st.activeId === sid ? null : st.activeId,
-          // Either side going away ends the pairing: a branch window with no
-          // branch, or one whose parent thread is gone, has nothing to sit on.
-          branch: st.branch && (st.branch.sessionId === sid || st.branch.parentId === sid) ? null : st.branch,
+          // A window whose own conversation was just deleted has nothing to show.
+          // Deleting the conversation it was FORKED from is not that: the fork is
+          // its own conversation and outlives its parent.
+          sideWindows: st.sideWindows.filter((w) => w.sessionId !== sid),
           recentSessions, historyNonce: st.historyNonce + 1, tip: "",
         };
       });
@@ -1407,12 +1453,12 @@ export const useStore = create<State>((set, get) => {
       sessionInit = null;
       touchRecentFolder(p);
       // Set the cwd for the next new chat; KEEP existing live sessions in the
-      // background (each remembers its own cwd). configOptions follow the new
-      // session once it's created.
+      // background (each remembers its own cwd). The engine readout follows
+      // activeId, so it empties itself here and refills from the new session.
       if (location.search.includes("session=") || location.search.includes("cwd=")) {
         history.replaceState(null, "", location.pathname || "/");
       }
-      set({ cwd: p, activeId: null, configOptions: [] });
+      set({ cwd: p, activeId: null });
       if (get().agentReady) initSession().then((res: any) => { if (res?.sessionId) adopt(res); }).catch(() => {});
     },
     toggleHiddenFolder(path) {
@@ -1450,12 +1496,12 @@ export const useStore = create<State>((set, get) => {
           // it has taken ownership — or the user navigated away — leave it be.
           if (!st.sessions[provId] || st.busySessionIds[provId]) return { tip: "" };
           const remapped = remapSession(st.sessions[provId], ns.sessionId);
-          const { session, models, modes, configOptions } = applyModelsModes(remapped, ns);
-          const sessions = { ...st.sessions }; delete sessions[provId]; sessions[ns.sessionId] = session;
+          const sessions = { ...st.sessions }; delete sessions[provId];
+          sessions[ns.sessionId] = applyModelsModes(remapped, ns);
           return {
-            sessions: evictExcess(sessions, ns.sessionId, MAX_LIVE_SESSIONS),
+            sessions: trimSessions(sessions, ns.sessionId),
             activeId: st.activeId === provId ? ns.sessionId : st.activeId,
-            models: models ?? st.models, modes: modes ?? st.modes, configOptions: configOptions ?? st.configOptions, tip: "",
+            tip: "",
           };
         });
       } catch (e: any) {
@@ -1680,16 +1726,16 @@ export const useStore = create<State>((set, get) => {
           set((st) => {
             const old = st.sessions[activeId!];
             const remapped = remapSession(old, ns.sessionId);
-            const { session, models, modes, configOptions } = applyModelsModes(remapped, ns);
-            const sessions = { ...st.sessions }; delete sessions[activeId!]; sessions[ns.sessionId] = session;
+            const sessions = { ...st.sessions }; delete sessions[activeId!];
+            sessions[ns.sessionId] = applyModelsModes(remapped, ns);
             const busySessionIds = { ...st.busySessionIds };
             if (busySessionIds[activeId!]) {
               delete busySessionIds[activeId!];
               busySessionIds[ns.sessionId] = true;
             }
             return {
-              sessions: evictExcess(sessions, ns.sessionId, MAX_LIVE_SESSIONS),
-              activeId: ns.sessionId, models: models ?? st.models, modes: modes ?? st.modes, configOptions: configOptions ?? st.configOptions, tip: "",
+              sessions: trimSessions(sessions, ns.sessionId),
+              activeId: ns.sessionId, tip: "",
               busySessionIds, busy: Object.keys(busySessionIds).length > 0,
             };
           });
@@ -1702,8 +1748,8 @@ export const useStore = create<State>((set, get) => {
             const sessionCwd = get().sessions[activeId]?.cwd || get().cwd || "";
             const lr = (await acp.request("session/load", { sessionId: activeId, cwd: sessionCwd, mcpServers: [] })) as NewSessionResult;
             set((st) => {
-              const { session, models, modes, configOptions } = applyModelsModes(st.sessions[activeId!], lr);
-              return { sessions: { ...st.sessions, [activeId!]: { ...session, suppressReplay: false, viewOnly: false } }, models: models ?? st.models, modes: modes ?? st.modes, configOptions: configOptions ?? st.configOptions, tip: "" };
+              const session = applyModelsModes(st.sessions[activeId!], lr);
+              return { sessions: { ...st.sessions, [activeId!]: { ...session, suppressReplay: false, viewOnly: false } }, tip: "" };
             });
           } else {
             // This agent can't resume the old session over ACP, so replying forks
@@ -1719,19 +1765,17 @@ export const useStore = create<State>((set, get) => {
             set((st) => {
               const old = st.sessions[activeId!];
               const remapped = remapSession(old, ns.sessionId);
-              const { session, models, modes, configOptions } = applyModelsModes({ ...remapped, suppressReplay: false, viewOnly: false }, ns);
               const sessions = { ...st.sessions };
               delete sessions[activeId!];
-              sessions[ns.sessionId] = session;
+              sessions[ns.sessionId] = applyModelsModes({ ...remapped, suppressReplay: false, viewOnly: false }, ns);
               const busySessionIds = { ...st.busySessionIds };
               if (busySessionIds[activeId!]) {
                 delete busySessionIds[activeId!];
                 busySessionIds[ns.sessionId] = true;
               }
               return {
-                sessions: evictExcess(sessions, ns.sessionId, MAX_LIVE_SESSIONS),
-                activeId: ns.sessionId, models: models ?? st.models, modes: modes ?? st.modes,
-                configOptions: configOptions ?? st.configOptions, tip: "",
+                sessions: trimSessions(sessions, ns.sessionId),
+                activeId: ns.sessionId, tip: "",
                 busySessionIds, busy: Object.keys(busySessionIds).length > 0,
               };
             });
@@ -1788,6 +1832,15 @@ export const useStore = create<State>((set, get) => {
       // Nothing to ask the branch means nothing would ever be written in it — the
       // one state this feature cannot render. See the action's doc comment.
       if (!prompt.text.trim() && !prompt.images?.length && !prompt.files?.length) return false;
+      // Both checked again here even though branchGate already disables the
+      // button: one branch per parent is the invariant the React key for a card
+      // rests on ("b:" + parentId), and pinning one more conversation past the cap
+      // would start starving the main column's own eviction budget.
+      if (get().sideWindows.some((w) => w.parentId === parentId)) return false;
+      if (get().sideWindows.length >= MAX_SIDE_WINDOWS) {
+        set({ tip: "Close a floating conversation first." });
+        return false;
+      }
 
       // The window opens NOW, on a provisional id, and the fork round trip
       // happens behind it. Everything it shows is already in memory (the copy is
@@ -1826,14 +1879,16 @@ export const useStore = create<State>((set, get) => {
             text: "· branched from \u201c" + source.title + "\u201d — everything above is copied",
           }],
         };
+        const sideWindows = [...st.sideWindows, { parentId, sessionId: provisionalId, slot: freeSlot(st.sideWindows) }];
         return {
-          // Deliberately NOT applyModelsModes anywhere in here: the store's
-          // models/modes lists describe the conversation on screen, and the
-          // fork's own result reports the values it came up at — before the
-          // gateway puts the parent's back. The branch inherits the parent's,
-          // which the copy already carries.
-          sessions: evictExcess({ ...st.sessions, [provisionalId]: marked }, st.activeId, MAX_LIVE_SESSIONS),
-          branch: { parentId, sessionId: provisionalId },
+          // Deliberately NOT applyModelsModes on the fork result, here or below:
+          // it reports the values the fork came up at, BEFORE the gateway puts the
+          // parent's controls back onto it. The branch inherits the parent's, which
+          // the copied session already carries (engine and all), and the
+          // config_option_update the gateway broadcasts once it has re-applied them
+          // is what corrects the copy if they differ.
+          sessions: trimSessions({ ...st.sessions, [provisionalId]: marked }, st.activeId, sideWindows),
+          sideWindows,
           tip: "",
         };
       });
@@ -1851,9 +1906,11 @@ export const useStore = create<State>((set, get) => {
           const sessions = { ...st.sessions };
           delete sessions[provisionalId];
           sessions[res.sessionId] = remapSession(provisional, res.sessionId);
+          const sideWindows = st.sideWindows.map((w) =>
+            w.sessionId === provisionalId ? { ...w, sessionId: res.sessionId } : w);
           return {
-            sessions: evictExcess(sessions, st.activeId, MAX_LIVE_SESSIONS),
-            branch: st.branch?.sessionId === provisionalId ? { parentId, sessionId: res.sessionId } : st.branch,
+            sessions: trimSessions(sessions, st.activeId, sideWindows),
+            sideWindows,
             tip: "",
           };
         });
@@ -1872,7 +1929,7 @@ export const useStore = create<State>((set, get) => {
           delete sessions[provisionalId];
           return {
             sessions,
-            branch: st.branch?.sessionId === provisionalId ? null : st.branch,
+            sideWindows: st.sideWindows.filter((w) => w.sessionId !== provisionalId),
             tip: "Couldn't branch conversation: " + msg(e),
           };
         });
@@ -1887,17 +1944,32 @@ export const useStore = create<State>((set, get) => {
       // again anyway — same belt-to-the-braces as sendPromptTo. A conversation the
       // agent has never seen has nothing to sit beside; a row under another agent
       // lives on a connection we don't hold (opening it would need the deep-link
-      // reconnect, which replaces the whole page's session set); and pairing a
-      // conversation with itself would put the same thread in both columns.
+      // reconnect, which replaces the whole page's session set); and opening the
+      // conversation that IS on screen would put the same thread in both places.
       if (!parentId || parentId.startsWith("pending-") || id === parentId) return;
       if (target.agentName !== get().agentName || !agentCanLoadSession()) return;
 
-      // Already live here and promptable: the pairing is the whole change. A
-      // view-only session does NOT qualify — sendPromptTo refuses one, so
+      // Already has a window: raise it rather than opening a second card on the
+      // same conversation — but only if its session is still live and promptable.
+      // An entry whose session was evicted (or came back view-only) falls through
+      // to the load below, which is what makes reopening it from the sidebar the
+      // way to get a blanked card back.
+      const win = get().sideWindows.find((w) => w.sessionId === id);
+      const alive = get().sessions[id];
+      if (win && alive && !alive.viewOnly) { get().raiseSideWindow(id); return; }
+      if (!win && get().sideWindows.length >= MAX_SIDE_WINDOWS) {
+        set({ tip: "Close a floating conversation first." });
+        return;
+      }
+
+      // Already live here and promptable: opening the window is the whole change.
+      // A view-only session does NOT qualify — sendPromptTo refuses one, so
       // shortcutting would open a window with a dead composer; that one is
       // re-loaded live below like any other.
-      const live = get().sessions[id];
-      if (live && !live.viewOnly) { set({ branch: { parentId, sessionId: id } }); return; }
+      if (alive && !alive.viewOnly) {
+        set((st) => ({ sideWindows: [...st.sideWindows, { parentId: null, sessionId: id, slot: freeSlot(st.sideWindows) }] }));
+        return;
+      }
 
       // The window opens NOW, on an empty shell, and the load round trip happens
       // behind it — a menu click that does nothing for a round trip reads as a
@@ -1907,9 +1979,14 @@ export const useStore = create<State>((set, get) => {
       set((st) => {
         let shell = makeSession(id, Date.now(), { agentName: target.agentName, cwd: target.cwd });
         if (target.title) shell = setTitle(shell, target.title);
+        // Reopening a window whose session had been evicted keeps its existing
+        // entry (and so its slot and z-order); a new one joins at the front.
+        const sideWindows = st.sideWindows.some((w) => w.sessionId === id)
+          ? st.sideWindows
+          : [...st.sideWindows, { parentId: null, sessionId: id, slot: freeSlot(st.sideWindows) }];
         return {
-          sessions: evictExcess({ ...st.sessions, [id]: { ...shell, suppressReplay: true } }, st.activeId, MAX_LIVE_SESSIONS),
-          branch: { parentId, sessionId: id },
+          sessions: trimSessions({ ...st.sessions, [id]: { ...shell, suppressReplay: true } }, st.activeId, sideWindows),
+          sideWindows,
           tip: "",
         };
       });
@@ -1917,7 +1994,7 @@ export const useStore = create<State>((set, get) => {
       try {
         // The ROW's cwd, not the store's: the conversation may live in a folder
         // this client isn't in, and the folder on screen must not move for it.
-        await acp.request("session/load", { sessionId: id, cwd: target.cwd, mcpServers: [] });
+        const lr = (await acp.request("session/load", { sessionId: id, cwd: target.cwd, mcpServers: [] })) as NewSessionResult;
         const r = await getMessages(target.agentName, target.cwd, id, historyPageFor());
         set((st) => {
           // Closed (or evicted) while the load was in flight: like a branch, the
@@ -1927,13 +2004,13 @@ export const useStore = create<State>((set, get) => {
           if (!shell) return {};
           const base = makeSession(id, shell.createdAt, { agentName: target.agentName, cwd: target.cwd });
           const cur = applyHistoryMessages({ ...base, title: shell.title, historyStart: r.start }, r.messages);
-          const ready = appendPendingPermissions({ ...cur, suppressReplay: false, viewOnly: false }, st.pendingPermissions);
-          // Deliberately NOT applyModelsModes on the load result, unlike
-          // joinSession: the store's models/modes lists describe the conversation
-          // in the MAIN column, and this one isn't it — applying them would
-          // repaint that conversation's pickers with the side chat's values.
-          // branchSession leaves them alone for the same reason.
-          return { sessions: evictExcess({ ...st.sessions, [id]: ready }, st.activeId, MAX_LIVE_SESSIONS), tip: "" };
+          // The load result lands on THIS session — its model/mode and the lists
+          // its dock offers alike (Session.engine). That is the whole reason the
+          // lists are per session: the card's dock reads this conversation's, and
+          // the main column's dock is left describing the conversation on screen.
+          const ready = appendPendingPermissions(
+            { ...applyModelsModes(cur, lr), suppressReplay: false, viewOnly: false }, st.pendingPermissions);
+          return { sessions: trimSessions({ ...st.sessions, [id]: ready }, st.activeId), tip: "" };
         });
       } catch (e) {
         // Take the optimistic window back down with the failure — a window that
@@ -1945,17 +2022,26 @@ export const useStore = create<State>((set, get) => {
           delete sessions[id];
           return {
             sessions,
-            branch: st.branch?.sessionId === id ? null : st.branch,
+            sideWindows: st.sideWindows.filter((w) => w.sessionId !== id),
             tip: "Couldn't open side chat: " + msg(e),
           };
         });
       }
     },
 
-    closeBranch() { set({ branch: null }); },
+    closeSideWindow(sessionId) {
+      set((st) => ({ sideWindows: st.sideWindows.filter((w) => w.sessionId !== sessionId) }));
+    },
+    raiseSideWindow(sessionId) {
+      set((st) => {
+        const win = st.sideWindows.find((w) => w.sessionId === sessionId);
+        if (!win || st.sideWindows.at(-1) === win) return {}; // already on top
+        return { sideWindows: [...st.sideWindows.filter((w) => w !== win), win] };
+      });
+    },
 
-    setModel(id) {
-      const st = get(); const sid = st.activeId; if (!sid) return;
+    setModel(id, sessionId) {
+      const st = get(); const sid = sessionId ?? st.activeId; if (!sid || !st.sessions[sid]) return;
       const prev = st.sessions[sid].modelId;
       patch(sid, (s) => ({ ...s, modelId: id }));
       touchSessionActivity(sid);
@@ -1963,8 +2049,8 @@ export const useStore = create<State>((set, get) => {
         patch(sid, (s) => ({ ...s, modelId: prev })); set({ tip: "Couldn't switch model: " + msg(e) });
       });
     },
-    setMode(id) {
-      const st = get(); const sid = st.activeId; if (!sid) return;
+    setMode(id, sessionId) {
+      const st = get(); const sid = sessionId ?? st.activeId; if (!sid || !st.sessions[sid]) return;
       const prev = st.sessions[sid].mode;
       patch(sid, (s) => ({ ...s, mode: id }));
       touchSessionActivity(sid);
@@ -1972,15 +2058,21 @@ export const useStore = create<State>((set, get) => {
         patch(sid, (s) => ({ ...s, mode: prev })); set({ tip: "Couldn't switch mode: " + msg(e) });
       });
     },
-    setConfigOption(configId, value) {
-      const st = get();
-      const opt = st.configOptions.find((o) => o.id === configId);
+    setConfigOption(configId, value, sessionId) {
+      // The option is looked up in, and written back to, the TARGET session's own
+      // list — a floating window's dock and the main column's set different
+      // conversations, and neither may relabel the other.
+      const sid = sessionId ?? get().activeId;
+      if (!sid || !get().sessions[sid]) return;
+      const list = engineOf(get(), sid).configOptions;
+      const opt = list.find((o) => o.id === configId);
       if (!opt) return;
-      const prev = st.configOptions;
-      set({ configOptions: st.configOptions.map((o) => (o.id === configId ? { ...o, currentValue: value } : o)) });
-      acp.request("session/set_config_option", { sessionId: get().activeId || undefined, configId, value })
-        .then((r: any) => { if (r?.configOptions) set({ configOptions: r.configOptions }); })
-        .catch((e) => { set({ configOptions: prev, tip: "Couldn't change " + opt.name + ": " + msg(e) }); });
+      const write = (configOptions: ConfigOption[]) =>
+        patch(sid, (s) => ({ ...s, engine: { ...s.engine, configOptions } }));
+      write(list.map((o) => (o.id === configId ? { ...o, currentValue: value } : o)));
+      acp.request("session/set_config_option", { sessionId: sid, configId, value })
+        .then((r: any) => { if (r?.configOptions) write(r.configOptions); })
+        .catch((e) => { write(list); set({ tip: "Couldn't change " + opt.name + ": " + msg(e) }); });
     },
     // No argument = the conversation on screen; an id = any of them, which is how
     // the branch window's own composer stops its own turn.

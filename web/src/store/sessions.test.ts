@@ -13,6 +13,15 @@ test("evictExcess drops the least-recently-active non-active session over the ca
   expect(Object.keys(out2)).toHaveLength(2);
 });
 
+test("evictExcess never drops a conversation with a floating window", () => {
+  const mk = (id: string, t: number) => ({ ...makeSession(id, 0), lastActiveAt: t });
+  // "a" is both the oldest and the one in a side window: it is exactly what the
+  // LRU would take, and taking it would blank a card that is on screen.
+  const sessions = { a: mk("a", 10), b: mk("b", 20), c: mk("c", 30) } as any;
+  const out = evictExcess(sessions, "c", 2, ["a"]);
+  expect(Object.keys(out).sort()).toEqual(["a", "c"]);
+});
+
 describe("session helpers", () => {
   test("makeSession defaults", () => {
     const s = makeSession("S");
@@ -47,9 +56,10 @@ describe("session helpers", () => {
       models: { availableModels: [{ modelId: "m1", name: "M1" }], currentModelId: "m1" },
       modes: { availableModes: [{ id: "default", name: "Default" }], currentModeId: "default" },
     };
-    const { session, models, modes } = applyModelsModes(makeSession("S"), res);
-    expect(models).toHaveLength(1);
-    expect(modes).toHaveLength(1);
+    const session = applyModelsModes(makeSession("S"), res);
+    // The lists land on the session, not on a store-global: see SessionEngine.
+    expect(session.engine.models).toHaveLength(1);
+    expect(session.engine.modes).toHaveLength(1);
     expect(session.modelId).toBe("m1");
     expect(session.mode).toBe("default");
   });

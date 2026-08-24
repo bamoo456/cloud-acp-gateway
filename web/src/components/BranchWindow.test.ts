@@ -5,7 +5,7 @@ import type { Session } from "../types.ts";
 
 function makeSession(id: string, title: string): Session {
   return {
-    id, title, items: [], seq: 0,
+    id, title, items: [], seq: 0, engine: { models: [], modes: [], commands: [], configOptions: [] },
     createdAt: Date.now(), lastActiveAt: Date.now(),
     agentName: "codex", cwd: "/p",
     hasContent: true, working: false,
@@ -45,42 +45,122 @@ describe("BranchWindow", () => {
     });
   }
 
-  test("renders nothing unless the branch is open, its parent is active, and its session is live", async () => {
+  test("renders nothing without a window, or when the window's session is gone", async () => {
     const { useStore } = await import("../store/store.ts");
     useStore.setState({
       activeId: "parent-1",
       sessions: { "parent-1": makeSession("parent-1", "Parent") },
-      branch: null,
+      sideWindows: [],
     });
     await render();
     expect(container.querySelector(".branch-win")).toBeNull();
 
-    // The branch exists, but a different conversation is on screen — the
-    // window follows its parent, so it stays hidden rather than closing.
+    // A window whose live session has been evicted has nothing to render.
     act(() => {
       useStore.setState({
-        sessions: {
-          "parent-1": makeSession("parent-1", "Parent"),
-          "branch-1": makeSession("branch-1", "Parent (Branch)"),
-        },
-        branch: { parentId: "parent-1", sessionId: "branch-1" },
-        activeId: "other",
-      });
-    });
-    expect(container.querySelector(".branch-win")).toBeNull();
-
-    // Back on the parent, but the branch's own live session has been evicted.
-    act(() => {
-      useStore.setState((st) => {
-        const sessions = { ...st.sessions };
-        delete sessions["branch-1"];
-        return { sessions, activeId: "parent-1" };
+        sessions: { "parent-1": makeSession("parent-1", "Parent") },
+        sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
       });
     });
     expect(container.querySelector(".branch-win")).toBeNull();
   });
 
-  test("renders the branch's thread and its own composer once branch, parent and session line up", async () => {
+  test("the window stays up when the main column moves to another conversation", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      activeId: "parent-1",
+      agentReady: true,
+      sessions: {
+        "parent-1": makeSession("parent-1", "Parent"),
+        "other": makeSession("other", "Something else"),
+        "branch-1": makeSession("branch-1", "Parent (Branch)"),
+      },
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
+    });
+    await render();
+    expect(container.querySelector(".branch-win")).not.toBeNull();
+
+    // Switching the sidebar to a different conversation used to take the window
+    // down with it. It is a second conversation, not an attachment to the first.
+    act(() => { useStore.setState({ activeId: "other" }); });
+    expect(container.querySelector(".branch-win")).not.toBeNull();
+
+    // …but the conversation IS the one on screen now: hidden rather than shown
+    // twice, and back again when the main column moves on.
+    act(() => { useStore.setState({ activeId: "branch-1" }); });
+    expect(container.querySelector(".branch-win")).toBeNull();
+    act(() => { useStore.setState({ activeId: "other" }); });
+    expect(container.querySelector(".branch-win")).not.toBeNull();
+  });
+
+  test("several windows render at once, cascaded and stacked in list order", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      matches: true, media, addEventListener() {}, removeEventListener() {},
+    }));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      activeId: "parent-1",
+      agentReady: true,
+      sessions: {
+        "parent-1": makeSession("parent-1", "Parent"),
+        "branch-1": makeSession("branch-1", "Parent (Branch)"),
+        "side-1": makeSession("side-1", "Another thread"),
+      },
+      sideWindows: [
+        { parentId: "parent-1", sessionId: "branch-1", slot: 0 },
+        { parentId: null, sessionId: "side-1", slot: 1 },
+      ],
+    });
+    await render();
+
+    const cards = container.querySelectorAll<HTMLElement>(".branch-win");
+    expect(cards).toHaveLength(2);
+    // Slot 1 is offset from the default corner, so the two are both grabbable…
+    expect(cards[0].style.right).toBe("20px");
+    expect(cards[1].style.right).toBe("42px");
+    // …and the later entry is the front-most.
+    expect(Number(cards[1].style.zIndex)).toBeGreaterThan(Number(cards[0].style.zIndex));
+
+    // Closing one leaves the other alone.
+    await act(async () => { cards[0].querySelector<HTMLButtonElement>(".branch-win-head button")!.click(); });
+    expect(useStore.getState().sideWindows.map((w) => w.sessionId)).toEqual(["side-1"]);
+    expect(container.querySelectorAll(".branch-win")).toHaveLength(1);
+  });
+
+  test("touching a window raises it above the others", async () => {
+    vi.stubGlobal("matchMedia", (media: string) => ({
+      matches: true, media, addEventListener() {}, removeEventListener() {},
+    }));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      activeId: "parent-1",
+      agentReady: true,
+      sessions: {
+        "parent-1": makeSession("parent-1", "Parent"),
+        "branch-1": makeSession("branch-1", "Parent (Branch)"),
+        "side-1": makeSession("side-1", "Another thread"),
+      },
+      sideWindows: [
+        { parentId: "parent-1", sessionId: "branch-1", slot: 0 },
+        { parentId: null, sessionId: "side-1", slot: 1 },
+      ],
+    });
+    await render();
+
+    const back = container.querySelectorAll<HTMLElement>(".branch-win")[0];
+    const zBefore = Number(back.style.zIndex);
+    await act(async () => {
+      back.querySelector<HTMLElement>(".branch-win-body")!
+        .dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 0, clientY: 0 }));
+    });
+    expect(useStore.getState().sideWindows.map((w) => w.sessionId)).toEqual(["side-1", "branch-1"]);
+    // Same card (keyed on its parent, so it did not remount), now on top.
+    const raised = container.querySelectorAll<HTMLElement>(".branch-win")[1];
+    expect(raised.querySelector(".branch-win-title")!.textContent).toBe("Parent (Branch)");
+    expect(Number(raised.style.zIndex)).toBeGreaterThan(zBefore);
+  });
+
+  test("renders the window's thread and its own composer", async () => {
     const { useStore } = await import("../store/store.ts");
     useStore.setState({
       activeId: "parent-1",
@@ -89,13 +169,16 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "branch-1": makeSession("branch-1", "Parent (Branch)"),
       },
-      branch: { parentId: "parent-1", sessionId: "branch-1" },
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
     });
     await render();
 
     expect(container.querySelector(".branch-win")).not.toBeNull();
     expect(container.querySelector(".branch-win .thread")).not.toBeNull();
     expect(container.querySelector(".branch-win .composer.compact")).not.toBeNull();
+    // Its own engine dock, bound to its own session: a floating conversation runs
+    // on its own model and mode, so it needs the control that changes them.
+    expect(container.querySelector(".branch-win .dock")).not.toBeNull();
   });
 
   test("a dragged window keeps its place when the fork swaps the provisional id in", async () => {
@@ -113,7 +196,7 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "pending-x": makeSession("pending-x", "Parent (Branch)"),
       },
-      branch: { parentId: "parent-1", sessionId: "pending-x" },
+      sideWindows: [{ parentId: "parent-1", sessionId: "pending-x", slot: 0 }],
     });
     await render();
 
@@ -143,7 +226,7 @@ describe("BranchWindow", () => {
         const sessions = { ...st.sessions };
         delete sessions["pending-x"];
         sessions["branch-1"] = makeSession("branch-1", "Parent (Branch)");
-        return { sessions, branch: { parentId: "parent-1", sessionId: "branch-1" } };
+        return { sessions, sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }] };
       });
     });
     const swapped = container.querySelector<HTMLElement>(".branch-win")!;
@@ -157,13 +240,13 @@ describe("BranchWindow", () => {
       useStore.setState((st) => ({
         activeId: "parent-2",
         sessions: { ...st.sessions, "parent-2": makeSession("parent-2", "Other") },
-        branch: { parentId: "parent-2", sessionId: "branch-1" },
+        sideWindows: [{ parentId: "parent-2", sessionId: "branch-1", slot: 0 }],
       }));
     });
     expect(container.querySelector<HTMLElement>(".branch-win")!.style.left).toBe("");
   });
 
-  test("the close button forgets the pairing but leaves the branch session live", async () => {
+  test("the close button closes the window but leaves its session live", async () => {
     const { useStore } = await import("../store/store.ts");
     useStore.setState({
       activeId: "parent-1",
@@ -172,7 +255,7 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "branch-1": makeSession("branch-1", "Parent (Branch)"),
       },
-      branch: { parentId: "parent-1", sessionId: "branch-1" },
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
     });
     await render();
 
@@ -180,7 +263,7 @@ describe("BranchWindow", () => {
     expect(closeBtn).not.toBeNull();
     await act(async () => { closeBtn!.click(); });
 
-    expect(useStore.getState().branch).toBeNull();
+    expect(useStore.getState().sideWindows).toEqual([]);
     expect(useStore.getState().sessions["branch-1"]).toBeDefined();
   });
 });

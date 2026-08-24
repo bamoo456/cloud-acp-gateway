@@ -2,6 +2,7 @@ import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { makeSession, applyModelsModes } from "./reducers.ts";
 import type { NewSessionResult } from "../types.ts";
 import { FakeSse, installFakeSse } from "../test/fakeSse.ts";
+import { engineOf } from "./store.ts";
 
 describe("applyModelsModes - configOptions", () => {
   test("surfaces configOptions from the result", () => {
@@ -18,11 +19,11 @@ describe("applyModelsModes - configOptions", () => {
         },
       ],
     };
-    const { configOptions, models, modes } = applyModelsModes(makeSession("s1", 0), res);
-    expect(configOptions).toHaveLength(1);
-    expect(configOptions![0].currentValue).toBe("gpt-5.5");
-    expect(models).toBeNull();
-    expect(modes).toBeNull();
+    const { engine } = applyModelsModes(makeSession("s1", 0), res);
+    expect(engine.configOptions).toHaveLength(1);
+    expect(engine.configOptions[0].currentValue).toBe("gpt-5.5");
+    expect(engine.models).toEqual([]);
+    expect(engine.modes).toEqual([]);
   });
 
   test("a Claude-shaped result yields null configOptions and intact models", () => {
@@ -30,9 +31,9 @@ describe("applyModelsModes - configOptions", () => {
       sessionId: "s1",
       models: { availableModels: [{ modelId: "default", name: "Default" }], currentModelId: "default" },
     };
-    const { configOptions, models } = applyModelsModes(makeSession("s1", 0), res);
-    expect(configOptions).toBeNull();
-    expect(models).toEqual([{ modelId: "default", name: "Default" }]);
+    const { engine } = applyModelsModes(makeSession("s1", 0), res);
+    expect(engine.configOptions).toEqual([]);
+    expect(engine.models).toEqual([{ modelId: "default", name: "Default" }]);
   });
 });
 
@@ -100,16 +101,25 @@ describe("store configOptions", () => {
 
   test("captures configOptions from session/new and applies the codex skin", async () => {
     const { useStore } = await bootCodex();
-    expect(useStore.getState().configOptions).toHaveLength(1);
-    expect(useStore.getState().configOptions[0].currentValue).toBe("xhigh");
+    expect(engineOf(useStore.getState()).configOptions).toHaveLength(1);
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("xhigh");
     expect(document.documentElement.dataset.agentSkin).toBe("codex");
   });
 
-  test("switching agents clears configOptions and the skin", async () => {
+  test("switching agents drops the skin, and the readout stays with the conversation", async () => {
     const { useStore } = await bootCodex();
+    const before = engineOf(useStore.getState()).configOptions;
+    expect(before.length).toBeGreaterThan(0);
+
     useStore.getState().setAgent("claude");
-    expect(useStore.getState().configOptions).toEqual([]);
+
+    // The skin is the agent's, so it goes immediately. The options are the
+    // CONVERSATION's, and setAgent keeps sessions and activeId — so the codex
+    // conversation is still the one on screen, and reading out anything else
+    // (it used to blank, then restore from a per-agent stash) would describe a
+    // conversation that isn't there. Claude's own session/new replaces it.
     expect(document.documentElement.dataset.agentSkin ?? "").toBe("");
+    expect(engineOf(useStore.getState()).configOptions).toEqual(before);
   });
 
   test("switching to a Codex-skinned agent applies the skin before configOptions load", async () => {
@@ -123,13 +133,13 @@ describe("store configOptions", () => {
       fsRoot: "/",
     });
     const { useStore } = await import("./store.ts");
-    expect(useStore.getState().configOptions).toEqual([]);
+    expect(engineOf(useStore.getState()).configOptions).toEqual([]);
     expect(document.documentElement.dataset.agentSkin ?? "").toBe("");
 
     useStore.getState().setAgent("work");
 
     expect(useStore.getState().agentName).toBe("work");
-    expect(useStore.getState().configOptions).toEqual([]);
+    expect(engineOf(useStore.getState()).configOptions).toEqual([]);
     expect(document.documentElement.dataset.agentSkin).toBe("codex");
   });
 
@@ -141,7 +151,7 @@ describe("store configOptions", () => {
       method: "session/set_config_option",
       params: { configId: "reasoning_effort", value: "high" },
     });
-    expect(useStore.getState().configOptions[0].currentValue).toBe("high");
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("high");
     ws.recv({
       jsonrpc: "2.0",
       id: req.id,
@@ -159,7 +169,56 @@ describe("store configOptions", () => {
       },
     });
     await flush();
-    expect(useStore.getState().configOptions[0].currentValue).toBe("high");
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("high");
+  });
+
+  // The three symptoms of the store-global engine lists this file's fixtures used
+  // to set. Each is a conversation reading out, or being set to, values that
+  // belong to another one.
+  test("switching between two live conversations reads out each one's own engine", async () => {
+    const { useStore } = await bootCodex();
+    const { makeSession, EMPTY_ENGINE } = await import("./reducers.ts");
+    // A second live conversation of the same agent, on its own effort level.
+    useStore.setState((st) => ({
+      sessions: { ...st.sessions, other: {
+        ...makeSession("other", Date.now(), { agentName: "codex", cwd: "/p" }),
+        hasContent: true,
+        engine: { ...EMPTY_ENGINE, configOptions: [{
+          id: "reasoning_effort", name: "Reasoning Effort", type: "select", category: "thought_level",
+          currentValue: "high", options: [{ value: "high", name: "High" }, { value: "xhigh", name: "Xhigh" }],
+        }] },
+      } },
+    }));
+
+    // selectSession takes the activateLive path — a pointer swap with no
+    // session/new or session/load, so nothing refills a global. The readout used
+    // to keep showing the conversation it was switched AWAY from, and picking a
+    // row in that menu set this session from the other one's list.
+    useStore.getState().selectSession("other");
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("high");
+    useStore.getState().selectSession("cx");
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("xhigh");
+  });
+
+  test("an available_commands_update lands on the session it names", async () => {
+    const { useStore, ws } = await bootCodex();
+    const { makeSession } = await import("./reducers.ts");
+    useStore.setState((st) => ({
+      sessions: { ...st.sessions, other: makeSession("other", Date.now(), { agentName: "codex", cwd: "/p" }) },
+    }));
+
+    ws.recv({
+      jsonrpc: "2.0", method: "session/update",
+      params: { sessionId: "other", update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [{ name: "init", description: "Initialize" }],
+      } },
+    });
+    await flush();
+
+    // The background conversation got them; the one on screen still has none.
+    expect(useStore.getState().sessions.other.engine.commands).toHaveLength(1);
+    expect(engineOf(useStore.getState()).commands).toEqual([]);
   });
 
   test("setConfigOption reverts and tips on rejection", async () => {
@@ -168,7 +227,7 @@ describe("store configOptions", () => {
     const req = JSON.parse(ws.sent[ws.sent.length - 1]);
     ws.recv({ jsonrpc: "2.0", id: req.id, error: { code: -32603, message: "nope" } });
     await flush();
-    expect(useStore.getState().configOptions[0].currentValue).toBe("xhigh");
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("xhigh");
     expect(useStore.getState().tip).toContain("Reasoning Effort");
   });
 
@@ -195,6 +254,6 @@ describe("store configOptions", () => {
       },
     });
     await flush();
-    expect(useStore.getState().configOptions[0].currentValue).toBe("medium");
+    expect(engineOf(useStore.getState()).configOptions[0].currentValue).toBe("medium");
   });
 });

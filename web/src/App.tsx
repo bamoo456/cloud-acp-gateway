@@ -192,10 +192,9 @@ export function App() {
               and on what, plus the control that changes it (§3 P3). */}
           <EngineDock onOpenLogin={(a) => setLoginAgent(a)} />
           <Composer />
-          {/* Floats over the thread above, following whichever conversation is
-              active (store.ts's `branch`) — always mounted, like FilePanel
-              below: the component itself decides whether there is anything to
-              show. */}
+          {/* The floating conversation windows (store.ts's `sideWindows`), over
+              the thread above — always mounted, like FilePanel below: each card
+              decides for itself whether there is anything to show. */}
           <BranchWindow />
         </div>
         {/* Right of the chat column on desktop, an overlay on mobile. Always
