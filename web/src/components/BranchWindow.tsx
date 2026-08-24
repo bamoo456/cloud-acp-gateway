@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useStore, type SideWindow } from "../store/store.ts";
 import { Thread } from "./Thread.tsx";
 import { Composer } from "./Composer.tsx";
+import { EngineDock } from "./EngineDock.tsx";
 import { IconBack, IconX } from "../lib/icons.tsx";
 import { timeAgo } from "../lib/format.ts";
 import { DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
@@ -238,7 +239,15 @@ function BranchCard({ win, depth }: { win: SideWindow; depth: number }) {
           would be, rather than offering a composer that would fail. */}
       {win.sessionId.startsWith("pending-")
         ? <div className="branch-win-wait" role="status"><span className="spinner" />Creating the branch…</div>
-        : <Composer sessionId={win.sessionId} compact />}
+        : (
+          <>
+            {/* This conversation's own engine readout and pickers, bound to it —
+                a side chat runs on its own model and mode, and without a dock of
+                its own the card could only be read, never re-aimed. */}
+            <EngineDock sessionId={win.sessionId} />
+            <Composer sessionId={win.sessionId} compact />
+          </>
+        )}
       {/* One grip per corner, rather than the browser's own `resize`, which only
           ever draws the south-east one. Sheet mode gets none: a full-screen sheet
           has no corner to pull. */}

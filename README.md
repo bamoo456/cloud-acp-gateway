@@ -36,6 +36,9 @@ available on the same host or inside the same container as the gateway.
   They stay up while you move around the sidebar — a window only hides while its
   own conversation is the one in the main column — and each keeps its own live
   session, so a reply lands in the right thread whatever you're reading.
+- Each floating window carries its own engine dock: the model, thinking level and
+  permission mode it is running on, and the pickers that change them for that
+  conversation only. The main column's settings are left where they are.
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
 - History browsing for supported agents: Claude Code, Codex, and opencode.

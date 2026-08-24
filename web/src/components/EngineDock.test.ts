@@ -199,4 +199,44 @@ describe("EngineDock", () => {
     const after = [...container.querySelectorAll(".engine-menu .arow .col > span:first-child")].map((e) => e.textContent);
     expect(after).toEqual(["Opus 4.8", "Sonnet 4.8", "Off"]);
   });
+
+  // Bound to a floating window's session (store.ts's `sideWindows`) instead of to
+  // the conversation on screen: the two docks read different lists and set
+  // different sessions, which is the whole point of a side chat's own dock.
+  test("bound to a window's session, it reads that window's engine and sets it there", async () => {
+    const { EngineDock } = await import("./EngineDock.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    useStore.setState({
+      agentName: "claude", activeId: "S", agentReady: true,
+      // The main column is on Opus…
+      configOptions: [MODEL, EFFORT],
+      sessions: { S: makeSession("S"), W: makeSession("W") },
+      // …and the window is on Sonnet, with no thinking level of its own.
+      sideWindows: [{ parentId: null, sessionId: "W", slot: 0, engine: {
+        models: [], modes: [],
+        configOptions: [{ ...MODEL, currentValue: "sonnet" }],
+      } }],
+    });
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(EngineDock, { sessionId: "W" }));
+    });
+
+    expect(container.querySelector(".mchip .am")?.textContent).toBe("Sonnet 4.8");
+    expect(container.querySelector(".mchip .eff")).toBeNull();
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".mchip")!.click(); });
+    // No agent switcher in a bound dock: the agent is the page's connection.
+    expect(container.querySelector(".engine-menu")!.textContent).not.toContain("/repo");
+    const rows = [...container.querySelectorAll<HTMLButtonElement>(".engine-menu .arow")];
+    expect(rows.map((r) => r.querySelector(".col > span")!.textContent)).toEqual(["Opus 4.8", "Sonnet 4.8"]);
+
+    // The pick is addressed to the window's session, not to the open
+    // conversation — where it lands is covered in store/sideChat.test.ts.
+    const setConfigOption = vi.fn();
+    await act(async () => { useStore.setState({ setConfigOption }); });
+    await act(async () => { rows[0].click(); });
+    expect(setConfigOption).toHaveBeenCalledWith("model", "opus", "W");
+  });
 });

@@ -91,7 +91,7 @@ describe("branch conversation", () => {
     await flush();
 
     const st = useStore.getState();
-    expect(st.sideWindows).toEqual([{ parentId: "parent-session", sessionId: "branch-session", slot: 0 }]);
+    expect(st.sideWindows).toMatchObject([{ parentId: "parent-session", sessionId: "branch-session", slot: 0 }]);
     // The window floats over its parent: the open conversation does not change.
     expect(st.activeId).toBe("parent-session");
     // The parent's thread is copied, not handed over — plus the boundary note and
@@ -142,7 +142,7 @@ describe("branch conversation", () => {
 
     // The provisional session is replaced by the real one, thread intact.
     const st = useStore.getState();
-    expect(st.sideWindows).toEqual([{ parentId: "parent-session", sessionId: "branch-session", slot: 0 }]);
+    expect(st.sideWindows).toMatchObject([{ parentId: "parent-session", sessionId: "branch-session", slot: 0 }]);
     expect(st.sessions[pending.sessionId]).toBeUndefined();
     expect(st.sessions["branch-session"].items[0]).toMatchObject({ kind: "user", text: "first question" });
   });

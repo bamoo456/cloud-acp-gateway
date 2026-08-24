@@ -37,13 +37,26 @@ export type PreviewMode = "diff" | "file" | "render";
 // gateway refuses to read it.
 export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode; cwd?: string }
 
+// The engine lists behind ONE floating window's own dock: what the agent reported
+// for that conversation on the fork/load that opened it. Per window rather than in
+// the store's global `models`/`modes`/`configOptions`, which describe the
+// conversation in the main column — a window repainting those would relabel (and
+// mis-set) a conversation the reader isn't even looking at, which is why both
+// openSideChat and branchSession have always thrown these away instead.
+export interface WindowEngine { models: Model[]; modes: Mode[]; configOptions: ConfigOption[] }
+
 // One floating conversation window (see State's `sideWindows`).
 // `slot` is which default corner offset the card is born at, so several open at
 // once cascade instead of landing on top of each other. Assigned at open time
 // from the free slots rather than derived from the list order, because the list
 // is reordered as windows are raised and a position that moved when a *different*
 // card was clicked would read as the card jumping on its own.
-export interface SideWindow { sessionId: string; parentId: string | null; slot: number }
+// `engine` is null until the open round trip lands (the card shows no dock then),
+// and for an agent that reports no engine lists at all.
+export interface SideWindow {
+  sessionId: string; parentId: string | null; slot: number;
+  engine: WindowEngine | null;
+}
 
 type PromptRequestMethod = "session/request_permission" | "elicitation/create";
 
@@ -233,9 +246,13 @@ interface State {
   // on pointerdown anywhere in the card, so the one being touched is the one on
   // top — cascaded cards overlap by design.
   raiseSideWindow: (sessionId: string) => void;
-  setModel: (id: string) => void;
-  setMode: (id: string) => void;
-  setConfigOption: (configId: string, value: string) => void;
+  // No sessionId = the conversation in the main column; a sessionId = any live
+  // conversation, which is how a floating window's own dock sets ITS model, mode
+  // and options without touching the one on screen. A windowed target reads and
+  // writes that window's `engine` lists instead of the store's global ones.
+  setModel: (id: string, sessionId?: string) => void;
+  setMode: (id: string, sessionId?: string) => void;
+  setConfigOption: (configId: string, value: string, sessionId?: string) => void;
   cancel: (sessionId?: string) => void;
   setCwd: (p: string) => void;
   // Toggles a folder's hidden state via the gateway; best-effort like the
@@ -419,6 +436,20 @@ export const useStore = create<State>((set, get) => {
     keep: string | null,
     wins: SideWindow[] = get().sideWindows,
   ) => evictExcess(sessions, keep, MAX_LIVE_SESSIONS, wins.map((w) => w.sessionId));
+
+  // Patch one floating window's entry immutably. No-op when it has already been
+  // closed — every caller is an in-flight round trip that can land after that.
+  const patchWindow = (sessionId: string, fn: (w: SideWindow) => SideWindow) =>
+    set((st) => st.sideWindows.some((w) => w.sessionId === sessionId)
+      ? { sideWindows: st.sideWindows.map((w) => (w.sessionId === sessionId ? fn(w) : w)) }
+      : {});
+
+  // The engine lists a floating window's dock reads: its own, or the store's
+  // globals while the open round trip is still in flight (a fork inherits the
+  // parent's, and those globals ARE the parent's).
+  const windowEngine = (sessionId: string): WindowEngine =>
+    get().sideWindows.find((w) => w.sessionId === sessionId)?.engine
+      ?? { models: get().models, modes: get().modes, configOptions: get().configOptions };
 
   const sameReq = (a: number | string, b: number | string) => String(a) === String(b);
 
@@ -731,7 +762,18 @@ export const useStore = create<State>((set, get) => {
       return;
     }
     if (p.update.sessionUpdate === "config_option_update") {
-      if (p.update.configOptions) set({ configOptions: p.update.configOptions });
+      if (!p.update.configOptions) return;
+      // Routed by session, not applied globally: the gateway re-applies a
+      // conversation's own controls after a load/fork and broadcasts the result
+      // for THAT session (see gateway.ts's broadcastConfigOptions), so a floating
+      // window's frame would otherwise repaint the main column's options with a
+      // conversation the reader isn't looking at. A frame with no sessionId, or
+      // one naming the conversation on screen, is the main column's as before.
+      const win = p.sessionId && p.sessionId !== get().activeId
+        ? get().sideWindows.find((w) => w.sessionId === p.sessionId)
+        : undefined;
+      if (win) patchWindow(win.sessionId, (w) => ({ ...w, engine: { ...windowEngine(w.sessionId), configOptions: p.update.configOptions } }));
+      else set({ configOptions: p.update.configOptions });
       return;
     }
     // Rate limits ride on a usage_update but describe the account, not the
@@ -1885,7 +1927,15 @@ export const useStore = create<State>((set, get) => {
             text: "· branched from \u201c" + source.title + "\u201d — everything above is copied",
           }],
         };
-        const sideWindows = [...st.sideWindows, { parentId, sessionId: provisionalId, slot: freeSlot(st.sideWindows) }];
+        const sideWindows = [...st.sideWindows, {
+          parentId, sessionId: provisionalId, slot: freeSlot(st.sideWindows),
+          // The parent's lists, for the same reason the copy carries the parent's
+          // model: the gateway puts the parent's controls back onto the fork, so
+          // these ARE the fork's — where the fork result's own values are what it
+          // came up at, before that. Refreshed by the config_option_update the
+          // gateway broadcasts once it has re-applied them.
+          engine: { models: st.models, modes: st.modes, configOptions: st.configOptions },
+        }];
         return {
           // Deliberately NOT applyModelsModes anywhere in here: the store's
           // models/modes lists describe the conversation on screen, and the
@@ -1972,7 +2022,9 @@ export const useStore = create<State>((set, get) => {
       // shortcutting would open a window with a dead composer; that one is
       // re-loaded live below like any other.
       if (alive && !alive.viewOnly) {
-        set((st) => ({ sideWindows: [...st.sideWindows, { parentId: null, sessionId: id, slot: freeSlot(st.sideWindows) }] }));
+        // No engine lists to seed: nothing was asked about this session just now.
+        // windowEngine() falls back to the store's globals, which are this agent's.
+        set((st) => ({ sideWindows: [...st.sideWindows, { parentId: null, sessionId: id, slot: freeSlot(st.sideWindows), engine: null }] }));
         return;
       }
 
@@ -1988,7 +2040,7 @@ export const useStore = create<State>((set, get) => {
         // entry (and so its slot and z-order); a new one joins at the front.
         const sideWindows = st.sideWindows.some((w) => w.sessionId === id)
           ? st.sideWindows
-          : [...st.sideWindows, { parentId: null, sessionId: id, slot: freeSlot(st.sideWindows) }];
+          : [...st.sideWindows, { parentId: null, sessionId: id, slot: freeSlot(st.sideWindows), engine: null }];
         return {
           sessions: trimSessions({ ...st.sessions, [id]: { ...shell, suppressReplay: true } }, st.activeId, sideWindows),
           sideWindows,
@@ -1999,7 +2051,7 @@ export const useStore = create<State>((set, get) => {
       try {
         // The ROW's cwd, not the store's: the conversation may live in a folder
         // this client isn't in, and the folder on screen must not move for it.
-        await acp.request("session/load", { sessionId: id, cwd: target.cwd, mcpServers: [] });
+        const lr = (await acp.request("session/load", { sessionId: id, cwd: target.cwd, mcpServers: [] })) as NewSessionResult;
         const r = await getMessages(target.agentName, target.cwd, id, historyPageFor());
         set((st) => {
           // Closed (or evicted) while the load was in flight: like a branch, the
@@ -2009,13 +2061,26 @@ export const useStore = create<State>((set, get) => {
           if (!shell) return {};
           const base = makeSession(id, shell.createdAt, { agentName: target.agentName, cwd: target.cwd });
           const cur = applyHistoryMessages({ ...base, title: shell.title, historyStart: r.start }, r.messages);
-          const ready = appendPendingPermissions({ ...cur, suppressReplay: false, viewOnly: false }, st.pendingPermissions);
-          // Deliberately NOT applyModelsModes on the load result, unlike
-          // joinSession: the store's models/modes lists describe the conversation
-          // in the MAIN column, and this one isn't it — applying them would
-          // repaint that conversation's pickers with the side chat's values.
-          // branchSession leaves them alone for the same reason.
-          return { sessions: trimSessions({ ...st.sessions, [id]: ready }, st.activeId), tip: "" };
+          // The load result's own model/mode go onto the SESSION (that is what it
+          // is running on), but its lists go to the WINDOW — never to the store's
+          // globals, unlike joinSession: those describe the conversation in the
+          // main column, and applying them here would repaint that conversation's
+          // pickers with this side chat's values. branchSession splits it the same
+          // way. configOptions has no global fallback for the same reason: a
+          // currentValue is per session, so borrowing the main column's would
+          // label this card with another conversation's model.
+          const { session } = applyModelsModes(cur, lr);
+          const ready = appendPendingPermissions({ ...session, suppressReplay: false, viewOnly: false }, st.pendingPermissions);
+          const engine: WindowEngine = {
+            models: lr?.models?.availableModels ?? st.models,
+            modes: lr?.modes?.availableModes ?? st.modes,
+            configOptions: lr?.configOptions ?? [],
+          };
+          return {
+            sessions: trimSessions({ ...st.sessions, [id]: ready }, st.activeId),
+            sideWindows: st.sideWindows.map((w) => (w.sessionId === id ? { ...w, engine } : w)),
+            tip: "",
+          };
         });
       } catch (e) {
         // Take the optimistic window back down with the failure — a window that
@@ -2045,8 +2110,8 @@ export const useStore = create<State>((set, get) => {
       });
     },
 
-    setModel(id) {
-      const st = get(); const sid = st.activeId; if (!sid) return;
+    setModel(id, sessionId) {
+      const st = get(); const sid = sessionId ?? st.activeId; if (!sid || !st.sessions[sid]) return;
       const prev = st.sessions[sid].modelId;
       patch(sid, (s) => ({ ...s, modelId: id }));
       touchSessionActivity(sid);
@@ -2054,8 +2119,8 @@ export const useStore = create<State>((set, get) => {
         patch(sid, (s) => ({ ...s, modelId: prev })); set({ tip: "Couldn't switch model: " + msg(e) });
       });
     },
-    setMode(id) {
-      const st = get(); const sid = st.activeId; if (!sid) return;
+    setMode(id, sessionId) {
+      const st = get(); const sid = sessionId ?? st.activeId; if (!sid || !st.sessions[sid]) return;
       const prev = st.sessions[sid].mode;
       patch(sid, (s) => ({ ...s, mode: id }));
       touchSessionActivity(sid);
@@ -2063,15 +2128,25 @@ export const useStore = create<State>((set, get) => {
         patch(sid, (s) => ({ ...s, mode: prev })); set({ tip: "Couldn't switch mode: " + msg(e) });
       });
     },
-    setConfigOption(configId, value) {
-      const st = get();
-      const opt = st.configOptions.find((o) => o.id === configId);
+    setConfigOption(configId, value, sessionId) {
+      // A windowed target owns its own list: the option is looked up in it, the
+      // optimistic write and the agent's answer both land in it, and the store's
+      // global options — the main column's — are never touched. Without that split
+      // a side chat switching model would relabel the conversation on screen and
+      // set the wrong session's option back on the next round trip.
+      const win = sessionId ? get().sideWindows.find((w) => w.sessionId === sessionId) : undefined;
+      const list = win ? windowEngine(sessionId!).configOptions : get().configOptions;
+      const opt = list.find((o) => o.id === configId);
       if (!opt) return;
-      const prev = st.configOptions;
-      set({ configOptions: st.configOptions.map((o) => (o.id === configId ? { ...o, currentValue: value } : o)) });
-      acp.request("session/set_config_option", { sessionId: get().activeId || undefined, configId, value })
-        .then((r: any) => { if (r?.configOptions) set({ configOptions: r.configOptions }); })
-        .catch((e) => { set({ configOptions: prev, tip: "Couldn't change " + opt.name + ": " + msg(e) }); });
+      const write = (options: ConfigOption[], tip?: string) => {
+        if (win) patchWindow(sessionId!, (w) => ({ ...w, engine: { ...windowEngine(sessionId!), configOptions: options } }));
+        else set({ configOptions: options });
+        if (tip) set({ tip });
+      };
+      write(list.map((o) => (o.id === configId ? { ...o, currentValue: value } : o)));
+      acp.request("session/set_config_option", { sessionId: sessionId ?? get().activeId ?? undefined, configId, value })
+        .then((r: any) => { if (r?.configOptions) write(r.configOptions); })
+        .catch((e) => { write(list, "Couldn't change " + opt.name + ": " + msg(e)); });
     },
     // No argument = the conversation on screen; an id = any of them, which is how
     // the branch window's own composer stops its own turn.
