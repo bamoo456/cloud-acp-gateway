@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "npm --prefix web ci && npm --prefix web run build && esbuild src/gateway.ts --bundle --platform=node --format=cjs --target=node22 --external:node-pty --outfile=dist/gateway.js && esbuild src/md.ts --bundle --format=iife --target=es2018 --outfile=public/vendor/md.js --minify",
+    "build": "npm --prefix web ci && npm --prefix web run build && esbuild src/gateway.ts --bundle --platform=node --format=cjs --target=node22 --external:node-pty --outfile=dist/gateway.js && esbuild src/md.ts --bundle --format=iife --target=es2018 --outfile=public/vendor/md.js --minify && cp web/node_modules/mermaid/dist/mermaid.min.js public/vendor/mermaid.min.js",
     "dev": "tsx watch src/gateway.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepare": "npm run build",
