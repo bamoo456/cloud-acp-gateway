@@ -2353,6 +2353,19 @@
     body.branch-dragging { user-select: none; cursor: grabbing; }
   }
 
+  /* The card's own engine dock (EngineDock bound to the window's session). The
+     page dock centres itself in a 784px column and pads for it; in a ~380px card
+     that padding is most of the row, so it tightens and loses the auto margins. */
+  .branch-win .dock { width: 100%; margin: 0; padding: 4px 8px 0; }
+  /* The dock's menu opens upward, absolutely positioned inside .dock — and the
+     card clips it (.branch-win is overflow:hidden), so the page's min(60vh,460px)
+     would be cut off rather than scrolled. Cap it to what a default-height card
+     has room for and let it scroll inside that.
+     ponytail: fixed cap — a card dragged down near its 240px floor still clips the
+     menu; positioning it against the card's real box needs JS, not CSS. */
+  .branch-win .amenu.engine-menu { max-height: 260px; right: 8px; }
+  .branch-win .amenu.engine-menu.mode-menu { right: auto; left: 8px; }
+
   /* Stands in for the composer until the fork comes back with a real session
      id: the window opens optimistically on the copied thread, and this says why
      it cannot be typed into yet. Same height as the compact composer, so the

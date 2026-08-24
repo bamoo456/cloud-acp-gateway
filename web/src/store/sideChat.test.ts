@@ -93,7 +93,7 @@ describe("side chat", () => {
     await flushHistory();
 
     const st = useStore.getState();
-    expect(st.sideWindows).toEqual([{ parentId: null, sessionId: "side-session", slot: 0 }]);
+    expect(st.sideWindows).toMatchObject([{ parentId: null, sessionId: "side-session", slot: 0 }]);
     expect(st.activeId).toBe("open-session");
     expect(st.cwd).toBe("/repo");
     expect(st.sessions["side-session"].items[0]).toMatchObject({ kind: "user", text: "what the side chat said" });
@@ -175,7 +175,7 @@ describe("side chat", () => {
 
     // Both windows, both live, both promptable — and the slots differ so the
     // cards cascade instead of landing on top of each other.
-    expect(useStore.getState().sideWindows).toEqual([
+    expect(useStore.getState().sideWindows).toMatchObject([
       { parentId: null, sessionId: "side-a", slot: 0 },
       { parentId: null, sessionId: "side-b", slot: 1 },
     ]);
@@ -232,7 +232,7 @@ describe("side chat", () => {
     await open(useStore, ws, "side-a");
 
     expect(useStore.getState().sessions["side-a"].items[0]).toMatchObject({ kind: "user" });
-    expect(useStore.getState().sideWindows).toEqual([
+    expect(useStore.getState().sideWindows).toMatchObject([
       { parentId: null, sessionId: "side-a", slot: 0 },
       { parentId: null, sessionId: "side-b", slot: 1 },
     ]);
@@ -249,6 +249,131 @@ describe("side chat", () => {
 
     await open(useStore, ws, "side-c");
     expect(useStore.getState().sideWindows.find((w) => w.sessionId === "side-c")!.slot).toBe(0);
+  });
+
+  test("the load result's engine lists land on the window, not on the store's globals", async () => {
+    const { useStore, ws } = await bootstrap();
+    useStore.setState({
+      models: [{ modelId: "sonnet", name: "Sonnet" }],
+      configOptions: [{
+        id: "model", name: "Model", type: "select", category: "model", currentValue: "sonnet",
+        options: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }],
+      }],
+    } as any);
+
+    const opening = useStore.getState().openSideChat(ROW);
+    await flush();
+    ws.recv({
+      jsonrpc: "2.0", id: lastSent(ws, "session/load").id,
+      result: {
+        models: { availableModels: [{ modelId: "haiku", name: "Haiku" }], currentModelId: "haiku" },
+        configOptions: [{
+          id: "model", name: "Model", type: "select", category: "model", currentValue: "opus",
+          options: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }],
+        }],
+      },
+    });
+    await opening;
+    await flushHistory();
+
+    const st = useStore.getState();
+    // The window's dock reads the side chat's own model…
+    expect(st.sideWindows[0].engine).toMatchObject({
+      models: [{ modelId: "haiku", name: "Haiku" }],
+      configOptions: [{ id: "model", currentValue: "opus" }],
+    });
+    expect(st.sessions["side-session"].modelId).toBe("haiku");
+    // …and the main column's pickers still describe the conversation on screen.
+    expect(st.models.map((m) => m.modelId)).toEqual(["sonnet"]);
+    expect(st.configOptions[0].currentValue).toBe("sonnet");
+  });
+
+  test("setting an option on a side chat leaves the main column's options alone", async () => {
+    const { useStore, ws } = await bootstrap();
+    const OPT = {
+      id: "model", name: "Model", type: "select", category: "model", currentValue: "sonnet",
+      options: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }],
+    };
+    useStore.setState({ configOptions: [OPT] } as any);
+
+    const opening = useStore.getState().openSideChat(ROW);
+    await flush();
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/load").id, result: { configOptions: [OPT] } });
+    await opening;
+    await flushHistory();
+
+    useStore.getState().setConfigOption("model", "opus", "side-session");
+    await flush();
+    // Addressed to the side chat, optimistically shown there, and nowhere else.
+    const req = lastSent(ws, "session/set_config_option");
+    expect(req.params).toMatchObject({ sessionId: "side-session", configId: "model", value: "opus" });
+    expect(useStore.getState().sideWindows[0].engine!.configOptions[0].currentValue).toBe("opus");
+    expect(useStore.getState().configOptions[0].currentValue).toBe("sonnet");
+
+    // The agent's answer replaces the window's list, still not the global one.
+    ws.recv({
+      jsonrpc: "2.0", id: req.id,
+      result: { configOptions: [{ ...OPT, currentValue: "opus" }] },
+    });
+    await flush();
+    expect(useStore.getState().sideWindows[0].engine!.configOptions[0].currentValue).toBe("opus");
+    expect(useStore.getState().configOptions[0].currentValue).toBe("sonnet");
+  });
+
+  test("a config_option_update for a side chat is routed to its window", async () => {
+    const { useStore, ws } = await bootstrap();
+    const OPT = {
+      id: "model", name: "Model", type: "select", category: "model", currentValue: "sonnet",
+      options: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }],
+    };
+    useStore.setState({ configOptions: [OPT] } as any);
+    const opening = useStore.getState().openSideChat(ROW);
+    await flush();
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/load").id, result: { configOptions: [OPT] } });
+    await opening;
+    await flushHistory();
+
+    // The gateway re-applies a conversation's own controls after a load and
+    // broadcasts the result for that session — it must not land on the main column.
+    ws.recv({
+      jsonrpc: "2.0", method: "session/update",
+      params: {
+        sessionId: "side-session",
+        update: { sessionUpdate: "config_option_update", configOptions: [{ ...OPT, currentValue: "opus" }] },
+      },
+    });
+    await flush();
+    expect(useStore.getState().sideWindows[0].engine!.configOptions[0].currentValue).toBe("opus");
+    expect(useStore.getState().configOptions[0].currentValue).toBe("sonnet");
+
+    // A frame for the conversation on screen still lands globally.
+    ws.recv({
+      jsonrpc: "2.0", method: "session/update",
+      params: {
+        sessionId: "open-session",
+        update: { sessionUpdate: "config_option_update", configOptions: [{ ...OPT, currentValue: "opus" }] },
+      },
+    });
+    await flush();
+    expect(useStore.getState().configOptions[0].currentValue).toBe("opus");
+  });
+
+  test("setModel on a side chat is addressed to it, not to the open conversation", async () => {
+    const { useStore, ws } = await bootstrap();
+    const opening = useStore.getState().openSideChat(ROW);
+    await flush();
+    ws.recv({
+      jsonrpc: "2.0", id: lastSent(ws, "session/load").id,
+      result: { models: { availableModels: [{ modelId: "haiku", name: "Haiku" }], currentModelId: "haiku" } },
+    });
+    await opening;
+    await flushHistory();
+
+    useStore.getState().setModel("opus", "side-session");
+    await flush();
+    expect(lastSent(ws, "session/set_model").params).toMatchObject({ sessionId: "side-session", modelId: "opus" });
+    expect(useStore.getState().sessions["side-session"].modelId).toBe("opus");
+    expect(useStore.getState().sessions["open-session"].modelId).toBeFalsy();
   });
 
   test("the side chat can be prompted without moving the open conversation", async () => {

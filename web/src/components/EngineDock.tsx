@@ -28,11 +28,25 @@ function useElapsed(running: boolean): number {
 // and the control that changes all three. Docked bottom-right of the message
 // pane, outside the input, so it never competes with the session title in the
 // crumb and never moves as the textarea grows (§3 P3).
-export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) => void }) {
+// `sessionId` binds it to a conversation that ISN'T the one in the main column —
+// a floating window's own dock. A bound dock reads that window's engine lists
+// (store.ts's `WindowEngine`) and sets every control on that session, so the two
+// docks on screen can hold different models. It also drops the agent switcher:
+// the agent is the whole page's connection, not this conversation's, and
+// switching it closes the windows.
+export function EngineDock({ onOpenLogin, sessionId }: { onOpenLogin?: (agent: AgentRef) => void; sessionId?: string }) {
   const s = useStore();
   const [open, setOpen] = useState(false);
   const [modeOpen, setModeOpen] = useState(false);
-  const sess = s.activeId ? s.sessions[s.activeId] : null;
+  const bound = !!sessionId;
+  const id = sessionId ?? s.activeId;
+  const sess = id ? s.sessions[id] : null;
+  const win = bound ? s.sideWindows.find((w) => w.sessionId === sessionId) : undefined;
+  // A bound dock falls back to the globals only while its window's open round trip
+  // is still in flight — same fallback the store's own windowEngine() makes.
+  const engine = bound
+    ? win?.engine ?? { models: s.models, modes: s.modes, configOptions: s.configOptions }
+    : { models: s.models, modes: s.modes, configOptions: s.configOptions };
   // The same flag the thread's own working indicator reads, so the two can't
   // disagree about whether a turn is in flight.
   const running = !!sess?.working;
@@ -46,7 +60,7 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
   const viewOnly = !!sess?.viewOnly;
   const { model, effort, mode } = viewOnly
     ? EMPTY_READOUT
-    : engineReadout(s.configOptions, s.models, sess?.modelId, s.modes, sess?.mode);
+    : engineReadout(engine.configOptions, engine.models, sess?.modelId, engine.modes, sess?.mode);
 
   useEffect(() => {
     if (!open && !modeOpen) return;
@@ -74,13 +88,13 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
               <div className="amenu engine-menu mode-menu" role="menu">
                 {mode.option
                   ? <OptionGroup label={mode.option.name} option={mode.option}
-                      onPick={(v) => { s.setConfigOption(mode.option!.id, v); setModeOpen(false); }} />
+                      onPick={(v) => { s.setConfigOption(mode.option!.id, v, sessionId); setModeOpen(false); }} />
                   : (
                     <>
                       <div className="amenu-subhead">Mode</div>
-                      {s.modes.map((m) => (
+                      {engine.modes.map((m) => (
                         <button key={m.id} className={"arow" + (m.id === sess?.mode ? " on" : "")} role="menuitem"
-                          onClick={() => { if (m.id !== sess?.mode) s.setMode(m.id); setModeOpen(false); }}>
+                          onClick={() => { if (m.id !== sess?.mode) s.setMode(m.id, sessionId); setModeOpen(false); }}>
                           <span className="col"><span>{m.name}</span>{m.description && <span className="sub">{m.description}</span>}</span>
                           {m.id === sess?.mode && <span className="gt">✓</span>}
                         </button>
@@ -113,7 +127,7 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
         <>
           <div className="amenu-scrim" onClick={() => setOpen(false)} />
           <div className="amenu engine-menu" role="menu">
-            {agents.length > 1 && (
+            {!bound && agents.length > 1 && (
               <>
                 <div className="amenu-subhead">Agent</div>
                 {agents.map((a) => (
@@ -131,20 +145,20 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
                 ))}
               </>
             )}
-            {agents.length === 1 && agents[0].kind && LOGIN_CAPABLE_KINDS.has(agents[0].kind) && (
+            {!bound && agents.length === 1 && agents[0].kind && LOGIN_CAPABLE_KINDS.has(agents[0].kind) && (
               <button className="arow" role="menuitem"
                 onClick={() => { setOpen(false); onOpenLogin?.(agents[0]); }}>
                 <IconLogin /><span className="col"><span>Re-login to {agents[0].name}</span></span>
               </button>
             )}
             {model?.option
-              ? <OptionGroup label={model.option.name} option={model.option} onPick={(v) => { s.setConfigOption(model.option!.id, v); setOpen(false); }} />
-              : !viewOnly && s.models.length > 0 && (
+              ? <OptionGroup label={model.option.name} option={model.option} onPick={(v) => { s.setConfigOption(model.option!.id, v, sessionId); setOpen(false); }} />
+              : !viewOnly && engine.models.length > 0 && (
                 <>
                   <div className="amenu-subhead">Model</div>
-                  {s.models.map((m) => (
+                  {engine.models.map((m) => (
                     <button key={m.modelId} className={"arow" + (m.modelId === sess?.modelId ? " on" : "")} role="menuitem"
-                      onClick={() => { if (m.modelId !== sess?.modelId) s.setModel(m.modelId); setOpen(false); }}>
+                      onClick={() => { if (m.modelId !== sess?.modelId) s.setModel(m.modelId, sessionId); setOpen(false); }}>
                       <span className="col"><span>{m.name}</span>{m.description && <span className="sub">{m.description}</span>}</span>
                       {m.modelId === sess?.modelId && <span className="gt">✓</span>}
                     </button>
@@ -153,7 +167,7 @@ export function EngineDock({ onOpenLogin }: { onOpenLogin?: (agent: AgentRef) =>
               )}
             {effort && (
               <OptionGroup label={effort.option.name} option={effort.option}
-                onPick={(v) => { s.setConfigOption(effort.option.id, v); setOpen(false); }} />
+                onPick={(v) => { s.setConfigOption(effort.option.id, v, sessionId); setOpen(false); }} />
             )}
           </div>
         </>

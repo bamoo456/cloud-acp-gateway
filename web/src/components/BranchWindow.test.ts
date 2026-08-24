@@ -59,7 +59,7 @@ describe("BranchWindow", () => {
     act(() => {
       useStore.setState({
         sessions: { "parent-1": makeSession("parent-1", "Parent") },
-        sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
+        sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }],
       });
     });
     expect(container.querySelector(".branch-win")).toBeNull();
@@ -75,7 +75,7 @@ describe("BranchWindow", () => {
         "other": makeSession("other", "Something else"),
         "branch-1": makeSession("branch-1", "Parent (Branch)"),
       },
-      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }],
     });
     await render();
     expect(container.querySelector(".branch-win")).not.toBeNull();
@@ -107,8 +107,8 @@ describe("BranchWindow", () => {
         "side-1": makeSession("side-1", "Another thread"),
       },
       sideWindows: [
-        { parentId: "parent-1", sessionId: "branch-1", slot: 0 },
-        { parentId: null, sessionId: "side-1", slot: 1 },
+        { parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null },
+        { parentId: null, sessionId: "side-1", slot: 1, engine: null },
       ],
     });
     await render();
@@ -141,8 +141,8 @@ describe("BranchWindow", () => {
         "side-1": makeSession("side-1", "Another thread"),
       },
       sideWindows: [
-        { parentId: "parent-1", sessionId: "branch-1", slot: 0 },
-        { parentId: null, sessionId: "side-1", slot: 1 },
+        { parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null },
+        { parentId: null, sessionId: "side-1", slot: 1, engine: null },
       ],
     });
     await render();
@@ -169,13 +169,16 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "branch-1": makeSession("branch-1", "Parent (Branch)"),
       },
-      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }],
     });
     await render();
 
     expect(container.querySelector(".branch-win")).not.toBeNull();
     expect(container.querySelector(".branch-win .thread")).not.toBeNull();
     expect(container.querySelector(".branch-win .composer.compact")).not.toBeNull();
+    // Its own engine dock, bound to its own session: a floating conversation runs
+    // on its own model and mode, so it needs the control that changes them.
+    expect(container.querySelector(".branch-win .dock")).not.toBeNull();
   });
 
   test("a dragged window keeps its place when the fork swaps the provisional id in", async () => {
@@ -193,7 +196,7 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "pending-x": makeSession("pending-x", "Parent (Branch)"),
       },
-      sideWindows: [{ parentId: "parent-1", sessionId: "pending-x", slot: 0 }],
+      sideWindows: [{ parentId: "parent-1", sessionId: "pending-x", slot: 0, engine: null }],
     });
     await render();
 
@@ -223,7 +226,7 @@ describe("BranchWindow", () => {
         const sessions = { ...st.sessions };
         delete sessions["pending-x"];
         sessions["branch-1"] = makeSession("branch-1", "Parent (Branch)");
-        return { sessions, sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }] };
+        return { sessions, sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }] };
       });
     });
     const swapped = container.querySelector<HTMLElement>(".branch-win")!;
@@ -237,7 +240,7 @@ describe("BranchWindow", () => {
       useStore.setState((st) => ({
         activeId: "parent-2",
         sessions: { ...st.sessions, "parent-2": makeSession("parent-2", "Other") },
-        sideWindows: [{ parentId: "parent-2", sessionId: "branch-1", slot: 0 }],
+        sideWindows: [{ parentId: "parent-2", sessionId: "branch-1", slot: 0, engine: null }],
       }));
     });
     expect(container.querySelector<HTMLElement>(".branch-win")!.style.left).toBe("");
@@ -252,7 +255,7 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "branch-1": makeSession("branch-1", "Parent (Branch)"),
       },
-      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }],
     });
     await render();
 
