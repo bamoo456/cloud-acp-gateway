@@ -333,8 +333,13 @@ let pendingActivateId: string | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 function clearReconnectTimer() { if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; } }
 // agentName -> the conversation that was open under it when we switched away, so
-// switching back restores it instead of dropping into a blank new session.
-const lastSessionByAgent = new Map<string, { id: string; cwd: string }>();
+// switching back restores it instead of dropping into a blank new session. The
+// engine lists ride along: they are session-scoped and only ever arrive on a
+// session/new or session/load result, and restoring this conversation makes
+// neither call (activateLive is a pointer swap), so without the stash the readout
+// would come back permanently blank — see restoreEngineLists.
+type EngineLists = Pick<State, "models" | "modes" | "commands" | "configOptions">;
+const lastSessionByAgent = new Map<string, { id: string; cwd: string; engine?: EngineLists }>();
 // agentName -> highest SSE seq seen on that agent's stream, so switching back to
 // an agent resumes its stream after that seq and the ledger replays the frames
 // produced while we were away. Survives Acp recreation (per-agent channels).
@@ -551,6 +556,23 @@ export const useStore = create<State>((set, get) => {
     if (!s || s.viewOnly || (s.agentName && s.agentName !== st.agentName)) return false;
     set({ activeId: id, cwd: s.cwd || st.cwd, sessions: touchRecency(st.sessions, id) });
     return true;
+  }
+
+  // Refill the engine lists setAgent cleared, for a live conversation this connect
+  // landed on without any session call. Only those paths need it: every other way
+  // into a session runs a session/new or session/load whose result carries them.
+  // Skipped when the id doesn't match the stash (the conversation isn't the one we
+  // left, so its values would mislabel it) or when configOptions already has
+  // something — this reconnect's own ledger replay may have delivered a
+  // config_option_update while we awaited initialize, which is newer than the stash.
+  // ponytail: one stash slot per agent, so switching back onto a DIFFERENT live
+  // session than the one we left still reads out blank; per-session engine state in
+  // the store is the upgrade path if that turns out to bite.
+  function restoreEngineLists(id: string): void {
+    if (get().configOptions.length) return;
+    const last = lastSessionByAgent.get(get().agentName);
+    if (last?.id !== id || !last.engine) return;
+    set(last.engine);
   }
 
   function agentCanLoadSession(): boolean {
@@ -1116,6 +1138,7 @@ export const useStore = create<State>((set, get) => {
             pendingActivateId = null;
             if (targetId && activateLive(targetId)) {
               // live in memory → the cursor replay (since agentCursors[agent]) catches it up
+              restoreEngineLists(targetId);
             } else if (targetId) {
               const last = lastSessionByAgent.get(get().agentName);
               const recentTitle = get().recentSessions.find((r) => r.sessionId === targetId)?.title;
@@ -1132,6 +1155,12 @@ export const useStore = create<State>((set, get) => {
                   if (!cur || cur.agentName !== get().agentName) adopt(res);
                 })
                 .catch((e) => set({ tip: "Couldn't start session: " + msg(e) }));
+            } else {
+              // Already sitting on a live conversation of this agent, so nothing
+              // above activates anything — but a switch that never moved off it
+              // (the other agent never got a session of its own) still cleared the
+              // engine lists on the way out, and no session call will refill them.
+              restoreEngineLists(get().activeId!);
             }
           }
         } catch (e) { set({ tip: "Agent init failed: " + msg(e) }); }
@@ -1226,7 +1255,10 @@ export const useStore = create<State>((set, get) => {
       // restores that conversation instead of opening a blank new session.
       const leavingId = get().activeId;
       if (leavingId && !leavingId.startsWith("pending-") && get().sessions[leavingId]?.hasContent) {
-        lastSessionByAgent.set(get().agentName, { id: leavingId, cwd: get().cwd });
+        const { models, modes, commands, configOptions } = get();
+        lastSessionByAgent.set(get().agentName, {
+          id: leavingId, cwd: get().cwd, engine: { models, modes, commands, configOptions },
+        });
       }
       // A deep-linked ?session= belongs to the previous agent — drop it so the
       // new connection starts fresh instead of trying to join it.

@@ -1656,6 +1656,70 @@ describe("store notification routing", () => {
     expect(restored.items.some((it) => it.kind === "assistant" && it.text === "hi")).toBe(true);
   });
 
+  test("switching agents and back keeps the re-activated conversation's engine readout", async () => {
+    // Regression: setAgent clears the agent-scoped engine lists, and the switch-back
+    // re-activates the live conversation through activateLive — a pointer swap that
+    // issues no session/new or session/load, so nothing ever refilled them. The dock
+    // then fell back to the bare agent name permanently: replying to a live session
+    // goes straight to session/prompt, which carries no engine state either.
+    document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
+      token: "test-token",
+      defaultAgent: "claude",
+      agents: [{ name: "claude", cwd: "/old" }, { name: "codex", cwd: "/codex-project", history: true }],
+      fsRoot: "/",
+    });
+    const { useStore } = await import("./store.ts");
+
+    const ws = await bootstrapAndWaitForSse(useStore);
+    ws.open();
+    await flush();
+    const init = JSON.parse(ws.sent[0]);
+    ws.recv({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } });
+    await flushHistory();
+    const sessReq = JSON.parse(ws.sent[1]);
+    ws.recv({ jsonrpc: "2.0", id: sessReq.id, result: {
+      sessionId: "claude-session",
+      configOptions: [{ id: "model", name: "Model", category: "", type: "select", currentValue: "opus", options: [{ value: "opus", name: "Opus (1M context)" }] }],
+      models: { currentModelId: "opus", availableModels: [{ modelId: "opus", name: "Opus (1M context)" }] },
+    } });
+    await flush();
+    // Only a session with content is remembered across a switch.
+    ws.recv({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "claude-session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hi" } } } });
+    await flush();
+    expect(useStore.getState().configOptions).toHaveLength(1);
+
+    useStore.getState().setAgent("codex");
+    const ws2 = FakeSse.instances[1];
+    ws2.open();
+    await flush();
+    const init2 = JSON.parse(ws2.sent[0]);
+    ws2.recv({ jsonrpc: "2.0", id: init2.id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } });
+    await flush();
+    // The switch itself must still blank them — they describe a claude session.
+    expect(useStore.getState().configOptions).toEqual([]);
+    // Codex opens its own session and reports its own engine, so the switch back is
+    // a genuine re-activation (activeId is a foreign-agent session on the way in).
+    const codexNew = JSON.parse(ws2.sent[1]);
+    ws2.recv({ jsonrpc: "2.0", id: codexNew.id, result: {
+      sessionId: "codex-session",
+      configOptions: [{ id: "model", name: "Model", category: "", type: "select", currentValue: "gpt", options: [{ value: "gpt", name: "GPT" }] }],
+    } });
+    await flush();
+    expect(useStore.getState().activeId).toBe("codex-session");
+
+    useStore.getState().setAgent("claude");
+    const ws3 = FakeSse.instances[2];
+    ws3.open();
+    await flush();
+    const init3 = JSON.parse(ws3.sent[0]);
+    ws3.recv({ jsonrpc: "2.0", id: init3.id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } });
+    await flushHistory();
+
+    expect(useStore.getState().activeId).toBe("claude-session");
+    expect(useStore.getState().configOptions[0]?.currentValue).toBe("opus");
+    expect(useStore.getState().models[0]?.name).toBe("Opus (1M context)");
+  });
+
   test("setAgent keeps a background session's outstanding permission as the durable source", async () => {
     document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
       token: "test-token",
