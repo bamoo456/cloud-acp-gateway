@@ -288,15 +288,21 @@ export function remapSession(s: Session, newId: string): Session {
 // Cap the live-session map: keep at most `max`, never evicting the active session,
 // dropping the least-recently-active first. Evicted conversations are cold — the
 // store rebuilds them from history on next select.
+// `pinned` are conversations with a floating window on screen (store.ts's
+// `sideWindows`). They have to be exempt too: a pinned window stays open while
+// the reader moves around the main column, so it is idle by construction — which
+// is exactly what least-recently-active picks first, and evicting it would blank
+// a window the reader is looking at.
 export function evictExcess(
   sessions: Record<string, Session>,
   activeId: string | null,
   max: number,
+  pinned: string[] = [],
 ): Record<string, Session> {
   const ids = Object.keys(sessions);
   if (ids.length <= max) return sessions;
   const evictable = ids
-    .filter((id) => id !== activeId)
+    .filter((id) => id !== activeId && !pinned.includes(id))
     .sort((a, b) => sessions[a].lastActiveAt - sessions[b].lastActiveAt);
   const toRemove = ids.length - max;
   const next = { ...sessions };

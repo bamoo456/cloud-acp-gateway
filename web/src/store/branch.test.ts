@@ -91,7 +91,7 @@ describe("branch conversation", () => {
     await flush();
 
     const st = useStore.getState();
-    expect(st.branch).toEqual({ parentId: "parent-session", sessionId: "branch-session" });
+    expect(st.sideWindows).toEqual([{ parentId: "parent-session", sessionId: "branch-session", slot: 0 }]);
     // The window floats over its parent: the open conversation does not change.
     expect(st.activeId).toBe("parent-session");
     // The parent's thread is copied, not handed over — plus the boundary note and
@@ -124,7 +124,7 @@ describe("branch conversation", () => {
     const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush(); // the fork request is out, but unanswered
 
-    const pending = useStore.getState().branch!;
+    const pending = useStore.getState().sideWindows[0];
     expect(pending.parentId).toBe("parent-session");
     // A provisional id: the window is up, the agent has not answered yet.
     expect(pending.sessionId.startsWith("pending-")).toBe(true);
@@ -142,7 +142,7 @@ describe("branch conversation", () => {
 
     // The provisional session is replaced by the real one, thread intact.
     const st = useStore.getState();
-    expect(st.branch).toEqual({ parentId: "parent-session", sessionId: "branch-session" });
+    expect(st.sideWindows).toEqual([{ parentId: "parent-session", sessionId: "branch-session", slot: 0 }]);
     expect(st.sessions[pending.sessionId]).toBeUndefined();
     expect(st.sessions["branch-session"].items[0]).toMatchObject({ kind: "user", text: "first question" });
   });
@@ -170,7 +170,7 @@ describe("branch conversation", () => {
     expect(await useStore.getState().branchSession({ text: "   " })).toBe(false);
     await flush();
     expect(lastSent(ws, "session/fork")).toBeUndefined();
-    expect(useStore.getState().branch).toBeNull();
+    expect(useStore.getState().sideWindows).toEqual([]);
   });
 
   test("a failed fork reports false so the caller keeps the message", async () => {
@@ -180,7 +180,7 @@ describe("branch conversation", () => {
     ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, error: { code: -32601, message: "Method not found" } });
     expect(await branching).toBe(false);
     await flush();
-    expect(useStore.getState().branch).toBeNull();
+    expect(useStore.getState().sideWindows).toEqual([]);
     expect(lastSent(ws, "session/prompt")).toBeUndefined(); // nothing was sent anywhere
   });
 
@@ -188,15 +188,34 @@ describe("branch conversation", () => {
     const { useStore, ws } = await bootstrap();
     const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
-    useStore.getState().closeBranch();
+    // Closed while the fork is in flight, so the window is still on its
+    // provisional id — that is the id the close button would carry.
+    useStore.getState().closeSideWindow(useStore.getState().sideWindows[0].sessionId);
 
     ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
     await branching;
     await flush();
 
     const st = useStore.getState();
-    expect(st.branch).toBeNull();                            // the window stays closed
+    expect(st.sideWindows).toEqual([]);                            // the window stays closed
     expect(st.sessions["branch-session"]).toBeDefined();     // the conversation is still live
+  });
+
+  test("a second branch of the same conversation is refused", async () => {
+    const { useStore, ws } = await bootstrap();
+    const branching = useStore.getState().branchSession({ text: "try the other approach" });
+    await flush();
+    ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/fork").id, result: { sessionId: "branch-session" } });
+    await branching;
+    await flush();
+    const before = ws.sent.length;
+
+    // One branch per parent: the card is identified by its parent, so a second
+    // one would be two windows claiming the same identity.
+    expect(await useStore.getState().branchSession({ text: "and another" })).toBe(false);
+    await flush();
+    expect(ws.sent.length).toBe(before);
+    expect(useStore.getState().sideWindows).toHaveLength(1);
   });
 
   test("branchSession inherits the parent's model instead of re-reading the fork result", async () => {
@@ -234,7 +253,7 @@ describe("branch conversation", () => {
 
     expect(lastSent(ws, "session/fork")).toBeUndefined();
     expect(ws.sent.length).toBe(before);
-    expect(useStore.getState().branch).toBeNull();
+    expect(useStore.getState().sideWindows).toEqual([]);
     expect(useStore.getState().tip).toMatch(/finish/i);
   });
 
@@ -248,7 +267,7 @@ describe("branch conversation", () => {
     await flush();
 
     const st = useStore.getState();
-    expect(st.branch).toBeNull();
+    expect(st.sideWindows).toEqual([]);
     expect(st.activeId).toBe("parent-session");
     expect(st.sessions["parent-session"]).toBeDefined();
     expect(st.tip).toMatch(/Couldn't branch/);
@@ -287,7 +306,7 @@ describe("branch conversation", () => {
     expect(lastSent(ws, "session/prompt")).toBeUndefined();
   });
 
-  test("closeBranch forgets the pairing but keeps the branch conversation", async () => {
+  test("closeSideWindow closes the window but keeps the conversation", async () => {
     const { useStore, ws } = await bootstrap();
     const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
@@ -295,12 +314,12 @@ describe("branch conversation", () => {
     await branching;
     await flush();
 
-    useStore.getState().closeBranch();
-    expect(useStore.getState().branch).toBeNull();
+    useStore.getState().closeSideWindow("branch-session");
+    expect(useStore.getState().sideWindows).toEqual([]);
     expect(useStore.getState().sessions["branch-session"]).toBeDefined();
   });
 
-  test("deleting either side ends the pairing", async () => {
+  test("deleting a floating conversation closes its window", async () => {
     const { useStore, ws } = await bootstrap();
     const branching = useStore.getState().branchSession({ text: "try the other approach" });
     await flush();
@@ -310,7 +329,7 @@ describe("branch conversation", () => {
 
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ ok: true }) })));
     await useStore.getState().deleteSession("branch-session");
-    expect(useStore.getState().branch).toBeNull();
+    expect(useStore.getState().sideWindows).toEqual([]);
   });
 });
 

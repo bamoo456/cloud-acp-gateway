@@ -22,16 +22,20 @@ available on the same host or inside the same container as the gateway.
   inlined.
 - Branch a conversation: type the message you want to ask somewhere else, hit
   `branch` instead of `send`, and it opens in a fork of the thread (the whole
-  history, copied agent-side via ACP `session/fork`) inside a floating window
-  over its parent — with its own composer, so two lines of attack run side by
-  side. Branching always carries a message, which is what gives the fork a
-  transcript and a place in the sidebar. Offered only for agents that advertise
+  history, copied agent-side via ACP `session/fork`) inside a floating window —
+  with its own composer, so two lines of attack run side by side. Branching
+  always carries a message, which is what gives the fork a transcript and a place
+  in the sidebar. Offered only for agents that advertise
   `sessionCapabilities.fork` (Claude today).
 - Open a conversation as a side chat: right-click (or long-press) any sidebar row
-  and pick `Open as side chat` to resume that conversation live in the same
-  floating window, beside the one that stays in the main column. The folder on
-  screen and the conversation in it are both left alone. Offered for rows under
-  the agent that's connected, since another agent's row would need a reconnect.
+  and pick `Open as side chat` to resume that conversation live in a floating
+  window, beside the one that stays in the main column. The folder on screen and
+  the conversation in it are both left alone. Offered for rows under the agent
+  that's connected, since another agent's row would need a reconnect.
+- Up to three floating windows at once, cascaded and each draggable/resizable.
+  They stay up while you move around the sidebar — a window only hides while its
+  own conversation is the one in the main column — and each keeps its own live
+  session, so a reply lands in the right thread whatever you're reading.
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
 - History browsing for supported agents: Claude Code, Codex, and opencode.

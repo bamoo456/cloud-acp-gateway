@@ -2246,19 +2246,21 @@
     .wf-root .linkish { padding: 8px 4px; }
   }
 
-  /* ---- branch conversation window ----
-     A conversation forked off the open one (store.ts's `branch`), shown as a
-     floating overlay rather than a second sidebar entry — it is meant to be
-     glanced at beside its parent, not switched to. Mobile-first like the file
-     panel: the base rule is the phone's full-screen sheet, and the breakpoint
-     below turns it into a floating card instead of a bigger sheet, because a
-     window you drag around by its header is a desktop-pointer idea. */
+  /* ---- floating conversation windows ----
+     A conversation shown beside the one in the main column (store.ts's
+     `sideWindows`) — a fork of it, or any other conversation opened as a side
+     chat — as a floating overlay rather than a second sidebar entry: it is meant
+     to be glanced at, not switched to. Mobile-first like the file panel: the base
+     rule is the phone's full-screen sheet, and the breakpoint below turns it into
+     a floating card instead of a bigger sheet, because a window you drag around
+     by its header is a desktop-pointer idea. */
   .branch-win {
-    /* z-index 38 puts it above BOTH side panels (25 as desktop columns, 36 as
-       the mobile overlay) and below the popovers and scrims at 40+: a floating
-       window belongs on top of the layout it floats over, but not on top of a
-       menu the reader just opened. */
-    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 38; overflow: hidden;
+    /* 37 puts it above BOTH side panels (25 as desktop columns, 36 as the mobile
+       overlay) and below the popovers and scrims at 40+: a floating window
+       belongs on top of the layout it floats over, but not on top of a menu the
+       reader just opened. Several windows share that gap — BranchWindow.tsx sets
+       37/38/39 inline, one per card, so the one last touched is on top. */
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 37; overflow: hidden;
     display: flex; flex-direction: column; background: var(--surface);
     animation: sheetup .27s cubic-bezier(.32,.72,0,1);
     padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom);
@@ -2321,6 +2323,8 @@
          because of the z-index above — at the panels' own 25 it would land
          under the file panel (later sibling, same layer) and stop taking
          clicks entirely. */
+      /* right/bottom here are the FIRST card's corner; BranchWindow.tsx offsets
+         each further card from it inline (its SLOT_STEP), so a stack cascades. */
       top: auto; left: auto; right: 20px;
       /* Approximate, not exact: clears the dock (28px) and a single-line
          composer, not one that has grown to several. The card is draggable

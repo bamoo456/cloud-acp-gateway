@@ -37,6 +37,14 @@ export type PreviewMode = "diff" | "file" | "render";
 // gateway refuses to read it.
 export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode; cwd?: string }
 
+// One floating conversation window (see State's `sideWindows`).
+// `slot` is which default corner offset the card is born at, so several open at
+// once cascade instead of landing on top of each other. Assigned at open time
+// from the free slots rather than derived from the list order, because the list
+// is reordered as windows are raised and a position that moved when a *different*
+// card was clicked would read as the card jumping on its own.
+export interface SideWindow { sessionId: string; parentId: string | null; slot: number }
+
 type PromptRequestMethod = "session/request_permission" | "elicitation/create";
 
 type PromptResolution = {
@@ -98,17 +106,24 @@ interface State {
   tip: string;
   sessions: Record<string, Session>;
   activeId: string | null;
-  // Whoever occupies the floating window, and the conversation it floats over.
-  // Two ways in: a fork of `parentId` (`branchSession`) or an existing
-  // conversation opened beside it (`openSideChat`) — the window renders both the
-  // same way, because from the reader's side they are the same thing: a second
-  // live conversation next to the one on screen. The occupant is an ordinary live
-  // session in `sessions`; this only records that it is paired WITH `parentId`,
-  // which is what lets the window follow its parent: it shows while that parent
-  // is the open conversation and hides (rather than closes) while another one is,
-  // so switching away and back does not throw the pairing away. Null when none is
-  // open. Memory-only, so a reload leaves both as normal conversations.
-  branch: { parentId: string; sessionId: string } | null;
+  // The floating windows, oldest first — the last one is the front-most (see
+  // BranchWindow.tsx's z-order). Two ways in: a fork of `parentId`
+  // (`branchSession`) or an existing conversation opened beside the open one
+  // (`openSideChat`) — the window renders both the same way, because from the
+  // reader's side they are the same thing: a live conversation next to the one on
+  // screen. Each occupant is an ordinary live session in `sessions`; an entry only
+  // records that it has a window. Memory-only, so a reload leaves them all as
+  // normal conversations.
+  // A window is NOT tied to the conversation it was opened over: it stays up
+  // while the reader moves around the main column, and hides only while its own
+  // conversation is the one on screen (the same thread in both places). `parentId`
+  // is the conversation it was forked from (null for a side chat, which was forked
+  // from nothing) and is kept for three things: one branch per parent
+  // (`branchGate`), closing the window when that fork's own session is deleted,
+  // and as the card's identity across the provisional→real id swap.
+  // Capped at MAX_SIDE_WINDOWS: every entry is pinned against eviction, so an
+  // unbounded list would starve MAX_LIVE_SESSIONS' LRU.
+  sideWindows: SideWindow[];
   models: Model[];
   modes: Mode[];
   commands: SlashCommand[];
@@ -206,14 +221,18 @@ interface State {
   // conversation that fails to open. Resolves true when the fork landed — on
   // false the caller still holds the only copy of that message.
   branchSession: (prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => Promise<boolean>;
-  // Open an EXISTING conversation in the same floating window, beside the one
-  // that stays in the main column — the sidebar row's "Open as side chat". Not a
-  // fork and not a navigation: the open conversation is untouched (`activeId` and
-  // the global `cwd` both stand), and the target is resumed live so it can be
-  // chatted in. The row carries its own agent and folder, which is why the target
-  // has to name all three: `cwd` is what session/load is asked about.
+  // Open an EXISTING conversation in a floating window, beside the one that stays
+  // in the main column — the sidebar row's "Open as side chat". Not a fork and not
+  // a navigation: the open conversation is untouched (`activeId` and the global
+  // `cwd` both stand), and the target is resumed live so it can be chatted in.
+  // The row carries its own agent and folder, which is why the target has to name
+  // all three: `cwd` is what session/load is asked about.
   openSideChat: (target: { sessionId: string; agentName: string; cwd: string; title: string | null }) => Promise<void>;
-  closeBranch: () => void;
+  closeSideWindow: (sessionId: string) => void;
+  // Bring a window to the front, by moving it to the end of `sideWindows`. Called
+  // on pointerdown anywhere in the card, so the one being touched is the one on
+  // top — cascaded cards overlap by design.
+  raiseSideWindow: (sessionId: string) => void;
   setModel: (id: string) => void;
   setMode: (id: string) => void;
   setConfigOption: (configId: string, value: string) => void;
@@ -289,14 +308,14 @@ export function branchGate(state: State): BranchGate {
   // silently drop that reply; one parent tracks one branch at a time.
   const running = state.runningTasks.some((t) => t.agentName === state.agentName && t.sessionId === state.activeId)
     || (!!state.activeId && !!state.busySessionIds[state.activeId]);
-  const open = !!state.branch && state.branch.parentId === state.activeId;
+  const open = state.sideWindows.some((w) => w.parentId === state.activeId);
+  const full = state.sideWindows.length >= MAX_SIDE_WINDOWS;
   const why = !ready ? "Send a message first"
     : running ? "Wait for this turn to finish"
-    // Neutral about which way the window was filled: a side chat occupies it too,
-    // and "a branch is already open" would name something the reader never opened.
-    : open ? "A conversation is already open beside this one"
+    : open ? "This conversation already has a branch open"
+    : full ? "Close a floating conversation first"
     : "Branch conversation — forks it into a floating window";
-  return { show, disabled: !ready || running || open, why };
+  return { show, disabled: !ready || running || open || full, why };
 }
 
 export function hasCodexSkin(state: SkinState): boolean {
@@ -346,6 +365,18 @@ const lastSessionByAgent = new Map<string, { id: string; cwd: string; engine?: E
 const agentCursors = new Map<string, number>();
 const PROVISIONAL = () => "pending-" + Math.random().toString(36).slice(2);
 const MAX_LIVE_SESSIONS = 8;
+// How many floating windows can be up at once. Not a layout limit — a cascade of
+// cards fits fine — but an eviction one: every open window pins its conversation
+// against MAX_LIVE_SESSIONS' LRU (see evictExcess's `pinned`), so this is what
+// leaves the main column slots to browse with.
+const MAX_SIDE_WINDOWS = 3;
+// The default-position slot a new window is born at (SideWindow's `slot`): the
+// lowest one nothing else holds, so cards cascade instead of landing on top of
+// each other, and closing the middle one frees its place for the next.
+function freeSlot(wins: SideWindow[]): number {
+  for (let n = 0; n < MAX_SIDE_WINDOWS; n++) if (!wins.some((w) => w.slot === n)) return n;
+  return 0;
+}
 const HISTORY_PAGE = 50;
 // A search hit deep-links to an absolute message index. Anchor its page a little
 // BEFORE the match so the lead-in to it is on screen rather than the match sitting
@@ -378,6 +409,16 @@ export const useStore = create<State>((set, get) => {
   // patch a session immutably by id
   const patch = (id: string, fn: (s: Session) => Session) =>
     set((st) => (st.sessions[id] ? { sessions: { ...st.sessions, [id]: fn(st.sessions[id]) } } : {}));
+
+  // The one way this store caps the live-session map: every conversation with a
+  // floating window is exempt as well as the active one. `wins` defaults to the
+  // current list, and is passed explicitly by the two callers that open a window
+  // and evict in the same update.
+  const trimSessions = (
+    sessions: Record<string, Session>,
+    keep: string | null,
+    wins: SideWindow[] = get().sideWindows,
+  ) => evictExcess(sessions, keep, MAX_LIVE_SESSIONS, wins.map((w) => w.sessionId));
 
   const sameReq = (a: number | string, b: number | string) => String(a) === String(b);
 
@@ -612,7 +653,7 @@ export const useStore = create<State>((set, get) => {
         // history API never carries an unanswered prompt, so without this a prompt
         // that arrived while we were elsewhere stays hidden until a page refresh.
         cur = appendPendingPermissions(cur, st.pendingPermissions);
-        return { sessions: evictExcess({ ...st.sessions, [id]: cur }, id, MAX_LIVE_SESSIONS), tip: "" };
+        return { sessions: trimSessions({ ...st.sessions, [id]: cur }, id), tip: "" };
       });
     } catch (e) { set({ tip: "Couldn't load conversation: " + msg(e) }); }
   }
@@ -631,7 +672,9 @@ export const useStore = create<State>((set, get) => {
       for (const [sid, sess] of Object.entries(st.sessions)) {
         if (sid === id || sess.agentName !== st.agentName) sessions[sid] = sess;
       }
-      return { sessions };
+      // A floating window whose session just went away has nothing to render, and
+      // a stale one would be worse: close it rather than leave a dead card up.
+      return { sessions, sideWindows: st.sideWindows.filter((w) => sessions[w.sessionId]) };
     });
     if (!s || s.viewOnly) return;
     if (agentCanLoadSession()) void resync(id!);
@@ -654,7 +697,7 @@ export const useStore = create<State>((set, get) => {
     acp?.close();
     set({
       agentReady: false, tip: "Reconnecting…",
-      sessions: {}, activeId: null, branch: null,
+      sessions: {}, activeId: null, sideWindows: [],
       // rateLimits is deliberately untouched: it's polled per provider,
       // independent of this connection, and a restart shouldn't blank it.
       models: [], modes: [], commands: [], configOptions: [],
@@ -950,7 +993,7 @@ export const useStore = create<State>((set, get) => {
     const baseSession = makeSession(res.sessionId, Date.now(), { agentName: get().agentName, cwd: get().cwd });
     const { session, models, modes, configOptions } = applyModelsModes(baseSession, res);
     set((st) => ({
-      sessions: evictExcess({ ...st.sessions, [res.sessionId]: session }, res.sessionId, MAX_LIVE_SESSIONS),
+      sessions: trimSessions({ ...st.sessions, [res.sessionId]: session }, res.sessionId),
       models: models ?? st.models,
       modes: modes ?? st.modes,
       configOptions: configOptions ?? st.configOptions,
@@ -1003,7 +1046,7 @@ export const useStore = create<State>((set, get) => {
         const { session, models, modes, configOptions } = applyModelsModes(cur, lr);
         const ready = appendPendingPermissions({ ...session, suppressReplay: false, viewOnly: false }, st.pendingPermissions);
         return {
-          sessions: evictExcess({ ...st.sessions, [id]: ready }, id, MAX_LIVE_SESSIONS),
+          sessions: trimSessions({ ...st.sessions, [id]: ready }, id),
           models: models ?? st.models, modes: modes ?? st.modes, configOptions: configOptions ?? st.configOptions, tip: "", joining: false,
         };
       });
@@ -1187,7 +1230,7 @@ export const useStore = create<State>((set, get) => {
     agentName: initialAgent?.name ?? cfg.defaultAgent,
     cwd: initialAgent?.cwd || cfg.fsRoot || "",
     conn: "connecting", agentReady: false, tip: "Connecting to the local agent…",
-    sessions: {}, activeId: null, branch: null,
+    sessions: {}, activeId: null, sideWindows: [],
     models: [], modes: [], commands: [], configOptions: [], rateLimits: {}, quotaUnlimited: {}, quotaUnavailable: {},
     promptCapabilities: {},
     pendingPermissions: [],
@@ -1281,6 +1324,12 @@ export const useStore = create<State>((set, get) => {
         // continuously regardless of which agent is on screen, so switching
         // away from Codex must not blank the Codex quota it already fetched.
         models: [], modes: [], commands: [], configOptions: [],
+        // The floating windows DO go: their sessions live on the connection being
+        // torn down here, so their composers would be prompting an agent that has
+        // never heard of them. Unlike the main column, nothing re-resolves them on
+        // the new connection — reopen from the sidebar under the agent that owns
+        // them, which is the same rule the "Open as side chat" row is gated on.
+        sideWindows: [],
         promptCapabilities: {}, busy: false, busySessionIds: {}, joining: false,
         promptStateRevision: get().promptStateRevision + 1,
       });
@@ -1352,9 +1401,10 @@ export const useStore = create<State>((set, get) => {
         // historyNonce re-pulls both sidebar lists.
         return {
           sessions, activeId: st.activeId === sid ? null : st.activeId,
-          // Either side going away ends the pairing: a branch window with no
-          // branch, or one whose parent thread is gone, has nothing to sit on.
-          branch: st.branch && (st.branch.sessionId === sid || st.branch.parentId === sid) ? null : st.branch,
+          // A window whose own conversation was just deleted has nothing to show.
+          // Deleting the conversation it was FORKED from is not that: the fork is
+          // its own conversation and outlives its parent.
+          sideWindows: st.sideWindows.filter((w) => w.sessionId !== sid),
           recentSessions, historyNonce: st.historyNonce + 1, tip: "",
         };
       });
@@ -1453,7 +1503,7 @@ export const useStore = create<State>((set, get) => {
           const { session, models, modes, configOptions } = applyModelsModes(remapped, ns);
           const sessions = { ...st.sessions }; delete sessions[provId]; sessions[ns.sessionId] = session;
           return {
-            sessions: evictExcess(sessions, ns.sessionId, MAX_LIVE_SESSIONS),
+            sessions: trimSessions(sessions, ns.sessionId),
             activeId: st.activeId === provId ? ns.sessionId : st.activeId,
             models: models ?? st.models, modes: modes ?? st.modes, configOptions: configOptions ?? st.configOptions, tip: "",
           };
@@ -1688,7 +1738,7 @@ export const useStore = create<State>((set, get) => {
               busySessionIds[ns.sessionId] = true;
             }
             return {
-              sessions: evictExcess(sessions, ns.sessionId, MAX_LIVE_SESSIONS),
+              sessions: trimSessions(sessions, ns.sessionId),
               activeId: ns.sessionId, models: models ?? st.models, modes: modes ?? st.modes, configOptions: configOptions ?? st.configOptions, tip: "",
               busySessionIds, busy: Object.keys(busySessionIds).length > 0,
             };
@@ -1729,7 +1779,7 @@ export const useStore = create<State>((set, get) => {
                 busySessionIds[ns.sessionId] = true;
               }
               return {
-                sessions: evictExcess(sessions, ns.sessionId, MAX_LIVE_SESSIONS),
+                sessions: trimSessions(sessions, ns.sessionId),
                 activeId: ns.sessionId, models: models ?? st.models, modes: modes ?? st.modes,
                 configOptions: configOptions ?? st.configOptions, tip: "",
                 busySessionIds, busy: Object.keys(busySessionIds).length > 0,
@@ -1788,6 +1838,15 @@ export const useStore = create<State>((set, get) => {
       // Nothing to ask the branch means nothing would ever be written in it — the
       // one state this feature cannot render. See the action's doc comment.
       if (!prompt.text.trim() && !prompt.images?.length && !prompt.files?.length) return false;
+      // Both checked again here even though branchGate already disables the
+      // button: one branch per parent is the invariant the React key for a card
+      // rests on ("b:" + parentId), and pinning one more conversation past the cap
+      // would start starving the main column's own eviction budget.
+      if (get().sideWindows.some((w) => w.parentId === parentId)) return false;
+      if (get().sideWindows.length >= MAX_SIDE_WINDOWS) {
+        set({ tip: "Close a floating conversation first." });
+        return false;
+      }
 
       // The window opens NOW, on a provisional id, and the fork round trip
       // happens behind it. Everything it shows is already in memory (the copy is
@@ -1826,14 +1885,15 @@ export const useStore = create<State>((set, get) => {
             text: "· branched from \u201c" + source.title + "\u201d — everything above is copied",
           }],
         };
+        const sideWindows = [...st.sideWindows, { parentId, sessionId: provisionalId, slot: freeSlot(st.sideWindows) }];
         return {
           // Deliberately NOT applyModelsModes anywhere in here: the store's
           // models/modes lists describe the conversation on screen, and the
           // fork's own result reports the values it came up at — before the
           // gateway puts the parent's back. The branch inherits the parent's,
           // which the copy already carries.
-          sessions: evictExcess({ ...st.sessions, [provisionalId]: marked }, st.activeId, MAX_LIVE_SESSIONS),
-          branch: { parentId, sessionId: provisionalId },
+          sessions: trimSessions({ ...st.sessions, [provisionalId]: marked }, st.activeId, sideWindows),
+          sideWindows,
           tip: "",
         };
       });
@@ -1851,9 +1911,11 @@ export const useStore = create<State>((set, get) => {
           const sessions = { ...st.sessions };
           delete sessions[provisionalId];
           sessions[res.sessionId] = remapSession(provisional, res.sessionId);
+          const sideWindows = st.sideWindows.map((w) =>
+            w.sessionId === provisionalId ? { ...w, sessionId: res.sessionId } : w);
           return {
-            sessions: evictExcess(sessions, st.activeId, MAX_LIVE_SESSIONS),
-            branch: st.branch?.sessionId === provisionalId ? { parentId, sessionId: res.sessionId } : st.branch,
+            sessions: trimSessions(sessions, st.activeId, sideWindows),
+            sideWindows,
             tip: "",
           };
         });
@@ -1872,7 +1934,7 @@ export const useStore = create<State>((set, get) => {
           delete sessions[provisionalId];
           return {
             sessions,
-            branch: st.branch?.sessionId === provisionalId ? null : st.branch,
+            sideWindows: st.sideWindows.filter((w) => w.sessionId !== provisionalId),
             tip: "Couldn't branch conversation: " + msg(e),
           };
         });
@@ -1887,17 +1949,32 @@ export const useStore = create<State>((set, get) => {
       // again anyway — same belt-to-the-braces as sendPromptTo. A conversation the
       // agent has never seen has nothing to sit beside; a row under another agent
       // lives on a connection we don't hold (opening it would need the deep-link
-      // reconnect, which replaces the whole page's session set); and pairing a
-      // conversation with itself would put the same thread in both columns.
+      // reconnect, which replaces the whole page's session set); and opening the
+      // conversation that IS on screen would put the same thread in both places.
       if (!parentId || parentId.startsWith("pending-") || id === parentId) return;
       if (target.agentName !== get().agentName || !agentCanLoadSession()) return;
 
-      // Already live here and promptable: the pairing is the whole change. A
-      // view-only session does NOT qualify — sendPromptTo refuses one, so
+      // Already has a window: raise it rather than opening a second card on the
+      // same conversation — but only if its session is still live and promptable.
+      // An entry whose session was evicted (or came back view-only) falls through
+      // to the load below, which is what makes reopening it from the sidebar the
+      // way to get a blanked card back.
+      const win = get().sideWindows.find((w) => w.sessionId === id);
+      const alive = get().sessions[id];
+      if (win && alive && !alive.viewOnly) { get().raiseSideWindow(id); return; }
+      if (!win && get().sideWindows.length >= MAX_SIDE_WINDOWS) {
+        set({ tip: "Close a floating conversation first." });
+        return;
+      }
+
+      // Already live here and promptable: opening the window is the whole change.
+      // A view-only session does NOT qualify — sendPromptTo refuses one, so
       // shortcutting would open a window with a dead composer; that one is
       // re-loaded live below like any other.
-      const live = get().sessions[id];
-      if (live && !live.viewOnly) { set({ branch: { parentId, sessionId: id } }); return; }
+      if (alive && !alive.viewOnly) {
+        set((st) => ({ sideWindows: [...st.sideWindows, { parentId: null, sessionId: id, slot: freeSlot(st.sideWindows) }] }));
+        return;
+      }
 
       // The window opens NOW, on an empty shell, and the load round trip happens
       // behind it — a menu click that does nothing for a round trip reads as a
@@ -1907,9 +1984,14 @@ export const useStore = create<State>((set, get) => {
       set((st) => {
         let shell = makeSession(id, Date.now(), { agentName: target.agentName, cwd: target.cwd });
         if (target.title) shell = setTitle(shell, target.title);
+        // Reopening a window whose session had been evicted keeps its existing
+        // entry (and so its slot and z-order); a new one joins at the front.
+        const sideWindows = st.sideWindows.some((w) => w.sessionId === id)
+          ? st.sideWindows
+          : [...st.sideWindows, { parentId: null, sessionId: id, slot: freeSlot(st.sideWindows) }];
         return {
-          sessions: evictExcess({ ...st.sessions, [id]: { ...shell, suppressReplay: true } }, st.activeId, MAX_LIVE_SESSIONS),
-          branch: { parentId, sessionId: id },
+          sessions: trimSessions({ ...st.sessions, [id]: { ...shell, suppressReplay: true } }, st.activeId, sideWindows),
+          sideWindows,
           tip: "",
         };
       });
@@ -1933,7 +2015,7 @@ export const useStore = create<State>((set, get) => {
           // in the MAIN column, and this one isn't it — applying them would
           // repaint that conversation's pickers with the side chat's values.
           // branchSession leaves them alone for the same reason.
-          return { sessions: evictExcess({ ...st.sessions, [id]: ready }, st.activeId, MAX_LIVE_SESSIONS), tip: "" };
+          return { sessions: trimSessions({ ...st.sessions, [id]: ready }, st.activeId), tip: "" };
         });
       } catch (e) {
         // Take the optimistic window back down with the failure — a window that
@@ -1945,14 +2027,23 @@ export const useStore = create<State>((set, get) => {
           delete sessions[id];
           return {
             sessions,
-            branch: st.branch?.sessionId === id ? null : st.branch,
+            sideWindows: st.sideWindows.filter((w) => w.sessionId !== id),
             tip: "Couldn't open side chat: " + msg(e),
           };
         });
       }
     },
 
-    closeBranch() { set({ branch: null }); },
+    closeSideWindow(sessionId) {
+      set((st) => ({ sideWindows: st.sideWindows.filter((w) => w.sessionId !== sessionId) }));
+    },
+    raiseSideWindow(sessionId) {
+      set((st) => {
+        const win = st.sideWindows.find((w) => w.sessionId === sessionId);
+        if (!win || st.sideWindows.at(-1) === win) return {}; // already on top
+        return { sideWindows: [...st.sideWindows.filter((w) => w !== win), win] };
+      });
+    },
 
     setModel(id) {
       const st = get(); const sid = st.activeId; if (!sid) return;
