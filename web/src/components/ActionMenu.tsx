@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { TEXT_SIZE_OPTIONS, useStore } from "../store/store.ts";
+import { TEXT_SIZE_OPTIONS, useStore, engineOf } from "../store/store.ts";
 import { resumeCommand } from "../lib/config.ts";
 import { engineReadout } from "../lib/engine.ts";
 import { copyText } from "../lib/clipboard.ts";
@@ -40,7 +40,8 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   const [theme, setTheme] = useState<Theme>(readTheme);
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const resumableId = s.activeId && !s.activeId.startsWith("pending-") ? s.activeId : null;
-  const engine = engineReadout(s.configOptions, s.models, sess?.modelId, s.modes, sess?.mode);
+  const lists = engineOf(s);
+  const engine = engineReadout(lists.configOptions, lists.models, sess?.modelId, lists.modes, sess?.mode);
   const curTextSize = TEXT_SIZE_OPTIONS.find((o) => o.id === s.textSize)?.label || "Default";
   const curIdentity = IDENTITY_OPTIONS.find((o) => o.id === identity)?.label || "Wordmark";
   const curTheme = THEME_OPTIONS.find((o) => o.id === theme)?.label || "Paper";
@@ -75,7 +76,7 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   // Same reason the dock reads out nothing here (see EMPTY_READOUT): on a saved
   // conversation the agent hasn't resumed, these options describe another
   // session and changing them fails.
-  const configOptions = (sess?.viewOnly ? [] : s.configOptions)
+  const configOptions = (sess?.viewOnly ? [] : lists.configOptions)
     .filter((o) => !dockOwned.has(o.id))
     .map((option, index) => ({ option, index }))
     .sort((a, b) => configRank(a.option) - configRank(b.option) || a.index - b.index)
@@ -272,7 +273,7 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
           </>
         )}
         {view.startsWith("cfg:") && (() => {
-          const opt = s.configOptions.find((o) => "cfg:" + o.id === view);
+          const opt = engineOf(s).configOptions.find((o) => "cfg:" + o.id === view);
           if (!opt) return null;
           return (
             <>

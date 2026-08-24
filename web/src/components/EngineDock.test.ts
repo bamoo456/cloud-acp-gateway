@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
-import type { ConfigOption } from "../types";
+import type { ConfigOption, Model } from "../types";
 
 const MODEL: ConfigOption = {
   id: "model", name: "Model", category: "model", type: "select", currentValue: "opus",
@@ -113,13 +113,18 @@ describe("EngineDock", () => {
     vi.unstubAllGlobals();
   });
 
-  async function mount(configOptions: ConfigOption[], working = false, viewOnly = false) {
+  // The lists go on the conversation (types.ts's SessionEngine), which is what
+  // the dock reads through engineOf — there is no store-global to set.
+  async function mount(configOptions: ConfigOption[], working = false, viewOnly = false, models: Model[] = []) {
     const { EngineDock } = await import("./EngineDock.tsx");
     const { useStore } = await import("../store/store.ts");
-    const s0 = useStore.getState();
+    const { makeSession, EMPTY_ENGINE } = await import("../store/reducers.ts");
     useStore.setState({
-      agentName: "claude", activeId: "S", configOptions,
-      sessions: { S: { ...s0.sessions.S, id: "S", title: "t", agentName: "claude", working, viewOnly } as never },
+      agentName: "claude", activeId: "S",
+      sessions: { S: {
+        ...makeSession("S"), title: "t", agentName: "claude", working, viewOnly,
+        engine: { ...EMPTY_ENGINE, configOptions, models },
+      } },
     });
     await act(async () => {
       root = createRoot(container);
@@ -164,8 +169,9 @@ describe("EngineDock", () => {
       id: "mode", name: "Mode", category: "", type: "select",
       currentValue: "auto", options: [{ value: "auto", name: "Auto" }],
     };
-    const useStore = await mount([MODEL, EFFORT, MODE], false, true);
-    await act(async () => { useStore.setState({ models: [{ modelId: "m1", name: "Legacy Model" }] }); });
+    // The lists ride along on the session even while it is view-only, so this
+    // seeds them and expects the readout to refuse them anyway.
+    await mount([MODEL, EFFORT, MODE], false, true, [{ modelId: "m1", name: "Legacy Model" }]);
 
     expect(container.querySelector(".mchip-mode")).toBeNull();
     expect(container.querySelector(".mchip .am")).toBeNull();
@@ -194,29 +200,31 @@ describe("EngineDock", () => {
     // Switching model rebuilds the effort list; the menu must re-read it rather
     // than serve options the agent has dropped.
     await act(async () => {
-      useStore.setState({ configOptions: [MODEL, { ...EFFORT, options: [{ value: "off", name: "Off" }], currentValue: "off" }] });
+      useStore.setState((st) => ({ sessions: { S: { ...st.sessions.S, engine: {
+        ...st.sessions.S.engine,
+        configOptions: [MODEL, { ...EFFORT, options: [{ value: "off", name: "Off" }], currentValue: "off" }],
+      } } } }));
     });
     const after = [...container.querySelectorAll(".engine-menu .arow .col > span:first-child")].map((e) => e.textContent);
     expect(after).toEqual(["Opus 4.8", "Sonnet 4.8", "Off"]);
   });
 
   // Bound to a floating window's session (store.ts's `sideWindows`) instead of to
-  // the conversation on screen: the two docks read different lists and set
-  // different sessions, which is the whole point of a side chat's own dock.
-  test("bound to a window's session, it reads that window's engine and sets it there", async () => {
+  // the conversation on screen: the two docks read the two sessions' own lists and
+  // set different sessions, which is the whole point of a side chat's own dock.
+  test("bound to a session, it reads that conversation's engine and sets it there", async () => {
     const { EngineDock } = await import("./EngineDock.tsx");
     const { useStore } = await import("../store/store.ts");
-    const { makeSession } = await import("../store/reducers.ts");
+    const { makeSession, EMPTY_ENGINE } = await import("../store/reducers.ts");
     useStore.setState({
       agentName: "claude", activeId: "S", agentReady: true,
-      // The main column is on Opus…
-      configOptions: [MODEL, EFFORT],
-      sessions: { S: makeSession("S"), W: makeSession("W") },
-      // …and the window is on Sonnet, with no thinking level of its own.
-      sideWindows: [{ parentId: null, sessionId: "W", slot: 0, engine: {
-        models: [], modes: [],
-        configOptions: [{ ...MODEL, currentValue: "sonnet" }],
-      } }],
+      sessions: {
+        // The main column is on Opus…
+        S: { ...makeSession("S"), engine: { ...EMPTY_ENGINE, configOptions: [MODEL, EFFORT] } },
+        // …and the windowed conversation on Sonnet, with no thinking level.
+        W: { ...makeSession("W"), engine: { ...EMPTY_ENGINE, configOptions: [{ ...MODEL, currentValue: "sonnet" }] } },
+      },
+      sideWindows: [{ parentId: null, sessionId: "W", slot: 0 }],
     });
     await act(async () => {
       root = createRoot(container);
@@ -238,5 +246,7 @@ describe("EngineDock", () => {
     await act(async () => { useStore.setState({ setConfigOption }); });
     await act(async () => { rows[0].click(); });
     expect(setConfigOption).toHaveBeenCalledWith("model", "opus", "W");
+    // …and the conversation on screen keeps its own list, untouched.
+    expect(useStore.getState().sessions.S.engine.configOptions).toEqual([MODEL, EFFORT]);
   });
 });

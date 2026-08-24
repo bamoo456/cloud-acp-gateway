@@ -1,5 +1,6 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { FakeSse, installFakeSse, setHistoryFetch } from "../test/fakeSse.ts";
+import { engineOf } from "./store.ts";
 
 // Same drain the other store tests use: a pushed frame crosses several awaits
 // (fetch → stream → parser) before it reaches the store.
@@ -48,6 +49,17 @@ async function bootstrap(opts: { loadSession?: boolean } = {}) {
 function lastSent(ws: FakeSse, method: string) {
   const hits = ws.sent.map((s) => JSON.parse(s)).filter((f) => f.method === method);
   return hits.at(-1);
+}
+
+// Put engine lists on one conversation. They live on the session now
+// (types.ts's SessionEngine), so a fixture seeds them there.
+function seedEngine(useStore: any, sessionId: string, engine: Record<string, unknown>) {
+  useStore.setState((st: any) => ({
+    sessions: { ...st.sessions, [sessionId]: {
+      ...st.sessions[sessionId],
+      engine: { models: [], modes: [], commands: [], configOptions: [], ...engine },
+    } },
+  }));
 }
 
 // The row the menu was opened on: another conversation, in another folder.
@@ -104,7 +116,7 @@ describe("side chat", () => {
 
   test("the side chat's models and modes do not repaint the open conversation's pickers", async () => {
     const { useStore, ws } = await bootstrap();
-    useStore.setState({
+    seedEngine(useStore, "open-session", {
       models: [{ modelId: "sonnet", name: "Sonnet" }],
       modes: [{ id: "normal", name: "Normal" }],
     });
@@ -121,10 +133,12 @@ describe("side chat", () => {
     await opening;
     await flushHistory();
 
-    // The lists describe the conversation in the main column, which never changed.
+    // Each conversation's lists describe itself: the side chat came back on
+    // Haiku/Plan, the one in the main column is still on Sonnet/Normal.
     const st = useStore.getState();
-    expect(st.models.map((m) => m.modelId)).toEqual(["sonnet"]);
-    expect(st.modes.map((m) => m.id)).toEqual(["normal"]);
+    expect(st.sessions["side-session"].engine.models.map((m) => m.modelId)).toEqual(["haiku"]);
+    expect(st.sessions["open-session"].engine.models.map((m) => m.modelId)).toEqual(["sonnet"]);
+    expect(st.sessions["open-session"].engine.modes.map((m) => m.id)).toEqual(["normal"]);
   });
 
   test("a failed load leaves no half-open window behind", async () => {
@@ -251,15 +265,15 @@ describe("side chat", () => {
     expect(useStore.getState().sideWindows.find((w) => w.sessionId === "side-c")!.slot).toBe(0);
   });
 
-  test("the load result's engine lists land on the window, not on the store's globals", async () => {
+  test("the load result's engine lists land on the side chat, not on the open conversation", async () => {
     const { useStore, ws } = await bootstrap();
-    useStore.setState({
+    seedEngine(useStore, "open-session", {
       models: [{ modelId: "sonnet", name: "Sonnet" }],
       configOptions: [{
         id: "model", name: "Model", type: "select", category: "model", currentValue: "sonnet",
         options: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }],
       }],
-    } as any);
+    });
 
     const opening = useStore.getState().openSideChat(ROW);
     await flush();
@@ -277,15 +291,15 @@ describe("side chat", () => {
     await flushHistory();
 
     const st = useStore.getState();
-    // The window's dock reads the side chat's own model…
-    expect(st.sideWindows[0].engine).toMatchObject({
+    // The card's dock reads the side chat's own model…
+    expect(st.sessions["side-session"].engine).toMatchObject({
       models: [{ modelId: "haiku", name: "Haiku" }],
       configOptions: [{ id: "model", currentValue: "opus" }],
     });
     expect(st.sessions["side-session"].modelId).toBe("haiku");
     // …and the main column's pickers still describe the conversation on screen.
-    expect(st.models.map((m) => m.modelId)).toEqual(["sonnet"]);
-    expect(st.configOptions[0].currentValue).toBe("sonnet");
+    expect(engineOf(st).models.map((m) => m.modelId)).toEqual(["sonnet"]);
+    expect(engineOf(st).configOptions[0].currentValue).toBe("sonnet");
   });
 
   test("setting an option on a side chat leaves the main column's options alone", async () => {
@@ -294,7 +308,7 @@ describe("side chat", () => {
       id: "model", name: "Model", type: "select", category: "model", currentValue: "sonnet",
       options: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }],
     };
-    useStore.setState({ configOptions: [OPT] } as any);
+    seedEngine(useStore, "open-session", { configOptions: [OPT] });
 
     const opening = useStore.getState().openSideChat(ROW);
     await flush();
@@ -307,34 +321,37 @@ describe("side chat", () => {
     // Addressed to the side chat, optimistically shown there, and nowhere else.
     const req = lastSent(ws, "session/set_config_option");
     expect(req.params).toMatchObject({ sessionId: "side-session", configId: "model", value: "opus" });
-    expect(useStore.getState().sideWindows[0].engine!.configOptions[0].currentValue).toBe("opus");
-    expect(useStore.getState().configOptions[0].currentValue).toBe("sonnet");
+    const opt = (st: any, id: string) => st.sessions[id].engine.configOptions[0].currentValue;
+    expect(opt(useStore.getState(), "side-session")).toBe("opus");
+    expect(opt(useStore.getState(), "open-session")).toBe("sonnet");
 
-    // The agent's answer replaces the window's list, still not the global one.
+    // The agent's answer replaces the side chat's list, still not the other's.
     ws.recv({
       jsonrpc: "2.0", id: req.id,
       result: { configOptions: [{ ...OPT, currentValue: "opus" }] },
     });
     await flush();
-    expect(useStore.getState().sideWindows[0].engine!.configOptions[0].currentValue).toBe("opus");
-    expect(useStore.getState().configOptions[0].currentValue).toBe("sonnet");
+    expect(opt(useStore.getState(), "side-session")).toBe("opus");
+    expect(opt(useStore.getState(), "open-session")).toBe("sonnet");
   });
 
-  test("a config_option_update for a side chat is routed to its window", async () => {
+  test("a config_option_update is routed to the session it names", async () => {
     const { useStore, ws } = await bootstrap();
     const OPT = {
       id: "model", name: "Model", type: "select", category: "model", currentValue: "sonnet",
       options: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }],
     };
-    useStore.setState({ configOptions: [OPT] } as any);
+    seedEngine(useStore, "open-session", { configOptions: [OPT] });
     const opening = useStore.getState().openSideChat(ROW);
     await flush();
     ws.recv({ jsonrpc: "2.0", id: lastSent(ws, "session/load").id, result: { configOptions: [OPT] } });
     await opening;
     await flushHistory();
 
-    // The gateway re-applies a conversation's own controls after a load and
-    // broadcasts the result for that session — it must not land on the main column.
+    // The gateway re-applies a conversation's own controls after any client's
+    // load/new/fork and broadcasts the result for THAT session to every client —
+    // it used to be applied globally, so this frame relabelled the main column.
+    const opt = (id: string) => useStore.getState().sessions[id].engine.configOptions[0].currentValue;
     ws.recv({
       jsonrpc: "2.0", method: "session/update",
       params: {
@@ -343,10 +360,10 @@ describe("side chat", () => {
       },
     });
     await flush();
-    expect(useStore.getState().sideWindows[0].engine!.configOptions[0].currentValue).toBe("opus");
-    expect(useStore.getState().configOptions[0].currentValue).toBe("sonnet");
+    expect(opt("side-session")).toBe("opus");
+    expect(opt("open-session")).toBe("sonnet");
 
-    // A frame for the conversation on screen still lands globally.
+    // A frame naming the conversation on screen lands on that one.
     ws.recv({
       jsonrpc: "2.0", method: "session/update",
       params: {
@@ -355,7 +372,21 @@ describe("side chat", () => {
       },
     });
     await flush();
-    expect(useStore.getState().configOptions[0].currentValue).toBe("opus");
+    expect(opt("open-session")).toBe("opus");
+
+    // And one naming a conversation this client does not hold changes nothing —
+    // it used to be enough for another device's session/load to move this
+    // client's readout.
+    ws.recv({
+      jsonrpc: "2.0", method: "session/update",
+      params: {
+        sessionId: "someone-elses-session",
+        update: { sessionUpdate: "config_option_update", configOptions: [{ ...OPT, currentValue: "sonnet" }] },
+      },
+    });
+    await flush();
+    expect(opt("open-session")).toBe("opus");
+    expect(opt("side-session")).toBe("opus");
   });
 
   test("setModel on a side chat is addressed to it, not to the open conversation", async () => {

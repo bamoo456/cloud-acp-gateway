@@ -5,7 +5,7 @@ import type { Session } from "../types.ts";
 
 function makeSession(id: string, title: string): Session {
   return {
-    id, title, items: [], seq: 0,
+    id, title, items: [], seq: 0, engine: { models: [], modes: [], commands: [], configOptions: [] },
     createdAt: Date.now(), lastActiveAt: Date.now(),
     agentName: "codex", cwd: "/p",
     hasContent: true, working: false,
@@ -59,7 +59,7 @@ describe("BranchWindow", () => {
     act(() => {
       useStore.setState({
         sessions: { "parent-1": makeSession("parent-1", "Parent") },
-        sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }],
+        sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
       });
     });
     expect(container.querySelector(".branch-win")).toBeNull();
@@ -75,7 +75,7 @@ describe("BranchWindow", () => {
         "other": makeSession("other", "Something else"),
         "branch-1": makeSession("branch-1", "Parent (Branch)"),
       },
-      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }],
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
     });
     await render();
     expect(container.querySelector(".branch-win")).not.toBeNull();
@@ -107,8 +107,8 @@ describe("BranchWindow", () => {
         "side-1": makeSession("side-1", "Another thread"),
       },
       sideWindows: [
-        { parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null },
-        { parentId: null, sessionId: "side-1", slot: 1, engine: null },
+        { parentId: "parent-1", sessionId: "branch-1", slot: 0 },
+        { parentId: null, sessionId: "side-1", slot: 1 },
       ],
     });
     await render();
@@ -141,8 +141,8 @@ describe("BranchWindow", () => {
         "side-1": makeSession("side-1", "Another thread"),
       },
       sideWindows: [
-        { parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null },
-        { parentId: null, sessionId: "side-1", slot: 1, engine: null },
+        { parentId: "parent-1", sessionId: "branch-1", slot: 0 },
+        { parentId: null, sessionId: "side-1", slot: 1 },
       ],
     });
     await render();
@@ -169,7 +169,7 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "branch-1": makeSession("branch-1", "Parent (Branch)"),
       },
-      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }],
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
     });
     await render();
 
@@ -196,7 +196,7 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "pending-x": makeSession("pending-x", "Parent (Branch)"),
       },
-      sideWindows: [{ parentId: "parent-1", sessionId: "pending-x", slot: 0, engine: null }],
+      sideWindows: [{ parentId: "parent-1", sessionId: "pending-x", slot: 0 }],
     });
     await render();
 
@@ -226,7 +226,7 @@ describe("BranchWindow", () => {
         const sessions = { ...st.sessions };
         delete sessions["pending-x"];
         sessions["branch-1"] = makeSession("branch-1", "Parent (Branch)");
-        return { sessions, sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }] };
+        return { sessions, sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }] };
       });
     });
     const swapped = container.querySelector<HTMLElement>(".branch-win")!;
@@ -240,7 +240,7 @@ describe("BranchWindow", () => {
       useStore.setState((st) => ({
         activeId: "parent-2",
         sessions: { ...st.sessions, "parent-2": makeSession("parent-2", "Other") },
-        sideWindows: [{ parentId: "parent-2", sessionId: "branch-1", slot: 0, engine: null }],
+        sideWindows: [{ parentId: "parent-2", sessionId: "branch-1", slot: 0 }],
       }));
     });
     expect(container.querySelector<HTMLElement>(".branch-win")!.style.left).toBe("");
@@ -255,7 +255,7 @@ describe("BranchWindow", () => {
         "parent-1": makeSession("parent-1", "Parent"),
         "branch-1": makeSession("branch-1", "Parent (Branch)"),
       },
-      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0, engine: null }],
+      sideWindows: [{ parentId: "parent-1", sessionId: "branch-1", slot: 0 }],
     });
     await render();
 

@@ -11,7 +11,7 @@
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
 import { useStore } from "./store/store.ts";
-import type { Session } from "./types.ts";
+import type { Session, SessionEngine } from "./types.ts";
 import "./styles.css";
 
 // Read before anything touches the store: the store's own URL-sync subscriber
@@ -111,7 +111,45 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 // ---- canned conversation ----------------------------------------------------
+// The engine lists this conversation runs on. On the session, not on the store:
+// they are per conversation (types.ts's SessionEngine).
+const ENGINE: SessionEngine = {
+  models: [
+    { modelId: "opus", name: "Opus 4.8", description: "Most capable" },
+    { modelId: "sonnet", name: "Sonnet 4.8", description: "Fast" },
+  ],
+  modes: [
+    { id: "default", name: "Default", description: "Standard behavior, prompts for dangerous operations" },
+    { id: "acceptEdits", name: "Accept Edits", description: "Auto-accept file edit operations" },
+    { id: "plan", name: "Plan Mode", description: "Planning mode, no actual tool execution" },
+  ],
+  commands: [],
+  configOptions: [
+    {
+      id: "model", name: "Model", category: "model", type: "select", currentValue: "opus",
+      options: [{ value: "opus", name: "Opus 4.8" }, { value: "sonnet", name: "Sonnet 4.8" }],
+    },
+    {
+      id: "thinking", name: "Thinking", category: "reasoning", type: "select", currentValue: "high",
+      options: [{ value: "off", name: "Off" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }],
+    },
+    // Claude reports the permission mode as an option plainly named "Mode" —
+    // the shape that has to keep working, since "Model" contains the same four
+    // letters and a loose match would swallow it.
+    {
+      id: "mode", name: "Mode", description: "Session permission mode", type: "select", currentValue: "acceptEdits",
+      options: [
+        { value: "auto", name: "Auto", description: "Use a model classifier to approve/deny permission prompts" },
+        { value: "default", name: "Default", description: "Standard behavior, prompts for dangerous operations" },
+        { value: "acceptEdits", name: "Accept Edits", description: "Auto-accept file edit operations" },
+        { value: "plan", name: "Plan Mode", description: "Planning mode, no actual tool execution" },
+      ],
+    },
+  ],
+};
+
 const session: Session = {
+  engine: ENGINE,
   id: "s-usage", title: "Usage gauge caching", createdAt: Date.now() - 900_000,
   agentName: "claude", cwd: CWD, lastActiveAt: Date.now(),
   hasContent: true, working: true, modelId: "opus", mode: "acceptEdits",
@@ -170,37 +208,6 @@ useStore.setState({
   // On a phone the panels are tabs, so opening one starts the harness on the
   // wrong tab; only the desktop layout wants the changes column open.
   sidebarOpen: true, filesOpen: window.innerWidth >= 1100,
-  models: [
-    { modelId: "opus", name: "Opus 4.8", description: "Most capable" },
-    { modelId: "sonnet", name: "Sonnet 4.8", description: "Fast" },
-  ],
-  configOptions: [
-    {
-      id: "model", name: "Model", category: "model", type: "select", currentValue: "opus",
-      options: [{ value: "opus", name: "Opus 4.8" }, { value: "sonnet", name: "Sonnet 4.8" }],
-    },
-    {
-      id: "thinking", name: "Thinking", category: "reasoning", type: "select", currentValue: "high",
-      options: [{ value: "off", name: "Off" }, { value: "medium", name: "Medium" }, { value: "high", name: "High" }],
-    },
-    // Claude reports the permission mode as an option plainly named "Mode" —
-    // the shape that has to keep working, since "Model" contains the same four
-    // letters and a loose match would swallow it.
-    {
-      id: "mode", name: "Mode", description: "Session permission mode", type: "select", currentValue: "acceptEdits",
-      options: [
-        { value: "auto", name: "Auto", description: "Use a model classifier to approve/deny permission prompts" },
-        { value: "default", name: "Default", description: "Standard behavior, prompts for dangerous operations" },
-        { value: "acceptEdits", name: "Accept Edits", description: "Auto-accept file edit operations" },
-        { value: "plan", name: "Plan Mode", description: "Planning mode, no actual tool execution" },
-      ],
-    },
-  ],
-  modes: [
-    { id: "default", name: "Default", description: "Standard behavior, prompts for dangerous operations" },
-    { id: "acceptEdits", name: "Accept Edits", description: "Auto-accept file edit operations" },
-    { id: "plan", name: "Plan Mode", description: "Planning mode, no actual tool execution" },
-  ],
   promptCapabilities: { image: true, embeddedContext: true },
   tip: "",
   // bootstrap() is the thing that would normally hydrate these out of /prefs,
@@ -219,10 +226,12 @@ if (SCENE.has("idle")) {
 }
 if (SCENE.has("codex")) useStore.setState({ agentName: "codex" });
 if (SCENE.has("opencode")) {
-  useStore.setState({
+  useStore.setState((st) => ({
     agentName: "opencode",
-    configOptions: useStore.getState().configOptions.filter((o) => o.id !== "thinking"),
-  });
+    sessions: { "s-usage": { ...st.sessions["s-usage"], engine: {
+      ...ENGINE, configOptions: ENGINE.configOptions.filter((o) => o.id !== "thinking"),
+    } } },
+  }));
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

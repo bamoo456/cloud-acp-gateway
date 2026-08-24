@@ -56,9 +56,10 @@ describe("session helpers", () => {
       models: { availableModels: [{ modelId: "m1", name: "M1" }], currentModelId: "m1" },
       modes: { availableModes: [{ id: "default", name: "Default" }], currentModeId: "default" },
     };
-    const { session, models, modes } = applyModelsModes(makeSession("S"), res);
-    expect(models).toHaveLength(1);
-    expect(modes).toHaveLength(1);
+    const session = applyModelsModes(makeSession("S"), res);
+    // The lists land on the session, not on a store-global: see SessionEngine.
+    expect(session.engine.models).toHaveLength(1);
+    expect(session.engine.modes).toHaveLength(1);
     expect(session.modelId).toBe("m1");
     expect(session.mode).toBe("default");
   });

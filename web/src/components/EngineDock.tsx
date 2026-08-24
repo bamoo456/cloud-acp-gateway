@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useStore } from "../store/store.ts";
+import { engineOf, useStore } from "../store/store.ts";
 import { EMPTY_READOUT, engineReadout } from "../lib/engine.ts";
 import { IconChevronDown, IconLogin } from "../lib/icons.tsx";
 import type { AgentRef } from "../types.ts";
@@ -29,9 +29,9 @@ function useElapsed(running: boolean): number {
 // pane, outside the input, so it never competes with the session title in the
 // crumb and never moves as the textarea grows (§3 P3).
 // `sessionId` binds it to a conversation that ISN'T the one in the main column —
-// a floating window's own dock. A bound dock reads that window's engine lists
-// (store.ts's `WindowEngine`) and sets every control on that session, so the two
-// docks on screen can hold different models. It also drops the agent switcher:
+// a floating window's own dock. It then reads that session's engine lists and sets
+// every control on it, so the two docks on screen can hold different models
+// (which they do: the lists are per session). It also drops the agent switcher:
 // the agent is the whole page's connection, not this conversation's, and
 // switching it closes the windows.
 export function EngineDock({ onOpenLogin, sessionId }: { onOpenLogin?: (agent: AgentRef) => void; sessionId?: string }) {
@@ -41,12 +41,9 @@ export function EngineDock({ onOpenLogin, sessionId }: { onOpenLogin?: (agent: A
   const bound = !!sessionId;
   const id = sessionId ?? s.activeId;
   const sess = id ? s.sessions[id] : null;
-  const win = bound ? s.sideWindows.find((w) => w.sessionId === sessionId) : undefined;
-  // A bound dock falls back to the globals only while its window's open round trip
-  // is still in flight — same fallback the store's own windowEngine() makes.
-  const engine = bound
-    ? win?.engine ?? { models: s.models, modes: s.modes, configOptions: s.configOptions }
-    : { models: s.models, modes: s.modes, configOptions: s.configOptions };
+  // This conversation's own lists — the readout and the pickers both come from the
+  // session, never from a store-global (see store.ts's engineOf).
+  const engine = engineOf(s, sessionId);
   // The same flag the thread's own working indicator reads, so the two can't
   // disagree about whether a turn is in flight.
   const running = !!sess?.working;
