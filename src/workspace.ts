@@ -159,7 +159,7 @@ export interface ChangesResult {
   repo: string | null;   // absolute repo root, or null when cwd isn't a git checkout
   files: ChangedFile[];
   truncated: boolean;
-  reason?: string;       // why `files` is empty when repo is null (no git, not a repo)
+  reason?: string;       // why `files` is empty: no git, not a repo, or the diff itself failed
 }
 
 export interface FileDiff {
@@ -479,7 +479,13 @@ export async function revChanges(cwd: string, spec: RevSpec): Promise<ChangesRes
   // that isn't fetched, a commit from a branch since deleted. Say which, rather
   // than rendering it as "this commit changed nothing".
   if (names.code !== 0) {
-    return { repo: root, files: [], truncated: false, reason: names.failed ? "git-missing" : "bad-revision" };
+    if (names.failed) return { repo: root, files: [], truncated: false, reason: "git-missing" };
+    // "no merge base" is a different problem with a different fix: the ref
+    // resolved fine, the history is just too shallow (or grafted) to share an
+    // ancestor with it. Deepening the fetch fixes that; re-fetching the ref
+    // doesn't. git-exec pins LC_ALL=C, so this text is stable.
+    const reason = /no merge base/.test(names.stderr) ? "no-merge-base" : "bad-revision";
+    return { repo: root, files: [], truncated: false, reason };
   }
   const stats = new Map<string, { additions: number; deletions: number; binary: boolean }>();
   const numstat = await git(root, [...base, "--numstat"]);
