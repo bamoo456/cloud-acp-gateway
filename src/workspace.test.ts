@@ -318,6 +318,22 @@ describe("revChanges / commits", () => {
     assert.deepEqual(r.files, []);
   });
 
+  test("a base that shares no history says the history is too shallow, not unknown", async () => {
+    // An orphan branch is the cheap stand-in for the real case: a --depth 1
+    // clone whose tip has no common ancestor with the base ref. The ref
+    // resolves fine, so "may never have been fetched" would send the reader
+    // after the wrong fix.
+    const dir = makeRepo();
+    const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+    run("checkout", "-q", "--orphan", "grafted");
+    fs.writeFileSync(path.join(dir, "orphan.txt"), "no shared ancestor\n");
+    run("add", "-A");
+    run("commit", "-q", "-m", "orphan root");
+    const r = await revChanges(dir, { base: "main" });
+    assert.equal(r.reason, "no-merge-base");
+    assert.deepEqual(r.files, []);
+  });
+
   test("fileDiff against a commit describes what the commit did, not the worktree", async () => {
     const { dir, second } = makeHistory();
     // Dirty the file afterwards: the committed diff must be unaffected by it.
