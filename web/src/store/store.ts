@@ -1004,7 +1004,14 @@ export const useStore = create<State>((set, get) => {
   }
 
   function initSession(): Promise<unknown> {
-    if (!sessionInit) sessionInit = acp.request("session/new", { cwd: get().cwd || "", mcpServers: [] });
+    if (!sessionInit) {
+      // A rejection must not stay cached: session/new can now fail fast (the frame
+      // never reached the gateway), and a poisoned sessionInit would re-throw that
+      // same stale error for every later prompt in this folder.
+      const p = acp.request("session/new", { cwd: get().cwd || "", mcpServers: [] });
+      sessionInit = p;
+      p.catch(() => { if (sessionInit === p) sessionInit = null; });
+    }
     return sessionInit;
   }
 
