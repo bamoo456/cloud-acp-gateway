@@ -46,8 +46,13 @@ const total = (counts: Record<string, number>) => Object.values(counts).reduce((
 // `onDetail` is how the panel learns a file is open here, which is what widens
 // it. Review's open file is this component's own state, and the panel cannot
 // see it any other way.
-export function ReviewPanel({ cwd, onCount, split, onDetail }: {
+export function ReviewPanel({ cwd, refreshKey, onCount, split, onDetail }: {
   cwd: string; onCount: (n: number) => void;
+  // Bumped by the panel whenever the checkout is worth re-reading — a turn
+  // ending, the Refresh button. Without it a review is a snapshot of the moment
+  // the mode was opened, and a commit the agent lands mid-conversation never
+  // appears in the log.
+  refreshKey?: number;
   split?: boolean; onDetail?: (open: boolean) => void;
 }) {
   const sendPrompt = useStore((s) => s.sendPrompt);
@@ -110,34 +115,54 @@ export function ReviewPanel({ cwd, onCount, split, onDetail }: {
   const pending = (scope === "commits" && !commit) || (scope === "branch" && !baseRef);
   const specKey = spec ? (spec.commit ? "c:" + spec.commit : "b:" + spec.base) : "working";
 
-  // The log, once per folder. Also supplies the branch name and default base, so
-  // the Branch chip works without the Commits chip ever being opened.
+  // A folder change is a different review: what was selected there means
+  // nothing here. Separate from the fetch below, because a refresh is the SAME
+  // review — resetting on one of those would kick you off the commit you are
+  // reading every time the agent finished a turn.
   useEffect(() => {
-    let alive = true;
     setLog(null);
     setScope("working");
     setCommit(null);
+    setBaseRef("");
+  }, [cwd]);
+
+  // The log, per folder and again on every refresh. Also supplies the branch
+  // name and default base, so the Branch chip works without the Commits chip
+  // ever being opened.
+  const seededBase = useRef<string | null>(null);
+  useEffect(() => {
+    let alive = true;
     getCommits(cwd)
       .then((r) => {
         if (!alive) return;
+        // The previous log stays on screen until this one lands: a refresh
+        // updates the list, it doesn't blank it.
         setLog({ commits: r.commits, branch: r.branch, defaultBase: r.defaultBase });
-        setBaseRef(r.defaultBase ?? "");
+        // Once per folder. The base is editable, and re-seeding it on every
+        // refresh would overwrite what someone typed with the repo's default.
+        if (seededBase.current !== cwd) {
+          seededBase.current = cwd;
+          setBaseRef(r.defaultBase ?? "");
+        }
       })
-      .catch(() => { if (alive) setLog({ commits: [] }); });
+      .catch(() => { if (alive) setLog((l) => l ?? { commits: [] }); });
     return () => { alive = false; };
-  }, [cwd]);
+  }, [cwd, refreshKey]);
 
   // The file list and the draft for whatever revision is selected. One effect
   // for both: they are two halves of the same question, and a list that arrived
   // without its comments would render every row un-badged for a beat.
   const gen = useRef(0);
+  // Same split as the log: a new revision is a new thing to read, so the open
+  // file and the draft view go with it — but a refresh is the revision already
+  // on screen, and closing the diff someone is mid-read of would be the panel
+  // fighting them.
+  useEffect(() => { setOpenFile(null); setShowDraft(false); }, [cwd, specKey]);
   useEffect(() => {
     if (pending) { setChanges(null); setComments([]); return; }
     const mine = ++gen.current;
     setLoading(true);
     setErr(null);
-    setOpenFile(null);
-    setShowDraft(false);
     getWorkspaceChanges(cwd, spec)
       .then((r) => { if (mine === gen.current) setChanges(r); })
       .catch((e: Error) => { if (mine === gen.current) { setChanges(null); setErr(e.message); } })
@@ -153,7 +178,7 @@ export function ReviewPanel({ cwd, onCount, split, onDetail }: {
       })
       .catch(() => { if (mine === gen.current) setComments([]); });
     return () => { gen.current++; };
-  }, [cwd, specKey, pending]);
+  }, [cwd, specKey, pending, refreshKey]);
 
   // Every change to the draft goes straight to the gateway. Saving on each edit
   // rather than on a timer is what makes "the phone discarded the tab"
@@ -316,8 +341,10 @@ export function ReviewPanel({ cwd, onCount, split, onDetail }: {
         {!pending && (
           <>
             {err && <div className="wf-empty">{err}</div>}
-            {!err && loading && <div className="wf-empty">Reading changes…</div>}
-            {!err && !loading && changes && (
+            {/* Only while there is nothing to show. On a refresh the last list
+                stays up rather than flashing to a placeholder and back. */}
+            {!err && loading && !changes && <div className="wf-empty">Reading changes…</div>}
+            {!err && changes && (
               <EmptyState changes={changes} scope={scope} ref_={spec?.base ?? spec?.commit} />
             )}
             {files.length > 0 && <StatLine files={files} truncated={!!changes?.truncated} />}
