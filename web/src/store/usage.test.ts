@@ -90,6 +90,28 @@ describe("usage_update", () => {
     expect(useStore.getState().rateLimits.claude.five_hour.utilization).toBe(0.36);
   });
 
+  test("an event that names a window but carries no numbers keeps what's known", async () => {
+    // The adapter really does send a rate limit with no `utilization` (see
+    // usage-limits.ts). Letting it replace the entry drops the window from the
+    // strip, which reads as the 5h segment disappearing mid-conversation while
+    // wk stays — until the next poll puts it back.
+    const { useStore, ws } = await bootClaude();
+    ws.recv(usage("s1", { ...rateLimit("five_hour", 0.36, 1_700_000_000) }));
+    ws.recv(usage("s1", { _meta: { "_claude/rateLimit": { status: "allowed", rateLimitType: "five_hour" } } }));
+    await flush();
+    expect(useStore.getState().rateLimits.claude.five_hour)
+      .toMatchObject({ utilization: 0.36, resetsAt: 1_700_000_000 });
+  });
+
+  test("an event with a utilization but no reset keeps the countdown", async () => {
+    const { useStore, ws } = await bootClaude();
+    ws.recv(usage("s1", { ...rateLimit("five_hour", 0.36, 1_700_000_000) }));
+    ws.recv(usage("s1", { ...rateLimit("five_hour", 0.41) }));
+    await flush();
+    expect(useStore.getState().rateLimits.claude.five_hour)
+      .toMatchObject({ utilization: 0.41, resetsAt: 1_700_000_000 });
+  });
+
   test("limits from a session this client isn't holding still count", async () => {
     // Quotas are account-wide, so a background conversation's event is just as
     // true — and the sid check below would otherwise drop the whole frame.

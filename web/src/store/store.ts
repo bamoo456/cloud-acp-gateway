@@ -736,7 +736,17 @@ export const useStore = create<State>((set, get) => {
       // This _meta key only ever rides on a Claude usage_update — hardcoded
       // rather than derived from the active agent, so it lands correctly even
       // if a background Codex poll is what's currently being displayed.
-      set({ rateLimits: { ...get().rateLimits, claude: { ...get().rateLimits.claude, [rl.rateLimitType]: rl } } });
+      //
+      // Only the fields the event actually carries win. An event can name a
+      // window and say nothing about it — the one real event captured on this
+      // gateway carried no `utilization` at all (usage-limits.ts) — and
+      // replacing the entry outright would erase what the /usage/limits poll
+      // had already filled in. The strip skips a window whose utilization
+      // isn't a number, so that reads on screen as the 5h segment vanishing
+      // mid-conversation while the others stay, until the next poll.
+      const carried = Object.fromEntries(Object.entries(rl).filter(([, v]) => v != null));
+      const merged = { ...get().rateLimits.claude?.[rl.rateLimitType], ...carried };
+      set({ rateLimits: { ...get().rateLimits, claude: { ...get().rateLimits.claude, [rl.rateLimitType]: merged } } });
     }
     const st = get();
     const remotePrompt = p.update.sessionUpdate === "user_message_chunk";
