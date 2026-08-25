@@ -428,6 +428,33 @@ test("a permission request arriving mid-load is still appended, replayable and a
   }
 });
 
+// Closing a tab aborts the SSE stream instantly while the prompt POST it just fired
+// (sent with fetch keepalive) is still in flight. Tearing the Conn down on the stream
+// close would 409 that POST and lose the turn — the bug this grace window exists for.
+test("a POST that lands just after its SSE stream closed still reaches the agent", async () => {
+  const prev = process.env.ACPG_CONN_GRACE_MS;
+  process.env.ACPG_CONN_GRACE_MS = "1500";
+  try {
+    const { port, agent, close } = await makeTestServer();
+    const c = sse(port);
+    const conn = await c.conn;
+    c.close();
+    await new Promise((r) => setTimeout(r, 100)); // let the server see the stream close
+
+    const prompt = { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S", prompt: [{ type: "text", text: "go" }] } };
+    assert.equal(await post(port, conn, prompt), 202);
+    assert.ok(agent().sent.map(parse).some((o) => o.method === "session/prompt"), "the prompt reached the agent");
+
+    // The tombstone is not permanent: past the grace the conn is forgotten for good.
+    await new Promise((r) => setTimeout(r, 2000));
+    assert.equal(await post(port, conn, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "S" } }), 409);
+    await close();
+  } finally {
+    if (prev === undefined) delete process.env.ACPG_CONN_GRACE_MS;
+    else process.env.ACPG_CONN_GRACE_MS = prev;
+  }
+});
+
 test("POST to an unknown conn is rejected with 409", async () => {
   const { port, close } = await makeTestServer();
   assert.equal(await post(port, "no-such-conn", { jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "S" } }), 409);
