@@ -1100,6 +1100,45 @@ test("an outstanding elicitation (agent question) is re-delivered on reload and 
   await close();
 });
 
+test("an outstanding elicitation reaches a freshly connected client without a session/load", async () => {
+  const { port, agent, close } = await makeTestServer();
+
+  // A prompts S; the agent asks a question and blocks. A drops without answering.
+  const a = sse(port);
+  const ca = await a.conn;
+  await post(port, ca, { jsonrpc: "2.0", id: 1, method: "session/prompt", params: { sessionId: "S", prompt: [{ type: "text", text: "go" }] } });
+  const gotA = nextFrame(a, (o) => o.id === 42 && o.method === "elicitation/create");
+  agent().emit(Buffer.from(JSON.stringify({
+    jsonrpc: "2.0", id: 42, method: "elicitation/create",
+    params: { sessionId: "S", mode: "form", message: "Which approach?", requestedSchema: { type: "object", properties: {} } },
+  })));
+  await gotA;
+  a.close();
+  await new Promise((r) => setTimeout(r, 20));
+
+  // B is a fresh page load: cursor=end, so the replay covers nothing, and it opens
+  // the conversation from the history API instead of session/load. The prompt has to
+  // arrive on attach or it stays invisible until the user sends another prompt.
+  const b = sse(port);
+  const cb = await b.conn;
+  const redelivered = await withTimeout(
+    b.next((e) => { try { const o = parseFrame(e.data); return o.id === 42 && o.method === "elicitation/create"; } catch { return false; } }),
+    1000,
+    "the outstanding elicitation was not re-delivered on attach",
+  );
+  // Unsequenced: carrying its (older) real seq would drag B's cursor backwards and
+  // make B's next reconnect replay the whole tail after the prompt.
+  assert.equal(redelivered.id, null, "the re-delivered prompt must not move the client's resume cursor");
+
+  // And it is answerable straight away — no load, no resume.
+  agent().sent.length = 0;
+  await post(port, cb, { jsonrpc: "2.0", id: 42, result: { action: "accept", content: { question_0: "Option A" } } });
+  assert.equal(fwdedReplies(agent().sent, 42), 1, "the fresh client's answer reaches the agent");
+
+  b.close();
+  await close();
+});
+
 test("the server-side option-answer route refuses an elicitation (it needs the form, not an optionId)", async () => {
   const { port, agent, answerInbox, close } = await makeTestServer();
   const a = sse(port);
