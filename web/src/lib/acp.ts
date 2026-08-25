@@ -5,7 +5,11 @@
 
 export interface Sock {
   readyState: number;
-  send(data: string): void;
+  // `onFail` fires when the frame provably did NOT reach the gateway (transport
+  // closed, network error, or a non-2xx from the upstream POST). Optional so a
+  // transport that cannot tell may omit it; Acp uses it to fail the matching
+  // request instead of waiting forever for a response that can never arrive.
+  send(data: string, onFail?: () => void): void;
   close(code?: number): void;
   onopen: (() => void) | null;
   onmessage: ((data: string) => void) | null;
@@ -20,6 +24,10 @@ export interface RpcMessage {
   error?: { code: number; message: string };
 }
 type Status = "connecting" | "connected" | "offline";
+
+// Rejection for a frame the transport proved never reached the gateway. Not
+// __disconnected: the link was up, so this one IS worth telling the user about.
+const NOT_DELIVERED = { code: -32000, message: "not delivered to the gateway — nothing was sent to the agent" };
 
 export class Acp {
   private sock: Sock | null = null;
@@ -89,15 +97,28 @@ export class Acp {
     }
   }
 
-  private raw(obj: unknown) {
-    if (this.sock && this.sock.readyState === 1) this.sock.send(JSON.stringify(obj));
+  // `onFail` is invoked with the error to surface when the frame did not reach the
+  // gateway. A closed socket is reported as __disconnected (same shape as the
+  // onclose path, so callers keep treating it as "link dropped, not your fault");
+  // a rejected/non-2xx POST is a real error worth showing.
+  private raw(obj: unknown, onFail?: (e: unknown) => void) {
+    if (this.sock && this.sock.readyState === 1) {
+      this.sock.send(JSON.stringify(obj), () => onFail?.(NOT_DELIVERED));
+    } else {
+      onFail?.({ __disconnected: true });
+    }
   }
 
   request(method: string, params: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve, reject });
-      this.raw({ jsonrpc: "2.0", id, method, params });
+      // A frame that never reached the gateway gets no response on the SSE stream,
+      // so without this the request hangs forever — which is how a lost prompt used
+      // to render as a turn stuck on "working" that no agent ever heard about.
+      this.raw({ jsonrpc: "2.0", id, method, params }, (e) => {
+        if (this.pending.delete(id)) reject(e); // else the response won the race
+      });
     });
   }
   notify(method: string, params: unknown) { this.raw({ jsonrpc: "2.0", method, params }); }
@@ -152,6 +173,19 @@ export interface SseTransport {
   fetchImpl?: typeof fetch;
 }
 
+// fetch's keepalive body limit (64KB per spec); kept a little under it for the
+// request line and headers.
+const KEEPALIVE_MAX_BYTES = 60_000;
+
+// Whether `data` fits fetch's keepalive body cap, measured in UTF-8 BYTES —
+// data.length counts UTF-16 units and undercounts by up to 3x (CJK text, emoji),
+// which would push an oversized body into a keepalive fetch that then rejects.
+// The length check short-circuits the encode (UTF-8 bytes >= UTF-16 units always),
+// so a multi-MB image prompt never gets copied just to be measured.
+function keepaliveFits(data: string): boolean {
+  return data.length <= KEEPALIVE_MAX_BYTES && new TextEncoder().encode(data).length <= KEEPALIVE_MAX_BYTES;
+}
+
 // One Sock backed by a streaming fetch (downstream) + POSTs (upstream). lastSeq is
 // owned by sseFactory's closure so it survives reconnects on the same Acp.
 function sseSock(t: SseTransport, getSeq: () => number, setSeq: (n: number) => void): Sock {
@@ -162,16 +196,24 @@ function sseSock(t: SseTransport, getSeq: () => number, setSeq: (n: number) => v
 
   const sock: Sock = {
     get readyState() { return readyState; },
-    send(data: string) {
-      if (readyState !== 1) return;
-      // Fire-and-forget: the JSON-RPC response (if any) returns on the SSE stream, not
-      // here. A failed POST simply means no response arrives; the drop path reconnects.
+    send(data: string, onFail?: () => void) {
+      if (readyState !== 1) { onFail?.(); return; }
+      // The JSON-RPC response (if any) returns on the SSE stream, not here — the
+      // only thing this reply tells us is whether the frame ARRIVED, which is worth
+      // knowing: a dropped POST otherwise leaves the sender waiting on a turn the
+      // gateway never saw.
       void doFetch(t.rpcUrl(connId), {
         method: "POST",
         body: data,
         headers: { "content-type": "application/json" },
         signal: ctrl.signal,
-      }).catch(() => {});
+        // keepalive lets the browser finish the POST after the page is closed or
+        // navigated away — the window in which a just-sent prompt used to be lost
+        // (the request was cancelled mid-body, and the gateway drops a body whose
+        // `end` never fires). Spec-capped at 64KB, and a prompt can carry inline
+        // base64 images, so a larger body falls back to a plain fetch.
+        ...(keepaliveFits(data) ? { keepalive: true } : {}),
+      }).then((res) => { if (!res.ok) onFail?.(); }, () => onFail?.());
     },
     close() { if (readyState !== 3) { readyState = 3; ctrl.abort(); } },
     onopen: null,
