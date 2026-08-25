@@ -2961,11 +2961,20 @@ class Channel {
     });
   }
 
+  // The conn's stream is gone, but an upstream POST it already sent may still be
+  // arriving (see Gateway.detach). Release only what would HARM the channel if held
+  // by a dead conn: a load gate funnels a session's whole replay to one conn, so a
+  // stale one would swallow it. Everything else (conns/idmux/subs) is harmless to
+  // keep — sends are guarded by `sink.alive` — and is what the late POST needs.
+  detachConn(id: string): void {
+    for (const [sid, connId] of this.loadGate) if (connId === id) this.loadGate.delete(sid);
+  }
+
   removeConn(id: string): void {
     this.conns.delete(id);
     this.idmux.forgetConn(id);
     this.subs.remove(id);
-    for (const [sid, connId] of this.loadGate) if (connId === id) this.loadGate.delete(sid);
+    this.detachConn(id);
   }
 
   private sendTo(connId: string, seq: number, buf: Buffer): void {
@@ -3693,6 +3702,11 @@ class Channel {
 }
 
 // ---------------------------------------------------------------- gateway ----
+// How long a disconnected client's Conn stays routable for upstream frames it sent
+// before the stream closed. Only has to cover the flight time of an already-sent
+// POST, not any kind of reconnect. Read per call so a test can shrink the window.
+function connGraceMs(): number { return Number(process.env.ACPG_CONN_GRACE_MS ?? 10_000); }
+
 // Sent to a reconnecting client whose cursor is older than the ledger still retains:
 // it has missed frames we no longer hold and must rebuild state (via session/load).
 // Inert until the ledger is bounded (Phase 4); harmless before then.
@@ -3835,8 +3849,18 @@ export class Gateway {
     return conn;
   }
 
+  // Called when a client's SSE stream closes. NOT the same as "the client is done
+  // talking": closing a tab aborts the stream instantly while the prompt POST it
+  // just fired is still in flight (the web client sends it with fetch keepalive so
+  // it outlives the page). Dropping the Conn here makes that POST 409 and loses the
+  // turn, so the Conn lingers as a tombstone — unable to receive, still able to
+  // route one last frame to the agent — and is forgotten a few seconds later.
   detach(agentName: string, connId: string): void {
-    this.channels.get(agentName)?.removeConn(connId);
+    const ch = this.channels.get(agentName);
+    if (!ch) return;
+    ch.detachConn(connId);
+    const t = setTimeout(() => ch.removeConn(connId), connGraceMs());
+    t.unref?.();
   }
 
   // Look up an already-attached connection without creating a channel. Used by the
@@ -4228,6 +4252,12 @@ export function handleSseRpc(
     res.end();
   });
   req.on("error", () => { res.writeHead(400); res.end(); });
+  // `end` never fires for a body cut short (the client navigated away mid-POST), so
+  // the frame is dropped. Say so: this is exactly how a prompt used to vanish with
+  // nothing in the log to show it ever existed.
+  req.on("close", () => {
+    if (!req.complete) console.warn(`client: dropped an incomplete frame agent="${agentName}" conn=${conn.id} (${size}B received)`);
+  });
   return true;
 }
 

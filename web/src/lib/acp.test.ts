@@ -116,11 +116,17 @@ describe("Acp over SSE+POST", () => {
   function harness() {
     const sseUrls: string[] = [];
     const posts: Array<{ url: string; body: string }> = [];
+    const keepalives: Array<boolean | undefined> = [];
+    const postOk = { v: true }; // flip to make upstream POSTs fail
     let push!: (s: string) => void;
     let end!: () => void;
 
     const fetchImpl = (async (url: string, init?: RequestInit) => {
-      if (init?.method === "POST") { posts.push({ url, body: String(init.body) }); return { ok: true, status: 202, body: null }; }
+      if (init?.method === "POST") {
+        posts.push({ url, body: String(init.body) });
+        keepalives.push(init.keepalive);
+        return postOk.v ? { ok: true, status: 202, body: null } : { ok: false, status: 409, body: null };
+      }
       sseUrls.push(url);
       const queue: Uint8Array[] = [];
       let pendingRead: ((r: { done: boolean; value?: Uint8Array }) => void) | null = null;
@@ -145,7 +151,17 @@ describe("Acp over SSE+POST", () => {
       rpcUrl: (conn) => `/rpc?conn=${conn}`,
       fetchImpl,
     });
-    return { factory, sseUrls, posts, push: (s: string) => push(s), end: () => end() };
+    return { factory, sseUrls, posts, keepalives, postOk, push: (s: string) => push(s), end: () => end() };
+  }
+
+  // Open a connected Acp over the harness, ready to send.
+  async function connected(h: ReturnType<typeof harness>) {
+    const acp = new Acp("sse", h.factory);
+    acp.connect();
+    await tick();
+    h.push('event: ready\ndata:{"conn":"c1"}\n\n');
+    await tick();
+    return acp;
   }
 
   test("ready opens; frames notify; send POSTs to conn; reconnect resumes from lastSeq", async () => {
@@ -179,6 +195,49 @@ describe("Acp over SSE+POST", () => {
     acp.connect();
     await tick();
     expect(h.sseUrls[1]).toBe("/sse?lastEventId=5");
+  });
+
+  // Closing a tab cancels an in-flight plain fetch, and the gateway silently drops a
+  // POST body whose `end` never fires — so a just-sent prompt was lost. keepalive is
+  // what lets the browser finish the request after the page is gone.
+  test("upstream POSTs use keepalive, except a body over the 64KB cap", async () => {
+    const h = harness();
+    const acp = await connected(h);
+
+    acp.notify("session/cancel", { sessionId: "S" });
+    await tick();
+    expect(h.keepalives[0]).toBe(true);
+
+    // An inline image blows past the cap: keepalive would reject the whole request.
+    acp.notify("session/prompt", { prompt: [{ type: "image", data: "A".repeat(70_000) }] });
+    await tick();
+    expect(h.keepalives[1]).toBeUndefined();
+
+    // Measured in UTF-8 bytes: 25k CJK chars is 75KB, though .length says 25k.
+    acp.notify("session/prompt", { prompt: [{ type: "text", text: "字".repeat(25_000) }] });
+    await tick();
+    expect(h.keepalives[2]).toBeUndefined();
+  });
+
+  // Without this the request never settles: the response it waits for travels on the
+  // SSE stream, and a frame the gateway never received produces none — which is how a
+  // lost prompt showed as a turn stuck on "working" that no agent ever heard about.
+  test("a request whose POST never lands rejects instead of hanging", async () => {
+    const h = harness();
+    const acp = await connected(h);
+    h.postOk.v = false;
+
+    const p = acp.request("session/prompt", { sessionId: "S" });
+    await expect(p).rejects.toMatchObject({ message: expect.stringContaining("not delivered") });
+    // A real error, not a link drop — the UI shows __disconnected silently.
+    await expect(p).rejects.not.toMatchObject({ __disconnected: true });
+  });
+
+  test("a request sent on a closed socket rejects as disconnected", async () => {
+    const h = harness();
+    const acp = await connected(h);
+    acp.close();
+    await expect(acp.request("session/prompt", { sessionId: "S" })).rejects.toMatchObject({ __disconnected: true });
   });
 
   test("external cursor seeds the resume position on a fresh factory", async () => {
