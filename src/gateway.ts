@@ -2961,6 +2961,15 @@ class Channel {
     });
   }
 
+  // Every prompt still waiting on a human, in ledger order. `session` scopes to one
+  // conversation, like replaySince. Used by Gateway.attach to hand a freshly
+  // connected client the prompts its cursor skipped.
+  outstandingPrompts(session?: string): PendingPrompt[] {
+    return [...this.pendingPerms.values()]
+      .filter((p) => session === undefined || p.sid === session)
+      .sort((a, b) => a.seq - b.seq);
+  }
+
   // The conn's stream is gone, but an upstream POST it already sent may still be
   // arriving (see Gateway.detach). Release only what would HARM the channel if held
   // by a dead conn: a load gate funnels a session's whole replay to one conn, so a
@@ -3844,7 +3853,23 @@ export class Gateway {
       ch.addConn(conn);
       return conn;
     }
-    for (const e of ch.replaySince(afterSeq, opts?.session)) sink.send(e.seq, e.frame);
+    const replayed = new Set<number>();
+    for (const e of ch.replaySince(afterSeq, opts?.session)) {
+      sink.send(e.seq, e.frame);
+      replayed.add(e.seq);
+    }
+    // Hand this client any prompt still waiting on a human that the replay didn't
+    // cover. cursor=end (every fresh page load) replays nothing, so without this the
+    // one path that re-delivers an outstanding prompt is the session/load response
+    // (see fromAgent) — and a client that opens the conversation from history never
+    // issues one, leaving an unanswered question invisible until the user sends
+    // another prompt to resume. Safe to repeat: permGate is first-reply-wins and
+    // clients dedupe by request id. Sent UNSEQUENCED on purpose — the frame's real
+    // seq is older than this client's cursor, and carrying it would drag the cursor
+    // backwards, making the next reconnect replay a tail the client already renders.
+    for (const p of ch.outstandingPrompts(opts?.session)) {
+      if (!replayed.has(p.seq)) sink.sendUnsequenced(p.frame);
+    }
     ch.addConn(conn);
     return conn;
   }
