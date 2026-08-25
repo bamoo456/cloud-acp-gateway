@@ -239,6 +239,11 @@ export function FilePanel() {
   // Only the newest request may write state: switching folders or hammering
   // refresh must not let a slow earlier `git status` land on top of a later one.
   const gen = useRef(0);
+  // Review mode keeps its own reads (a revision this panel knows nothing about),
+  // so it cannot ride on `changes`. Every reason to re-read the checkout goes
+  // through the two loaders below, so bumping there is what reaches it — turn
+  // end, Refresh, opening the panel.
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // What the conversation wrote, as the thread itself recorded it. Also the
   // source of the folder candidates below, so it is computed before the loader
@@ -247,6 +252,7 @@ export function FilePanel() {
 
   function loadChanges() {
     const mine = ++gen.current;
+    setRefreshKey((k) => k + 1);
     setLoading(true);
     getWorkspaceChanges(cwd)
       .then((r) => {
@@ -280,6 +286,10 @@ export function FilePanel() {
   // build for a panel nobody is looking at.
   function loadStat() {
     const mine = ++gen.current;
+    // Bumped here too: the mode survives the panel being closed, so a Review
+    // left open behind a shut panel must not come back showing the checkout as
+    // it was before the last three turns.
+    setRefreshKey((k) => k + 1);
     getWorkspaceChanges(cwd)
       .then((r) => { if (mine === gen.current) setChangeStat(diffstat(r)); })
       .catch(() => { if (mine === gen.current) setChangeStat(null); });
@@ -607,7 +617,7 @@ export function FilePanel() {
               component can draw. Keyed on cwd so a folder change restarts the
               review rather than leaving one checkout's draft over another's. */}
           {(!target || split) && mode === "review" && (
-            <ReviewPanel key={cwd} cwd={cwd} onCount={setReviewCount}
+            <ReviewPanel key={cwd} cwd={cwd} refreshKey={refreshKey} onCount={setReviewCount}
               split={canSplit} onDetail={setReviewOpen} />
           )}
 
