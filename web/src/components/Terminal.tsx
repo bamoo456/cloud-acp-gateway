@@ -94,7 +94,7 @@ function TermTab({ id, cwd, active, onExit }: {
     termRef.current = term;
     fitRef.current = fit;
 
-    const dataSub = term.onData((data) => { void sendTerminalInput(id, data); });
+    const dataSub = term.onData((data) => sendTerminalInput(id, data));
 
     void startTerminal(id, cwd).then(() => {
       if (cancelled) return;
