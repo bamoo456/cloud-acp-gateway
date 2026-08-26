@@ -306,6 +306,12 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   const needsYouKeys = new Set(
     s.inboxItems.filter((it) => it.reqId != null && it.sessionId).map((it) => it.agentName + "\n" + it.sessionId),
   );
+  // Turns that finished with nobody reading them — the same durable inbox, minus
+  // the half that wants an answer. Server-side, so a run started on another
+  // device marks the row here too.
+  const unreadKeys = new Set(
+    s.inboxItems.filter((it) => it.type === "task_done" && it.sessionId).map((it) => it.agentName + "\n" + it.sessionId),
+  );
   const runDot = (agentName: string, id: string) => {
     const state = runningById.get(agentName + "\n" + id);
     // Awaiting input isn't "working", so keep it as a static attention dot;
@@ -314,7 +320,12 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
     // /running or through the durable inbox.
     if (state === "awaiting-input" || needsYouKeys.has(agentName + "\n" + id))
       return <span className="run-dot awaiting" title="Needs input" />;
-    if (!state) return null;
+    // Nothing is happening in it, but something happened while you were away:
+    // the same ink dot the working state uses, held still. Amber stays reserved
+    // for a turn that is actually blocked on you (§1.1).
+    if (!state) return unreadKeys.has(agentName + "\n" + id)
+      ? <span className="run-dot unread" title="Finished — not read yet" />
+      : null;
     return <span className="run-working" title="Working"><WorkingDots /></span>;
   };
   // Per-row identity: the agent's own glyph. A wordmark reads as one more

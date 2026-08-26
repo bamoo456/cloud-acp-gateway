@@ -67,6 +67,13 @@ const ROUTES: Record<string, unknown> = {
           { optionId: "no", name: "Deny", kind: "reject_once" },
         ]),
       },
+      // A turn that finished while nobody was looking — no reqId, nothing to
+      // answer, just a row that has something new in it (the unread dot).
+      {
+        id: 3, type: "task_done", status: "pending", createdAt: iso(9),
+        agentName: "opencode", sessionId: "s-term", reqId: null, title: "Terminal height memory",
+        bodyJson: null,
+      },
       {
         id: 2, type: "permission", status: "pending", createdAt: iso(180),
         agentName: "codex", sessionId: "s-sse", reqId: "42", title: "Edit src/gateway.ts",
