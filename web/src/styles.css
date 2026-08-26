@@ -600,6 +600,15 @@
      still was too close to the ink dot that pulses. */
   .sess-item .run-dot.unread, .fgroup .run-dot.unread {
     background: var(--unread); border-color: var(--unread); animation: none; }
+  /* Unread also turns the row's own timestamp into a badge — same --unread as the
+     dot and the tab. A dot is the weakest signal in a list that is otherwise all
+     words, and this adds a second one without adding an element. Keyed off the
+     dot with :has() rather than a class threaded through five row renderers: the
+     dot is already the single source of "this row is unread". :not(:empty) so a
+     row with no timestamp doesn't wear a bare red blob. */
+  .sess-item:has(.run-dot.unread) .when:not(:empty) {
+    background: var(--unread); color: #fff; font-weight: 700;
+    padding: 1px 6px; border-radius: 999px; }
   /* Cooling-down: recently finished, lingering in Running — a muted hollow ring, no pulse. */
   .sess-item .run-dot.cooling { background: transparent; border-color: var(--muted); animation: none; }
   /* .search-more (搜尋全部 / 繼續搜更早) plays the same role in Conversations that
