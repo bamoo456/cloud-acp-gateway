@@ -4810,6 +4810,30 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     }
     return;
   }
+  // Pinned conversations, persisted server-side like the folder lists above so a
+  // pin set on one device carries to every other one. POST ?agent=&session=
+  // toggles; both verbs return the full list as "agent\nsession" keys. No
+  // FS_ROOT guard to mirror — nothing here is a path.
+  if (consoleEnabled && pathname === "/history/pinned") {
+    try {
+      if (req.method === "POST") {
+        const q = new URL(req.url ?? "/", "http://x").searchParams;
+        const agent = q.get("agent") ?? "";
+        // Same id sanitizing as every other session route (underscores for opencode).
+        const sid = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+        if (!agent || !sid) { res.writeHead(400); res.end(); return; }
+        if (db().isSessionPinned(agent, sid)) db().unpinSession(agent, sid);
+        else db().pinSession(agent, sid);
+      } else if (req.method !== "GET") {
+        res.writeHead(405); res.end(); return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ pinned: db().pinnedSessions() }));
+    } catch (e) {
+      res.writeHead(500); res.end(JSON.stringify({ error: String(e) }));
+    }
+    return;
+  }
   // Cross-device UI state that used to live in browser localStorage (text size,
   // screen-lock config, recent sessions/folders). Persisted server-side so the
   // single gateway account sees the same prefs from any device — like SSHing into
@@ -4828,6 +4852,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         recentSessions: db().recentSessions(),
         recentFolders: db().recentFolders(),
         hiddenFolders: db().hiddenFolders(),
+        pinnedSessions: db().pinnedSessions(),
       }));
     } catch (e) {
       res.writeHead(500); res.end(JSON.stringify({ error: String(e) }));
@@ -5078,11 +5103,12 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       .then((deleted) => {
         // Runs even when the transcript was already gone, so a conversation left
         // half-present (transcript deleted outside the gateway) can still be tidied.
-        // All three span every agent — a conversation recorded under two agents
+        // All four span every agent — a conversation recorded under two agents
         // sharing a provider must not keep half its rows and resurrect.
         db().deleteRecentSession(sid);
         db().deleteTranscriptMeta(sid);
         db().deleteSessionControls(sid);
+        db().deletePinnedSession(sid);
         db().cancelInboxForSessionId(sid, new Date().toISOString());
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, deleted }));
