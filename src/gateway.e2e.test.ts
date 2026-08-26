@@ -677,6 +677,41 @@ test("a running prompt shows as active, and clears when its response returns", a
   await close();
 });
 
+test("a finished turn lands in the inbox as unread until a reader opens it", async () => {
+  const { port, agent, inbox, close } = await makeTestServer();
+  const a = sse(port);
+  const conn = await a.conn;
+
+  const endTurn = async (id: number, text: string) => {
+    await post(port, conn, { jsonrpc: "2.0", id, method: "session/prompt", params: { sessionId: "S", prompt: [{ type: "text", text }] } });
+    const fwd = agent().sent.map((s) => JSON.parse(s) as Msg).filter((o) => o.method === "session/prompt").at(-1);
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: fwd!.id, result: { stopReason: "end_turn" } })));
+    await new Promise((r) => setTimeout(r, 40));
+  };
+
+  assert.deepEqual(inbox({ status: "pending" }), [], "nothing unread before any turn");
+
+  await endTurn(1, "go");
+  const unread = inbox({ status: "pending" });
+  assert.equal(unread.length, 1);
+  assert.equal(unread[0].type, "task_done");
+  assert.equal(unread[0].sessionId, "S");
+  assert.equal(unread[0].reqId, null, "nothing to answer — this is what keeps it out of the expire sweeps");
+  assert.equal(unread[0].title, "go", "labelled like its running task");
+
+  // A second turn in the same conversation is still one thing to go and read.
+  await endTurn(2, "again");
+  assert.equal(inbox({ status: "pending" }).length, 1);
+
+  const res = await fetch(`http://127.0.0.1:${port}/inbox/read?sessionId=S`, { method: "POST" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(inbox({ status: "pending" }), []);
+  assert.deepEqual(inbox({ status: "read" }).map((i) => i.sessionId), ["S"]);
+
+  a.close();
+  await close();
+});
+
 test("running() keeps start order across interleaved heartbeats (the Recent Running section can't flap)", async () => {
   const { port, agent, running, close } = await makeTestServer();
   const a = sse(port);
