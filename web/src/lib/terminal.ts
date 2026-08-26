@@ -61,12 +61,32 @@ export function terminalStreamUrl(id: string): string {
   return base() + "/terminal/stream" + qs(id);
 }
 
-export async function sendTerminalInput(id: string, data: string): Promise<void> {
-  try {
-    await fetch(base() + "/terminal/input" + qs(id), { method: "POST", body: data, credentials: "same-origin" });
-  } catch (e) {
-    console.error("sendTerminalInput failed", e);
-  }
+// Keystrokes have to reach the shell in the order they were typed. Firing an
+// independent fetch per keystroke does not guarantee that — the browser runs
+// several in parallel and they can land out of order, which a line editor
+// survives and vim does not ("vp3.txt" arriving as "vp3t.xt"). So: one POST in
+// flight per terminal, with everything typed behind it coalesced into the next
+// body. Fire-and-forget by design; the caller has nothing to do with the ack.
+const backlog = new Map<string, string>();
+const sending = new Set<string>();
+
+export function sendTerminalInput(id: string, data: string): void {
+  backlog.set(id, (backlog.get(id) ?? "") + data);
+  if (sending.has(id)) return;
+  sending.add(id);
+  void (async () => {
+    try {
+      for (let body = backlog.get(id); body; body = backlog.get(id)) {
+        backlog.delete(id);
+        await fetch(base() + "/terminal/input" + qs(id), { method: "POST", body, credentials: "same-origin" });
+      }
+    } catch (e) {
+      console.error("sendTerminalInput failed", e);
+      backlog.delete(id); // drop the burst rather than replay it after a gap
+    } finally {
+      sending.delete(id);
+    }
+  })();
 }
 
 export async function resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
