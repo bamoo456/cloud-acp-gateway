@@ -616,6 +616,10 @@
     padding: 1px 6px; border-radius: 999px; }
   /* Cooling-down: recently finished, lingering in Running — a muted hollow ring, no pulse. */
   .sess-item .run-dot.cooling { background: transparent; border-color: var(--muted); animation: none; }
+  /* Pinned: the reader's own mark on the row, so it is the accent colour rather
+     than any of the state colours above — a pin is not a state the agent is in. */
+  .sess-item .sess-pin { flex: 0 0 auto; align-self: center; display: inline-flex; color: var(--accent); }
+  .sess-item .sess-pin svg { width: 12px; height: 12px; }
   /* .search-more (搜尋全部 / 繼續搜更早) plays the same role in Conversations that
      .see-more plays in Recent — the one way out of a bounded list — so it wears the
      same style instead of falling through the bare `button` reset as plain text. */
