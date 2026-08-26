@@ -5,8 +5,11 @@ const HOME = "/Users/dev";
 const HOUR = 3600_000;
 const NOW = Date.UTC(2026, 7, 14, 12, 0);
 
-function row(key: string, cwd: string, hoursAgo: number, flags: { running?: boolean; needsYou?: boolean } = {}): GroupableRow<string> {
-  return { key, cwd, when: NOW - hoursAgo * HOUR, running: !!flags.running, needsYou: !!flags.needsYou, data: key };
+function row(key: string, cwd: string, hoursAgo: number, flags: { running?: boolean; needsYou?: boolean; unread?: boolean } = {}): GroupableRow<string> {
+  return {
+    key, cwd, when: NOW - hoursAgo * HOUR,
+    running: !!flags.running, needsYou: !!flags.needsYou, unread: !!flags.unread, data: key,
+  };
 }
 
 describe("latestWithPinned", () => {
@@ -56,6 +59,20 @@ describe("groupByFolder", () => {
     expect(groups[0].label).toBe("here");
   });
 
+  test("unread reaches the folder header without reordering the folders", () => {
+    // The dot is the only thing unread earns: a finished turn is something to
+    // read, not something to interrupt you, so the list stays in recency order
+    // (unlike needs-you and running, which do jump).
+    const groups = groupByFolder([
+      row("fresh", "/Users/dev/quiet", 1),
+      row("done", "/Users/dev/read-me", 20, { unread: true }),
+    ], "/Users/dev/cur", HOME);
+
+    expect(groups.map((g) => g.label)).toEqual(["cur", "quiet", "read-me"]);
+    expect(groups.find((g) => g.label === "read-me")!.unread).toBe(true);
+    expect(groups.find((g) => g.label === "quiet")!.unread).toBe(false);
+  });
+
   test("then needs-you, then running, then recency", () => {
     const groups = groupByFolder([
       row("q", "/Users/dev/quiet", 1),
@@ -94,7 +111,7 @@ describe("splitByAge", () => {
 
   test("no usable timestamp lands in older, not fresh", () => {
     const noTime: GroupableRow<string> = {
-      key: "no-time", cwd: "/a", when: 0, running: false, needsYou: false, data: "no-time",
+      key: "no-time", cwd: "/a", when: 0, running: false, needsYou: false, unread: false, data: "no-time",
     };
     const { fresh, older } = splitByAge([noTime], NOW);
     expect(fresh).toEqual([]);
