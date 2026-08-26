@@ -1,13 +1,13 @@
 import { useRef, useState, useEffect } from "react";
 import { branchGate, hasCodexSkin, useStore, engineOf } from "../store/store.ts";
 import { Menu } from "./Menu.tsx";
-import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconGitBranch } from "../lib/icons.tsx";
+import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconGitBranch, IconClock } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
 import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.ts";
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
 import { listFiles, uploadFile } from "../lib/api.ts";
-import type { MessageImage, MessageFile } from "../types.ts";
+import type { MessageImage, MessageFile, QueuedPrompt } from "../types.ts";
 
 // Touch / coarse-pointer devices (phones, tablets) have no Shift key on their
 // virtual keyboard, so there is no way to type Shift+Enter for a newline. On
@@ -15,6 +15,18 @@ import type { MessageImage, MessageFile } from "../types.ts";
 // Send button instead. Desktop keeps Enter=submit, Shift+Enter=newline.
 const isTouchDevice = typeof window !== "undefined" &&
   (window.matchMedia?.("(pointer: coarse)").matches || "ontouchstart" in window);
+
+// What a queued message reads as on the rail. An image- or file-only message has
+// no text of its own, and rendering it as an empty row would look like a bug —
+// name what it carries instead, in the same mono voice the rail's labels use.
+function queuedText(q: QueuedPrompt): string {
+  if (q.text.trim()) return q.text;
+  const carried = [
+    q.images?.length ? q.images.length + (q.images.length > 1 ? " images" : " image") : "",
+    q.files?.length ? q.files.map((f) => f.name).join(", ") : "",
+  ].filter(Boolean);
+  return carried.join(" · ");
+}
 
 export function Composer({ sessionId, compact }: { sessionId?: string; compact?: boolean } = {}) {
   const mi = useRef<MarkdownInputHandle>(null);
@@ -60,16 +72,27 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     : s.attachFiles;
   const removeAt = sessionId ? (i: number) => setLocalFiles((prev) => prev.filter((_, idx) => idx !== i)) : s.removeAttachedFile;
   const clearFiles = sessionId ? () => setLocalFiles([]) : s.clearAttachedFiles;
-  const activeBusy = sessionId ? !!s.busySessionIds[sessionId] : !!(s.activeId && s.busySessionIds[s.activeId]);
+  // The conversation this composer talks to: its own, when bound (the branch
+  // window), else whichever one is on screen.
+  const targetId = sessionId ?? s.activeId;
+  const activeBusy = !!(targetId && s.busySessionIds[targetId]);
+  // Messages typed into this conversation while its turn was running, waiting for
+  // that turn to end (store.ts's queuedPrompts).
+  const queued = (targetId && s.queuedPrompts[targetId]) || [];
   const branch = branchGate(s);
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
-  const canSend = activeBusy || ((!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady && !uploading);
+  const hasContent = !!text.trim() || images.length > 0 || files.length > 0;
+  // Mid-turn the button queues instead of sending, but it wants exactly the same
+  // things: something to say, an agent to say it to, no upload still landing.
+  const canSend = hasContent && s.agentReady && !uploading;
   // A branch is a send into a conversation that does not exist yet, so it wants
-  // the same thing send does: something to say. Without the `activeBusy` term —
-  // a branch of a conversation mid-turn is refused by branchGate anyway.
-  const branchable = (!!text.trim() || images.length > 0 || files.length > 0) && s.agentReady && !uploading;
+  // the same thing send does: something to say. A branch of a conversation
+  // mid-turn is refused by branchGate anyway.
+  const branchable = canSend;
+  // Mid-turn with something ready to send, the stop button becomes interrupt.
+  const cutting = activeBusy && canSend;
   const placeholder = hasCodexSkin(s) ? "Reply to Codex…" : "Reply to Claude…";
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
@@ -282,16 +305,48 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   }
 
   function submit() {
-    if (activeBusy) { s.cancel(sessionId); return; }
     // Enter bypasses the Send button's `disabled={!canSend}`, so it needs its own
     // guard: sending mid-upload would clear `files` out from under the pending
     // upload, and the file would land as a chip on the *next* message instead.
     if (uploading) return;
     const t = text; const imgs = images; const refs = files;
-    if (!t.trim() && !imgs.length && !refs.length) return;
+    // Enter on an empty box mid-turn keeps its old meaning: stop. With something
+    // typed, Enter QUEUES — interrupting is the button beside it, because cutting a
+    // running turn should cost a deliberate tap rather than a reflex keystroke.
+    if (!t.trim() && !imgs.length && !refs.length) { if (activeBusy) stop(); return; }
     setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
-    if (sessionId) s.sendPromptTo(sessionId, t, imgs, refs);
+    // The box is cleared above, so from here the store holds the only copy either
+    // way — queuePrompt keeps it until the running turn ends.
+    if (activeBusy && targetId) s.queuePrompt(targetId, { text: t, images: imgs, files: refs });
+    else if (sessionId) s.sendPromptTo(sessionId, t, imgs, refs);
     else s.sendPrompt(t, imgs, refs);
+  }
+
+  // Stop takes the queue back rather than firing it or dropping it: a deliberate
+  // stop that then sent the next message anyway is the surprising outcome, and
+  // silently binning what was typed is the unforgivable one. Text lands back in
+  // the box; attachments are named in it, since chips can't be reconstructed from
+  // a queued item's uploads.
+  // Cut the running turn short and send what is typed as the next one. The queue
+  // is left alone on purpose: an interrupt says "this one first", not "forget the
+  // rest" — those go out after this new turn, in the order they were typed.
+  function interrupt() {
+    if (!targetId || !canSend) return;
+    const t = text; const imgs = images; const refs = files;
+    setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
+    s.interruptWith(targetId, { text: t, images: imgs, files: refs });
+  }
+
+  // The queue comes back BEFORE the cancel is sent, not after: a cancel that
+  // throws (a socket that just went) would otherwise leave the messages parked
+  // against a turn nobody is going to end. A stop that failed can be pressed
+  // again; typed text that was dropped on the way is gone.
+  function stop() {
+    if (targetId) {
+      const back = s.takeQueuedPrompts(targetId);
+      if (back.length) setText([text.trim(), ...back.map(queuedText)].filter(Boolean).join("\n\n"));
+    }
+    s.cancel(sessionId);
   }
 
   // Live callbacks the editor's keymap reads (rebuilt each render so they close
@@ -341,6 +396,27 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
         <div className="tipbar" style={{ display: "flex" }}>
           <span id="tip-text">{s.tip}</span>
           <button className="x icon-btn" style={{ width: 26, height: 26 }} onClick={() => s.setTip("")}>✕</button>
+        </div>
+      )}
+      {/* The send queue, drawn as what it is: a dashed line running down into the
+          composer with a hollow node per waiting message. It sits in the footer
+          rather than in the thread because the line has to reach the box those
+          messages came out of — in the scroller it would drift away from it. */}
+      {queued.length > 0 && (
+        <div className="queue-rail">
+          {queued.map((q, i) => (
+            <div className="queue-item" key={q.id}>
+              <div className="queue-meta">
+                <span>next {i + 1}</span>
+                <span className="sp" />
+                <button className="x" title="Remove queued message"
+                  aria-label={"Remove queued message " + (i + 1)}
+                  onClick={() => targetId && s.unqueuePrompt(targetId, q.id)}>✕</button>
+              </div>
+              <div className="queue-body">{queuedText(q)}</div>
+            </div>
+          ))}
+          <div className="queue-out">sends in order, one per turn</div>
         </div>
       )}
       <div
@@ -417,9 +493,19 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
               <IconGitBranch />{armed ? "confirm" : "branch"}
             </button>
           )}
-          <button className={"send" + (activeBusy ? " stop" : "")} title={activeBusy ? "Stop" : "Send"}
+          {/* Mid-turn there are two buttons, not one wearing two hats — a phone has
+              no second gesture for stop, so it keeps its own. This one is always
+              "cut the running turn": on its own with an empty box, and carrying
+              what is typed when there is something to send. Gated on canSend, not
+              on the text alone, so an upload still landing leaves it plain stop
+              rather than an interrupt that cannot fire. */}
+          {activeBusy && (cutting
+            ? <button className="send stop" title="Interrupt and send now" onClick={interrupt}><IconStop />interrupt</button>
+            : <button className="send stop" title="Stop" onClick={stop}><IconStop />stop</button>
+          )}
+          <button className="send" title={activeBusy ? "Queue for after this turn" : "Send"}
             disabled={!canSend} onClick={submit}>
-            {activeBusy ? <><IconStop />stop</> : <>send<IconSend /></>}
+            {activeBusy ? <>queue<IconClock /></> : <>send<IconSend /></>}
           </button>
         </div>
       </div>
