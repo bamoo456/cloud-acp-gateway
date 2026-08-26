@@ -5,7 +5,7 @@ import { engineReadout } from "../lib/engine.ts";
 import { copyText } from "../lib/clipboard.ts";
 import { setLockPin, clearLock, MIN_PIN_LENGTH } from "../lib/lock.ts";
 import { IDENTITY_OPTIONS, applyIdentity, readIdentity, type Identity } from "../lib/identity.ts";
-import { THEME_OPTIONS, applyTheme, readTheme, type Theme } from "../lib/theme.ts";
+import { MODE_OPTIONS, THEME_OPTIONS, applyMode, applyTheme, readMode, readTheme, type Mode, type Theme } from "../lib/theme.ts";
 import { toolIcon, IconModel, IconShield, IconBolt, IconBack, IconChevron, IconCircle, IconPencil, IconTrash, IconType, IconLock, IconX } from "../lib/icons.tsx";
 import type { ConfigOption } from "../types.ts";
 
@@ -38,6 +38,7 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   // devices nor read by anything but <html> (see lib/identity.ts).
   const [identity, setIdentity] = useState<Identity>(readIdentity);
   const [theme, setTheme] = useState<Theme>(readTheme);
+  const [mode, setMode] = useState<Mode>(readMode);
   const sess = s.activeId ? s.sessions[s.activeId] : null;
   const resumableId = s.activeId && !s.activeId.startsWith("pending-") ? s.activeId : null;
   const lists = engineOf(s);
@@ -183,7 +184,15 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
         {view === "theme" && (
           <>
             <div className="ahead"><button className="iback" onClick={() => setView("main")}><IconBack /></button>Theme</div>
-            <div className="amenu-note">Each theme sets a light and a dark palette; your system still decides which of the two you get.</div>
+            <div className="amenu-note">Each theme sets a light and a dark palette; the mode decides which of the two you get.</div>
+            {MODE_OPTIONS.map((opt) => (
+              <button key={opt.id} className={"arow" + (mode === opt.id ? " on" : "")}
+                onClick={() => { applyMode(opt.id); setMode(opt.id); }}>
+                <span className="col"><span>{opt.label}</span><span className="sub">{opt.description}</span></span>
+                {mode === opt.id && <span className="gt">✓</span>}
+              </button>
+            ))}
+            <div className="amenu-sep" />
             {THEME_OPTIONS.map((opt) => (
               <button key={opt.id} className={"arow" + (theme === opt.id ? " on" : "")}
                 onClick={() => { applyTheme(opt.id); setTheme(opt.id); }}>
