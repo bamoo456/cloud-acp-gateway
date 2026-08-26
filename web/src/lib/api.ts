@@ -518,6 +518,27 @@ export async function toggleHiddenFolder(path: string): Promise<string[]> {
   return Array.isArray(r.hidden) ? r.hidden : [];
 }
 
+// Archived conversations live on the server like hidden folders — the flag must
+// follow the account across devices. The gateway speaks {agentName, sessionId}
+// objects; here they flatten to the "agent\nsessionId" keys the sidebar already
+// keys its rows by, so membership checks are one Set lookup.
+export function archivedKeys(list: unknown): string[] {
+  return Array.isArray(list)
+    ? list
+      .filter((a): a is { agentName: string; sessionId: string } =>
+        !!a && typeof (a as { agentName?: unknown }).agentName === "string"
+          && typeof (a as { sessionId?: unknown }).sessionId === "string")
+      .map((a) => a.agentName + "\n" + a.sessionId)
+    : [];
+}
+
+export async function toggleArchivedSession(agentName: string, sessionId: string): Promise<string[]> {
+  const url = base() + "/sessions/archived?agent=" + encodeURIComponent(agentName)
+    + "&session=" + encodeURIComponent(sessionId);
+  const r = await readJson(await fetch(url, { method: "POST" }), "Couldn't update archived conversations.");
+  return archivedKeys(r.archived);
+}
+
 // Cross-device UI prefs that used to live in this browser's localStorage now live
 // on the gateway (shared across devices/IPs — see lib/recentFolders, lib/lock).
 // getPrefs hydrates all of them in one request on startup; the mutators below
@@ -529,12 +550,15 @@ export interface PrefsDto {
   recentSessions: Array<Record<string, unknown>>;
   recentFolders: Array<Record<string, unknown>>;
   hiddenFolders: string[];
+  /** "agent\nsessionId" keys — see archivedKeys above */
+  archivedSessions: string[];
 }
 
 export async function getPrefs(): Promise<PrefsDto> {
+  const empty: PrefsDto = { textSize: null, lock: null, recentSessions: [], recentFolders: [], hiddenFolders: [], archivedSessions: [] };
   try {
     const r = await fetch(base() + "/prefs");
-    if (!r.ok) return { textSize: null, lock: null, recentSessions: [], recentFolders: [], hiddenFolders: [] };
+    if (!r.ok) return empty;
     const j = await r.json();
     return {
       textSize: typeof j?.textSize === "string" ? j.textSize : null,
@@ -542,9 +566,10 @@ export async function getPrefs(): Promise<PrefsDto> {
       recentSessions: Array.isArray(j?.recentSessions) ? j.recentSessions : [],
       recentFolders: Array.isArray(j?.recentFolders) ? j.recentFolders : [],
       hiddenFolders: Array.isArray(j?.hiddenFolders) ? j.hiddenFolders : [],
+      archivedSessions: archivedKeys(j?.archivedSessions),
     };
   } catch {
-    return { textSize: null, lock: null, recentSessions: [], recentFolders: [], hiddenFolders: [] };
+    return empty;
   }
 }
 

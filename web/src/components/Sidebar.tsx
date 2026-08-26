@@ -11,7 +11,7 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, IconSideChat, WorkingDots,
+import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, IconArchive, IconSideChat, WorkingDots,
   Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { folderKey, homeFrom } from "../lib/folderKey.ts";
@@ -95,11 +95,12 @@ function SessionRow({ className, onOpen, target, running, active, onAskDelete, o
 // The row's right-click / long-press menu: FileMenu's sheet-or-dropdown
 // pattern with a single destructive action.
 const MENU_W = 214;
-const MENU_H = 250; // header + 4 rows now that Open as side chat joins Rename/Hide folder/Delete
+const MENU_H = 292; // header + 5 rows now that Archive joins Open as side chat/Rename/Hide folder/Delete
 const SHEET_QUERY = "(max-width: 640px)"; // matches .wf-menu's own sheet breakpoint
-function SessionRowMenu({ target, onSideChat, onRename, onHideFolder, onDelete, onClose }: {
+function SessionRowMenu({ target, archived, onSideChat, onRename, onArchive, onHideFolder, onDelete, onClose }: {
   target: RowTarget & { x: number; y: number };
-  onSideChat?: () => void; onRename: () => void; onHideFolder?: () => void; onDelete?: () => void; onClose: () => void;
+  archived?: boolean;
+  onSideChat?: () => void; onRename: () => void; onArchive?: () => void; onHideFolder?: () => void; onDelete?: () => void; onClose: () => void;
 }) {
   // Read once, on open: the menu lives for a few seconds and a device does not
   // cross the breakpoint inside them.
@@ -131,6 +132,13 @@ function SessionRowMenu({ target, onSideChat, onRename, onHideFolder, onDelete, 
         <button className="wf-menu-row" role="menuitem" onClick={onRename}>
           <IconPencil /><span>Rename conversation</span>
         </button>
+        {/* Keeps the transcript (unlike Delete) but drops the row out of the
+            default list; See more and search still surface it. */}
+        {onArchive && (
+          <button className="wf-menu-row" role="menuitem" onClick={onArchive}>
+            <IconArchive /><span>{archived ? "Unarchive conversation" : "Archive conversation"}</span>
+          </button>
+        )}
         {/* Only offered for a row from a folder other than the current one — same
             reason the folder header's hide affordance skips it (see below). */}
         {onHideFolder && (
@@ -385,6 +393,12 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // differently than the gateway does.
   const isCurrent = (agentName: string, sessionId: string) =>
     s.agentName === agentName && s.activeId === sessionId;
+  // Archived conversations, keyed the same way rows are. They leave the default
+  // list (See more brings them back, dimmed) but the transcript stays put, so
+  // both search tiers still surface them untouched.
+  const archivedSet = new Set(s.archivedSessions);
+  const isArchived = (agentName: string, sessionId: string) => archivedSet.has(agentName + "\n" + sessionId);
+  const archivedCls = (agentName: string, sessionId: string) => (isArchived(agentName, sessionId) ? " archived" : "");
   // Local Recent entries need session/load to be reopenable, so list only recents
   // whose owning agent still reports it — across ALL agents, not just the active one.
   // Default to the first RECENT_LIMIT; "See more" reveals the rest of the cache.
@@ -442,7 +456,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
     const active = isCurrent(it.agentName, it.sessionId);
     return (
       <SessionRow key={variant + ":" + it.agentName + ":" + it.sessionId}
-        className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "")}
+        className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "") + archivedCls(it.agentName, it.sessionId)}
         onOpen={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: s.cwd, name: it.title || "" }}
         running={isRunning(it.agentName, it.sessionId)} active={active} {...rowActions}>
@@ -498,7 +512,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
     const title = named || it.sessionId.slice(0, 8);
     return (
       <SessionRow key={"recent:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
-        className={"sess-item recent with-folder" + (active ? " active" : "")}
+        className={"sess-item recent with-folder" + (active ? " active" : "") + archivedCls(it.agentName, it.sessionId)}
         // Opened with the name on screen, not the snapshot behind it: the opened
         // session carries that title in memory and offers it back on every activity
         // touch, so handing it the stale one is how the stale one gets re-recorded.
@@ -523,7 +537,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
     const active = isCurrent(it.agentName, it.sessionId);
     return (
       <SessionRow key={"discovered:" + it.agentName + ":" + it.cwd + ":" + it.sessionId}
-        className={"sess-item recent with-folder" + (active ? " active" : "")}
+        className={"sess-item recent with-folder" + (active ? " active" : "") + archivedCls(it.agentName, it.sessionId)}
         onOpen={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: it.title || "" }}
         running={isRunning(it.agentName, it.sessionId)} active={active} {...rowActions}>
@@ -601,11 +615,18 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // folder's own header or a row menu), the durable inbox still surfaces those
   // prompts elsewhere,
   // and the "N hidden" affordance in .sb-head keeps the cut non-silent.
-  const visibleRows = hideFolders(rows, s.hiddenFolders, s.cwd, home);
-  const hiddenCount = rows.length - visibleRows.length;
+  // Archived rows leave the default list the same way old rows do: "See more"
+  // brings them back (dimmed, via .archived). Filtered before hideFolders so
+  // the "N hidden" count keeps meaning folders only.
+  const archivedRowCount = rows.reduce((n, r) => n + (archivedSet.has(r.key) ? 1 : 0), 0);
+  const listedRows = showMore ? rows : rows.filter((r) => !archivedSet.has(r.key));
+  const visibleRows = hideFolders(listedRows, s.hiddenFolders, s.cwd, home);
+  const hiddenCount = listedRows.length - visibleRows.length;
   // The cap applies to the flat view only: by folder, hiding rows would leave a
-  // folder header claiming a count its children don't add up to.
-  const hasMoreRows = visibleRows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt));
+  // folder header claiming a count its children don't add up to. Archived rows
+  // keep the toggle alive too — it is their only way back on screen.
+  const hasMoreRows = visibleRows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt))
+    || archivedRowCount > 0;
   const folders = groupByFolder(visibleRows, s.cwd, home);
   const { pinned, rest } = latestWithPinned(visibleRows);
   const latestRest = showMore ? rest : rest.slice(0, RECENT_LIMIT);
@@ -821,6 +842,11 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
               }
               : undefined}
             onRename={() => { startRename(rowMenu); setRowMenu(null); }}
+            // Always offered — archiving only hides the row from the default
+            // list, so unlike Delete it is safe on a running conversation too,
+            // and the same row is the way back out (Unarchive).
+            archived={isArchived(rowMenu.agentName, rowMenu.sessionId)}
+            onArchive={() => { s.toggleArchivedSession(rowMenu.agentName, rowMenu.sessionId); setRowMenu(null); }}
             // Same exemption as the folder header's hide affordance: hiding the
             // folder you're in wouldn't do anything visible (hideFolders() always
             // exempts it), so the row menu doesn't offer it there either.
