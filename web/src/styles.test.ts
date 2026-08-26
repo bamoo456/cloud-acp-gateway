@@ -22,6 +22,18 @@ describe("global styles", () => {
   });
 
 
+  test("the send queue reads as pending without spending a colour on it", () => {
+    // §1.1 rations colour to four meanings and "queued" is not one of them, so the
+    // rail says it with dashes. The clamp is load-bearing too: an unclamped queued
+    // paragraph would push the composer off a phone screen mid-turn.
+    expect(cssRule(".queue-rail::before")).toMatch(/border-left\s*:\s*1px dashed var\(--pending\)/);
+    expect(cssRule(".queue-item::before")).toMatch(/border\s*:\s*1px dashed var\(--pending\)/);
+    expect(cssRule(".queue-body")).toMatch(/-webkit-line-clamp\s*:\s*2/);
+    // The node is a hole in the rail, so a floating window has to refill it with
+    // the card's own surface instead of the page's.
+    expect(cssRule(".branch-win .queue-item::before")).toMatch(/background\s*:\s*var\(--surface\)/);
+  });
+
   test("action menu stays within the viewport and scrolls", () => {
     const rule = cssRule(".amenu");
 
