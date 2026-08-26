@@ -76,7 +76,7 @@ export interface InboxItem {
   resolvedAt: string | null;
   resultJson: string | null;    // the answer / outcome once resolved
 }
-export type InboxStatus = "pending" | "answered" | "cancelled" | "expired" | "superseded";
+export type InboxStatus = "pending" | "answered" | "cancelled" | "expired" | "superseded" | "read";
 
 const MAX_RECENT_SESSIONS = 50;
 const MAX_RECENT_FOLDERS = 20;
@@ -512,9 +512,34 @@ export class Db {
     return info.changes > 0;
   }
 
-  // A cancelled turn voids all of its session's pending prompts.
+  // A turn finished with nobody necessarily watching. One pending row per
+  // session however many turns it runs: the badge answers "is there something
+  // to read here", not "how many turns ran". Carries no reqId — nothing can be
+  // answered — which is also how the expire sweeps below tell the two apart.
+  addSessionUnread(agentName: string, sessionId: string, title: string, createdAt: string): void {
+    this.db.prepare(`INSERT INTO inbox (type, agent_name, session_id, req_id, seq, title, body_json, status, created_at)
+      SELECT 'task_done', ?, ?, NULL, NULL, ?, NULL, 'pending', ?
+      WHERE NOT EXISTS (SELECT 1 FROM inbox WHERE session_id = ? AND type = 'task_done' AND status = 'pending')`)
+      .run(agentName, sessionId, title, createdAt, sessionId);
+  }
+
+  // The reader opened the conversation, so its finished turns are read. Scoped to
+  // task_done on purpose: a permission still waiting on an answer is not read by
+  // being looked at, and clearing it would drop a prompt the agent is blocked on.
+  // Across every agent, like cancelInboxForSessionId — the conversation is one
+  // thing however many agents recorded it.
+  markSessionRead(sessionId: string, resolvedAt: string): void {
+    this.db.prepare("UPDATE inbox SET status = 'read', resolved_at = ? WHERE session_id = ? AND type = 'task_done' AND status = 'pending'")
+      .run(resolvedAt, sessionId);
+  }
+
+  // A cancelled turn voids all of its session's pending prompts — prompts only
+  // (req_id != null), like the expire sweeps. An unread task_done is not the
+  // turn's to void: cancelling from one device would clear a badge for turns
+  // nobody has read on any other, and a turn that ends abnormally cancels its
+  // stranded prompt in the same breath as recording its own unread.
   cancelInboxForSession(agentName: string, sessionId: string, resolvedAt: string): void {
-    this.db.prepare("UPDATE inbox SET status = 'cancelled', resolved_at = ? WHERE agent_name = ? AND session_id = ? AND status = 'pending'")
+    this.db.prepare("UPDATE inbox SET status = 'cancelled', resolved_at = ? WHERE agent_name = ? AND session_id = ? AND status = 'pending' AND req_id IS NOT NULL")
       .run(resolvedAt, agentName, sessionId);
   }
 
@@ -529,15 +554,20 @@ export class Db {
 
   // The agent died: its pending prompts can never be answered (the request it was
   // blocking on is gone), so they become expired records.
+  // Only rows something could have answered (req_id != null) expire: a task_done
+  // unread is a message to the reader, not a request to the agent, so it has to
+  // outlive the agent that produced it — otherwise every restart silently clears
+  // the badge on every other device.
   expireInboxForAgent(agentName: string, resolvedAt: string): void {
-    this.db.prepare("UPDATE inbox SET status = 'expired', resolved_at = ? WHERE agent_name = ? AND status = 'pending'")
+    this.db.prepare("UPDATE inbox SET status = 'expired', resolved_at = ? WHERE agent_name = ? AND status = 'pending' AND req_id IS NOT NULL")
       .run(resolvedAt, agentName);
   }
 
   // Called once at boot: a gateway restart kills every agent subprocess, so any
-  // row left pending from the previous run is no longer answerable.
+  // prompt left pending from the previous run is no longer answerable. Unread
+  // task_done rows survive — see expireInboxForAgent.
   expireAllPending(resolvedAt: string): void {
-    this.db.prepare("UPDATE inbox SET status = 'expired', resolved_at = ? WHERE status = 'pending'").run(resolvedAt);
+    this.db.prepare("UPDATE inbox SET status = 'expired', resolved_at = ? WHERE status = 'pending' AND req_id IS NOT NULL").run(resolvedAt);
   }
 
   // List inbox items, newest first. Optionally filter by status and/or agent.

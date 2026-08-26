@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, toggleHiddenFolder as apiToggleHiddenFolder, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, toggleHiddenFolder as apiToggleHiddenFolder, type RunningTask, type InboxItem } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
@@ -265,6 +265,7 @@ interface State {
   toggleAuto: () => void;
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
+  readActiveSession: () => void;
   // No target = the active conversation (the ActionMenu path); a target = any
   // conversation, active or not (the sidebar's per-row rename). A sidebar row
   // carries its OWN agent and folder — a discovered row names a conversation in
@@ -1362,6 +1363,22 @@ export const useStore = create<State>((set, get) => {
       void get().openHistorySession({ sessionId: id, title: s?.title ?? null });
     },
     setTip(t) { set({ tip: t }); },
+    // The reader is looking at the active conversation, so its finished turns are
+    // read — on every device, since the unread state lives on the gateway. Called
+    // whenever any of the three inputs change (which conversation is open, whether
+    // this tab has the reader's attention, what the inbox holds), so it re-checks
+    // rather than trusting a single moment. The local drop is optimistic: if the
+    // POST fails the next poll brings the row back.
+    readActiveSession() {
+      const st = get();
+      const id = st.activeId;
+      if (!id) return;
+      if (typeof document !== "undefined" && (!document.hasFocus() || document.visibilityState === "hidden")) return;
+      const isRead = (it: InboxItem) => it.type === "task_done" && it.sessionId === id;
+      if (!st.inboxItems.some(isRead)) return;
+      set({ inboxItems: st.inboxItems.filter((it) => !isRead(it)) });
+      void markInboxRead(id);
+    },
     renameSession(title, target) {
       const sid = target?.sessionId ?? get().activeId;
       if (!sid || sid.startsWith("pending-")) return;

@@ -259,12 +259,14 @@ test("inbox: reusing a reqId supersedes the old pending row, keeps audit history
   db.close();
 });
 
-test("inbox: cancel a session voids its pending prompts", () => {
+test("inbox: cancel a session voids its pending prompts, but not its unread turns", () => {
   const db = new Db(":memory:");
   db.addInboxItem(perm("1", "sA"));
   db.addInboxItem(perm("2", "sB"));
+  db.addSessionUnread("claude", "sA", "", "2026-06-10T01:00:00.000Z");
   db.cancelInboxForSession("claude", "sA", "2026-06-10T01:01:00.000Z");
-  assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.reqId), ["2"]);
+  assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.reqId), [null, "2"],
+    "the earlier turn is still unread — cancelling this one says nothing about it");
   assert.deepEqual(db.inbox({ status: "cancelled" }).map((i) => i.reqId), ["1"]);
   db.close();
 });
@@ -293,6 +295,46 @@ test("inbox: agent exit and boot expire pending rows", () => {
   db.expireAllPending("2026-06-10T01:02:00.000Z");
   assert.deepEqual(db.inbox({ status: "pending" }), []);
   assert.equal(db.inbox({ status: "expired" }).length, 2);
+  db.close();
+});
+
+test("inbox: a session's finished turns collapse to one unread, cleared by reading it", () => {
+  const db = new Db(":memory:");
+  db.addSessionUnread("claude", "sA", "fix the flaky test", "2026-06-10T01:00:00.000Z");
+  db.addSessionUnread("claude", "sA", "fix the flaky test", "2026-06-10T01:05:00.000Z"); // second turn, same conversation
+  db.addSessionUnread("codex", "sB", "", "2026-06-10T01:06:00.000Z");
+  assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.sessionId), ["sB", "sA"],
+    "one row per conversation, however many turns it ran");
+
+  db.markSessionRead("sA", "2026-06-10T01:07:00.000Z");
+  assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.sessionId), ["sB"]);
+  assert.deepEqual(db.inbox({ status: "read" }).map((i) => i.sessionId), ["sA"]);
+  db.close();
+});
+
+test("inbox: reading a conversation leaves its unanswered permission alone", () => {
+  const db = new Db(":memory:");
+  db.addInboxItem(perm("1", "sA"));
+  db.addSessionUnread("claude", "sA", "", "2026-06-10T01:00:00.000Z");
+
+  db.markSessionRead("sA", "2026-06-10T01:01:00.000Z");
+
+  assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.type), ["permission"],
+    "the agent is still blocked on it — being looked at is not an answer");
+  db.close();
+});
+
+test("inbox: an agent exit or a restart must not clear unread turns", () => {
+  const db = new Db(":memory:");
+  db.addInboxItem(perm("1", "sA"));
+  db.addSessionUnread("claude", "sA", "", "2026-06-10T01:00:00.000Z");
+
+  db.expireInboxForAgent("claude", "2026-06-10T01:01:00.000Z");
+  assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.type), ["task_done"]);
+
+  db.expireAllPending("2026-06-10T01:02:00.000Z");
+  assert.deepEqual(db.inbox({ status: "pending" }).map((i) => i.type), ["task_done"],
+    "the badge has to survive a gateway restart or it is not cross-device");
   db.close();
 });
 
