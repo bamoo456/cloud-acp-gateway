@@ -1289,26 +1289,30 @@ describe("Sidebar recent conversations", () => {
     expect(container.querySelector(".sess-confirm")).toBeNull();
   });
 
-  // The Running row shape (renderRunningItem) never renders a delete button at
-  // all now, unlike the old disabled-trash treatment: a running session's key
-  // is claimed by the running source before any other renderer sees it (the
-  // merge's dedup priority puts running ahead of recents/discovered/history).
-  test("a running conversation loses its delete affordance", async () => {
+  // The Running row shape (renderRunningItem) keeps the trash and disables it,
+  // the same treatment every other running row gets: the button is hover-only,
+  // so it costs no layout, and it says "not now" instead of vanishing when a
+  // turn starts. A running session's key is claimed by the running source
+  // before any other renderer sees it (the merge's dedup priority puts running
+  // ahead of recents/discovered/history), so this is the only row for it.
+  test("a running conversation's delete affordance is disabled, not dropped", async () => {
     await renderSidebar();
     // Other rows (the default history fixture) keep their own delete buttons —
-    // check that exactly s-recent's disappears, not that every one does.
+    // check that exactly s-recent's turns off, not that any one disappears.
     const before = container.querySelectorAll(".sess-del").length;
     expect(before).toBeGreaterThan(0);
+    expect(container.querySelectorAll(".sess-del:disabled").length).toBe(0);
     const { useStore } = await import("../store/store.ts");
     await act(async () => {
       useStore.setState({
         runningTasks: [{ agentName: "claude", sessionId: "s-recent", state: "active", cwd: "/repo" }],
       } as any);
     });
-    expect(container.querySelectorAll(".sess-del").length).toBe(before - 1);
+    expect(container.querySelectorAll(".sess-del").length).toBe(before);
+    expect(container.querySelectorAll(".sess-del:disabled").length).toBe(1);
   });
 
-  test("Running rows offer no delete affordance", async () => {
+  test("Running rows carry a disabled trash and a menu without Delete", async () => {
     seedLatestView();
     await seedRecentSessions(sixteenRecents());
     await renderSidebar();
@@ -1320,9 +1324,18 @@ describe("Sidebar recent conversations", () => {
     });
     const running = container.querySelector(".running-section");
     expect(running).not.toBeNull();
-    expect(running!.querySelector(".sess-del")).toBeNull();
-    // …while ordinary Recent rows next to it do have one.
-    expect(container.querySelector(".recent-section:not(.running-section) .sess-del")).not.toBeNull();
+    // The affordance exists (hover-only, so no layout shift when a turn starts)
+    // but refuses the click: the gateway declines a delete mid-turn anyway.
+    expect(running!.querySelector<HTMLButtonElement>(".sess-del")!.disabled).toBe(true);
+    // …while ordinary idle Recent rows next to it delete normally.
+    expect(container.querySelector<HTMLButtonElement>(".recent-section:not(.running-section) .sess-del")!.disabled).toBe(false);
+    // The row still reaches its menu — renaming or pairing a conversation is
+    // exactly what you want while it works — minus the destructive row.
+    const rowBtn = running!.querySelector<HTMLButtonElement>(".sess-item")!;
+    await act(async () => { rowBtn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    const rows = [...container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row")].map((b) => b.textContent);
+    expect(rows.some((t) => t?.includes("Rename conversation"))).toBe(true);
+    expect(rows.some((t) => t?.includes("Delete conversation"))).toBe(false);
   });
 
   test("right-clicking a row offers Delete conversation in a menu", async () => {
