@@ -966,6 +966,9 @@
   .tool .tstatus.failed { color: var(--err); }
   .tool .tbody { min-width: 0; max-width: 100%; padding: 11px 13px 13px; }
   .tool .loc { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
+  /* "!" shell-escape transcript: the command line and its output, as printed. */
+  .shell-note { font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+    white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; }
   /* Truncate a path from the front on a phone. `file:///Users/…/cloud-acp-g…`
      cuts off the one part that identifies the file; reversing the direction
      puts the ellipsis at the head instead, so the row reads
@@ -1105,6 +1108,14 @@
   .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface-2);
     border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 6px 6px 10px; }
   .composer:focus-within { border-color: var(--muted); }
+  /* "!" shell escape: the box stops being a message and says so — accent
+     border, mono text, and a "shell" tag where the composer meets the thread.
+     The send button reads "run" (Composer.tsx). */
+  .composer.shell, .composer.shell:focus-within { border-color: var(--accent); position: relative; }
+  .composer.shell .cm-content, .composer.shell .cm-line { font-family: var(--mono); font-size: 13px; }
+  .composer.shell::before { content: "shell"; position: absolute; top: -9px; left: 10px; padding: 0 6px;
+    background: var(--surface-2); border: 1px solid var(--accent); border-radius: 4px;
+    font-family: var(--mono); font-size: 10px; line-height: 16px; color: var(--accent); }
   /* CodeMirror-backed composer input: the document is plain markdown, rendered
      inline as you type. Override CodeMirror's monospace defaults so prose uses
      the app font; code spans/blocks switch back to monospace below. */

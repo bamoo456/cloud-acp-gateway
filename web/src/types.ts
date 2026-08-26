@@ -179,7 +179,7 @@ export type ThreadItem =
       id: string; kind: "elicitation"; reqId: number | string; message: string;
       fields: ElicitationField[]; resolved: boolean; chosen?: string;
     }
-  | { id: string; kind: "note"; text: string; variant?: "error" };
+  | { id: string; kind: "note"; text: string; variant?: "error" | "shell" };
 
 export interface PendingPermission {
   reqId: number | string;
