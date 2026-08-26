@@ -508,6 +508,9 @@
      rail and the title in the skins where --accent is a near-white or near-black
      neutral instead of the warm default. */
   .sess-item.recent.active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  /* Archived rows only appear behind "See more"; the dim is what says they are
+     archived, since they interleave with the ordinary rows there. */
+  .sess-item.archived { opacity: .55; }
   .sess-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
   .sess-item .name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

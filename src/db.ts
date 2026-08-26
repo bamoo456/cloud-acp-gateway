@@ -104,6 +104,17 @@ export class Db {
       path TEXT PRIMARY KEY,
       hidden_at TEXT NOT NULL
     )`);
+    // Conversations the reader has archived out of the default sidebar list —
+    // the transcript stays intact (and searchable), only the listing hides.
+    // Keyed per session and agent-scoped (a bare id can collide across agents),
+    // persisted server-side like hidden_folders so the choice follows the
+    // account across devices.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS archived_sessions (
+      agent_name TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      archived_at TEXT NOT NULL,
+      PRIMARY KEY (agent_name, session_id)
+    )`);
     this.db.exec(`CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -461,6 +472,35 @@ export class Db {
 
   unhide(p: string): void {
     this.db.prepare("DELETE FROM hidden_folders WHERE path = ?").run(p);
+  }
+
+  // Archived conversations — same shape as hidden folders, keyed per session
+  // (see the table comment above): oldest-archived first for a stable order.
+  archivedSessions(): Array<{ agentName: string; sessionId: string }> {
+    const rows = this.db
+      .prepare("SELECT agent_name, session_id FROM archived_sessions ORDER BY archived_at, session_id")
+      .all() as Array<{ agent_name: string; session_id: string }>;
+    return rows.map((r) => ({ agentName: r.agent_name, sessionId: r.session_id }));
+  }
+
+  isArchived(agentName: string, sessionId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM archived_sessions WHERE agent_name = ? AND session_id = ?").get(agentName, sessionId);
+  }
+
+  archiveSession(agentName: string, sessionId: string): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO archived_sessions (agent_name, session_id, archived_at) VALUES (?, ?, ?)")
+      .run(agentName, sessionId, new Date().toISOString());
+  }
+
+  unarchiveSession(agentName: string, sessionId: string): void {
+    this.db.prepare("DELETE FROM archived_sessions WHERE agent_name = ? AND session_id = ?").run(agentName, sessionId);
+  }
+
+  // Deleting a conversation drops its archive row too — by id across every
+  // agent, same as the other per-session tables (agents can share a provider).
+  deleteArchivedSession(sessionId: string): void {
+    this.db.prepare("DELETE FROM archived_sessions WHERE session_id = ?").run(sessionId);
   }
 
   // ----------------------------------------------------------------- inbox ----

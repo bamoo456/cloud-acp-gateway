@@ -62,6 +62,32 @@ test("hiddenFolders orders oldest-hidden first", () => {
   db.close();
 });
 
+test("archive / unarchive round-trips, agent-scoped, and delete drops every agent's row", () => {
+  const db = new Db(":memory:");
+  assert.deepEqual(db.archivedSessions(), []);
+  assert.equal(db.isArchived("claude", "s1"), false);
+
+  db.archiveSession("claude", "s1");
+  assert.equal(db.isArchived("claude", "s1"), true);
+  // agent-scoped: the same id under another agent is a different conversation
+  assert.equal(db.isArchived("codex", "s1"), false);
+  assert.deepEqual(db.archivedSessions(), [{ agentName: "claude", sessionId: "s1" }]);
+
+  // archiving again is idempotent
+  db.archiveSession("claude", "s1");
+  assert.deepEqual(db.archivedSessions(), [{ agentName: "claude", sessionId: "s1" }]);
+
+  db.unarchiveSession("claude", "s1");
+  assert.deepEqual(db.archivedSessions(), []);
+
+  // deleteArchivedSession spans agents — deletion is addressed by id alone
+  db.archiveSession("claude", "s2");
+  db.archiveSession("codex", "s2");
+  db.deleteArchivedSession("s2");
+  assert.deepEqual(db.archivedSessions(), []);
+  db.close();
+});
+
 test("state persists across reopen of the same file", () => {
   const dir = `/tmp/acpb-db-test-${process.pid}-${Date.now()}`;
   const file = `${dir}/state.sqlite`;
