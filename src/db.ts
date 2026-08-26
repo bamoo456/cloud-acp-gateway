@@ -103,11 +103,22 @@ export class Db {
       path TEXT PRIMARY KEY,
       hidden_at TEXT NOT NULL
     )`);
+    // Conversations the reader has pinned to the top of the sidebar. Keyed by
+    // agent + session id, NOT cwd: a row reaches the sidebar from several
+    // sources (recents cache, discovered transcripts, per-folder history) and
+    // they do not all spell the same folder the same way, so a cwd in the key
+    // would make a pin appear to vanish depending on which source claimed the
+    // row. Server-side like pinned_folders so the pin follows the account.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS pinned_sessions (
+      agent_name TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      pinned_at TEXT NOT NULL,
+      PRIMARY KEY (agent_name, session_id)
+    )`);
     // Conversations the reader has archived out of the default sidebar list —
     // the transcript stays intact (and searchable), only the listing hides.
-    // Keyed per session and agent-scoped (a bare id can collide across agents),
-    // persisted server-side like hidden_folders so the choice follows the
-    // account across devices.
+    // Keyed like pinned_sessions (agent-scoped: a bare id can collide across
+    // agents), persisted server-side so the choice follows the account.
     this.db.exec(`CREATE TABLE IF NOT EXISTS archived_sessions (
       agent_name TEXT NOT NULL,
       session_id TEXT NOT NULL,
@@ -471,6 +482,41 @@ export class Db {
 
   unhide(p: string): void {
     this.db.prepare("DELETE FROM hidden_folders WHERE path = ?").run(p);
+  }
+
+  // Pinned conversations — same shape as pinned_folders, keyed by agent +
+  // session (see the table comment). Returned as "agent\nsession" keys, which is
+  // exactly how the sidebar already keys a row.
+  pinnedSessions(): string[] {
+    const rows = this.db
+      .prepare("SELECT agent_name, session_id FROM pinned_sessions ORDER BY pinned_at, session_id")
+      .all() as Array<{ agent_name: string; session_id: string }>;
+    return rows.map((r) => r.agent_name + "\n" + r.session_id);
+  }
+
+  isSessionPinned(agentName: string, sessionId: string): boolean {
+    return !!this.db
+      .prepare("SELECT 1 FROM pinned_sessions WHERE agent_name = ? AND session_id = ?")
+      .get(agentName, sessionId);
+  }
+
+  pinSession(agentName: string, sessionId: string): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO pinned_sessions (agent_name, session_id, pinned_at) VALUES (?, ?, ?)")
+      .run(agentName, sessionId, new Date().toISOString());
+  }
+
+  unpinSession(agentName: string, sessionId: string): void {
+    this.db
+      .prepare("DELETE FROM pinned_sessions WHERE agent_name = ? AND session_id = ?")
+      .run(agentName, sessionId);
+  }
+
+  // A deleted conversation must not keep a pin: /prefs would rehydrate it and the
+  // sidebar would sort a row that no longer exists to the top. Across every agent
+  // by id alone, matching deleteRecentSession — two agents can share a provider.
+  deletePinnedSession(sessionId: string): void {
+    this.db.prepare("DELETE FROM pinned_sessions WHERE session_id = ?").run(sessionId);
   }
 
   // Archived conversations — same shape as hidden folders, keyed per session

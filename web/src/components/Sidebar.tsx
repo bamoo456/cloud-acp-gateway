@@ -11,7 +11,7 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, IconArchive, IconSideChat, WorkingDots,
+import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, IconArchive, IconSideChat, IconPin, WorkingDots,
   Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { folderKey, homeFrom } from "../lib/folderKey.ts";
@@ -74,9 +74,9 @@ const rowLabel = (t: RowTarget) => t.name || t.sessionId.slice(0, 8);
 // without the affordance or the menu gestures. A running row keeps both: the
 // trash is disabled (the gateway refuses a delete mid-turn anyway) but renaming
 // or pairing a conversation is exactly what you want WHILE it works.
-function SessionRow({ className, onOpen, target, running, active, onAskDelete, onMenu, children }: {
+function SessionRow({ className, onOpen, target, running, active, pinned, onAskDelete, onMenu, children }: {
   className: string; onOpen: () => void;
-  target?: RowTarget; running?: boolean; active?: boolean;
+  target?: RowTarget; running?: boolean; active?: boolean; pinned?: boolean;
   onAskDelete: (t: RowTarget) => void;
   onMenu: (t: RowTarget, x: number, y: number) => void;
   children: React.ReactNode;
@@ -84,7 +84,13 @@ function SessionRow({ className, onOpen, target, running, active, onAskDelete, o
   const menu = useRowMenu((x, y) => { if (target) onMenu(target, x, y); });
   return (
     <div className="sess-row">
-      <button className={className} onClick={onOpen} aria-current={active ? "true" : undefined} {...(target ? menu : {})}>{children}</button>
+      {/* The badge lives here, not inside each caller's children, because every
+          row that can be pinned is a row that has a `target` — which is exactly
+          what SessionRow already gates its other affordances on. */}
+      <button className={className} onClick={onOpen} aria-current={active ? "true" : undefined} {...(target ? menu : {})}>
+        {pinned && <span className="sess-pin" title="Pinned" aria-label="Pinned"><IconPin filled /></span>}
+        {children}
+      </button>
       {target && (
         <button className="sess-del" title="Delete conversation" aria-label="Delete conversation"
           disabled={running} onClick={() => onAskDelete(target)}><IconTrash /></button>
@@ -95,12 +101,14 @@ function SessionRow({ className, onOpen, target, running, active, onAskDelete, o
 // The row's right-click / long-press menu: FileMenu's sheet-or-dropdown
 // pattern with a single destructive action.
 const MENU_W = 214;
-const MENU_H = 292; // header + 5 rows now that Archive joins Open as side chat/Rename/Hide folder/Delete
+const MENU_H = 334; // header + 6 rows: Open as side chat / Pin / Archive / Rename / Hide folder / Delete
 const SHEET_QUERY = "(max-width: 640px)"; // matches .wf-menu's own sheet breakpoint
-function SessionRowMenu({ target, archived, onSideChat, onRename, onArchive, onHideFolder, onDelete, onClose }: {
+function SessionRowMenu({ target, pinned, archived, onSideChat, onTogglePin, onRename, onArchive, onHideFolder, onDelete, onClose }: {
   target: RowTarget & { x: number; y: number };
+  pinned: boolean;
   archived?: boolean;
-  onSideChat?: () => void; onRename: () => void; onArchive?: () => void; onHideFolder?: () => void; onDelete?: () => void; onClose: () => void;
+  onSideChat?: () => void; onTogglePin: () => void; onRename: () => void; onArchive?: () => void;
+  onHideFolder?: () => void; onDelete?: () => void; onClose: () => void;
 }) {
   // Read once, on open: the menu lives for a few seconds and a device does not
   // cross the breakpoint inside them.
@@ -129,6 +137,13 @@ function SessionRowMenu({ target, archived, onSideChat, onRename, onArchive, onH
             <IconSideChat /><span>Open as side chat</span>
           </button>
         )}
+        {/* Above Rename because it's the only administering action that changes
+            where the row LIVES rather than what it says. Offered on every row —
+            unlike Hide folder and Open as side chat there is no case where a pin
+            can't be honoured; the list is sorted client-side either way. */}
+        <button className="wf-menu-row" role="menuitem" onClick={onTogglePin}>
+          <IconPin filled={pinned} /><span>{pinned ? "Unpin conversation" : "Pin conversation"}</span>
+        </button>
         <button className="wf-menu-row" role="menuitem" onClick={onRename}>
           <IconPencil /><span>Rename conversation</span>
         </button>
@@ -385,6 +400,11 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   const { active: activeTasks, cooling: coolingTasks } = runningView(s.runningTasks, s.runningSeen, Date.now());
   const runningKeys = new Set([...activeTasks, ...coolingTasks.map((c) => c.task)].map((t) => t.agentName + "\n" + t.sessionId));
   const isRunning = (agentName: string, sessionId: string) => runningKeys.has(agentName + "\n" + sessionId);
+  // Conversations the reader pinned, keyed the same way every other per-row set
+  // here is. Server-side state (see store.pinnedSessions) so a pin set on the
+  // phone is already on top when the desktop loads.
+  const pinnedKeys = new Set(s.pinnedSessions);
+  const isPinned = (agentName: string, sessionId: string) => pinnedKeys.has(agentName + "\n" + sessionId);
   // The one conversation the main view is showing — the marker every row type
   // uses, so exactly one row can wear it. Merely being open in memory is not it:
   // several sessions are, and lighting them all up is what made the current one
@@ -459,7 +479,8 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         className={"sess-item" + (active ? " active" : "") + (variant === "recent" ? " recent" : "") + archivedCls(it.agentName, it.sessionId)}
         onOpen={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: s.cwd, name: it.title || "" }}
-        running={isRunning(it.agentName, it.sessionId)} active={active} {...rowActions}>
+        running={isRunning(it.agentName, it.sessionId)} active={active}
+        pinned={isPinned(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="name">{it.title || it.sessionId.slice(0, 8)}</span>
@@ -522,7 +543,8 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         // short-id display fallback is not a name, and a rename box must not be
         // prefilled with one.
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: named }}
-        running={isRunning(it.agentName, it.sessionId)} active={active} {...rowActions}>
+        running={isRunning(it.agentName, it.sessionId)} active={active}
+        pinned={isPinned(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -540,7 +562,8 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         className={"sess-item recent with-folder" + (active ? " active" : "") + archivedCls(it.agentName, it.sessionId)}
         onOpen={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: it.title || "" }}
-        running={isRunning(it.agentName, it.sessionId)} active={active} {...rowActions}>
+        running={isRunning(it.agentName, it.sessionId)} active={active}
+        pinned={isPinned(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -583,6 +606,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
       key, cwd, when: Number.isFinite(ms) ? ms : 0, running,
       needsYou: needsYouKeys.has(key) || awaitingKeys.has(key),
       unread: unreadKeys.has(key),
+      pinned: pinnedKeys.has(key),
       data: node,
     });
   };
@@ -750,7 +774,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                     <>
                       {pinned.length > 0 && (
                         <div className="running-section recent-section">
-                          <div className="listhead"><span>Needs you · Running</span></div>
+                          <div className="listhead"><span>Pinned · Needs you · Running</span></div>
                           <div className="recent-list">{pinned.map((r) => r.data)}</div>
                           <div className="pin-div" />
                         </div>
@@ -821,6 +845,8 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         )}
         {rowMenu && (
           <SessionRowMenu target={rowMenu} onClose={() => setRowMenu(null)}
+            pinned={isPinned(rowMenu.agentName, rowMenu.sessionId)}
+            onTogglePin={() => { s.togglePinnedSession(rowMenu.agentName, rowMenu.sessionId); setRowMenu(null); }}
             // Offered only when the store could actually honour it: a row under
             // another agent lives on a connection this page doesn't hold, an agent
             // that can't resume a session has nothing to open live, and there has
