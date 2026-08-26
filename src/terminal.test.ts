@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleTerminal } from "./terminal.ts";
 import { handleRequest } from "./gateway.ts";
@@ -110,4 +111,69 @@ test("with ACPG_TERMINAL=off, /terminal/* 404s through the real gateway", async 
   } finally {
     await close();
   }
+});
+
+// ------------------------------------------------------------ /terminal/exec ----
+// One-shot exec: a POST whose JSON body names the command. These spawn a real
+// bash, so keep them to commands that finish instantly.
+function execReq(body: string): IncomingMessage {
+  const r = Readable.from([Buffer.from(body)]) as unknown as IncomingMessage;
+  (r as { url?: string }).url = "/terminal/exec";
+  (r as { method?: string }).method = "POST";
+  return r;
+}
+// exec answers async (the child has to exit), so the res double resolves a
+// promise on end() instead of being read synchronously.
+function asyncRes(): { res: ServerResponse; done: Promise<{ status: number; body: string }> } {
+  let status = 0;
+  let body = "";
+  let finish!: (v: { status: number; body: string }) => void;
+  const done = new Promise<{ status: number; body: string }>((r) => { finish = r; });
+  const res = {
+    writeHead(code: number) { status = code; return res; },
+    write(chunk: string) { body += chunk; return true; },
+    end(chunk?: string) { if (chunk) body += chunk; finish({ status, body }); return res; },
+  } as unknown as ServerResponse;
+  return { res, done };
+}
+
+test("/terminal/exec rejects non-POST", () => {
+  const { res, status } = fakeRes();
+  const handled = handleTerminal(fakeReq("/terminal/exec"), res, "/terminal/exec", 1024);
+  assert.equal(handled, true);
+  assert.equal(status(), 405);
+});
+
+test("/terminal/exec rejects a body with no command", async () => {
+  const { res, done } = asyncRes();
+  assert.equal(handleTerminal(execReq(JSON.stringify({ cmd: "  " })), res, "/terminal/exec", 1024), true);
+  const r = await done;
+  assert.equal(r.status, 400);
+  assert.match(r.body, /missing cmd/);
+});
+
+test("/terminal/exec runs the command and reports its output", async () => {
+  const { res, done } = asyncRes();
+  handleTerminal(execReq(JSON.stringify({ cmd: "echo out; echo err >&2" })), res, "/terminal/exec", 1024);
+  const r = await done;
+  assert.equal(r.status, 200);
+  const out = JSON.parse(r.body) as { code: number; stdout: string; stderr: string };
+  assert.equal(out.code, 0);
+  assert.equal(out.stdout, "out\n");
+  assert.equal(out.stderr, "err\n");
+});
+
+test("/terminal/exec reports a non-zero exit as a result, not an error", async () => {
+  const { res, done } = asyncRes();
+  handleTerminal(execReq(JSON.stringify({ cmd: "exit 3" })), res, "/terminal/exec", 1024);
+  const r = await done;
+  assert.equal(r.status, 200);
+  assert.equal((JSON.parse(r.body) as { code: number }).code, 3);
+});
+
+test("/terminal/exec closes stdin so a command that reads it exits instead of hanging", async () => {
+  const { res, done } = asyncRes();
+  handleTerminal(execReq(JSON.stringify({ cmd: "cat" })), res, "/terminal/exec", 1024);
+  const r = await done; // resolves at all = didn't sit on the 30s deadline
+  assert.equal((JSON.parse(r.body) as { code: number }).code, 0);
 });
