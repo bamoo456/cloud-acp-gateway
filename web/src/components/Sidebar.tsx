@@ -459,9 +459,12 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
       <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"running:" + t.agentName + ":" + t.sessionId}
         aria-current={active ? "true" : undefined}
         onClick={() => { s.jumpToTask(t); onClose(); }}>
-        {coolingAt === undefined
-          ? runDot(t.agentName, t.sessionId)
-          : <span className="run-dot cooling" title="Recently active" />}
+        {/* Cooling only speaks for a turn with nothing to say: an unread finish (or
+            a prompt still waiting) is the more actionable statement, and burying
+            it under the muted ring for the length of the grace window is what
+            made the just-finished state unreadable. */}
+        {runDot(t.agentName, t.sessionId)
+          ?? (coolingAt === undefined ? null : <span className="run-dot cooling" title="Recently active" />)}
         {mark(t.agentName)}
         <span className="sess-main">
           <span className="name">{title || t.sessionId.slice(0, 8)}</span>
