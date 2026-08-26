@@ -9,7 +9,13 @@
     --border-strong: #d9d6d0;
     /* Colour carries exactly four meanings (docs/ui-refactor-plan.md §1.1):
        ink = interactive / active / running, amber = needs you, red = failed
-       and diff −, green = diff + AND NOTHING ELSE. Identity is a mono
+       and diff −, green = diff + AND NOTHING ELSE. One documented exception:
+       --unread below. It is red, and it is not failure — the tab badge (a
+       canvas bitmap, so it can't read these tokens) already spends red on
+       "you have not read this", and a list that disagreed with the tab about
+       what red means would be worse than the fifth meaning. Its own token, not
+       --err, so the two can never be confused for each other, and fixed across
+       skins/themes to stay identical to the favicon's own #dc3f34. Identity is a mono
        wordmark, not a hue — --agent-color is for the 7px .idot alone, unless
        the reader opts back into the old behaviour with data-identity="hue".
        ink/on-ink derive from text/bg so every skin and both themes get them
@@ -19,6 +25,7 @@
     --on-ink: var(--bg);
     --accent: var(--ink);
     --accent-press: color-mix(in srgb, var(--ink) 82%, var(--bg));
+    --unread: #dc3f34;
     --agent-claude: #d97757;
     --agent-codex: #10a37f;
     --agent-opencode: #5A5858;
@@ -588,9 +595,11 @@
     align-self: center; background: var(--ink); border: 1.5px solid var(--ink);
     animation: agent-pulse 1.1s ease-in-out infinite; }
   .sess-item .run-dot.awaiting, .fgroup .run-dot.awaiting { background: var(--warn); border-color: var(--warn); animation: none; }
-  /* Finished, not read yet: the working dot with the pulse taken out — the
-     conversation has something new in it, but nothing is happening right now. */
-  .sess-item .run-dot.unread, .fgroup .run-dot.unread { animation: none; }
+  /* Finished, not read yet: solid --unread, no pulse. Same red as the tab badge
+     — the tab tells you how many, the list tells you which. An ink dot held
+     still was too close to the ink dot that pulses. */
+  .sess-item .run-dot.unread, .fgroup .run-dot.unread {
+    background: var(--unread); border-color: var(--unread); animation: none; }
   /* Cooling-down: recently finished, lingering in Running — a muted hollow ring, no pulse. */
   .sess-item .run-dot.cooling { background: transparent; border-color: var(--muted); animation: none; }
   /* .search-more (搜尋全部 / 繼續搜更早) plays the same role in Conversations that
