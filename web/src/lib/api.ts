@@ -685,6 +685,20 @@ function parseOptions(bodyJson: unknown): PermissionOption[] {
   }
 }
 
+// Clear a conversation's finished-turn unreads. The badge is server state (so it
+// spans devices), which is why opening the conversation has to tell the gateway
+// rather than just clearing something locally. Best-effort: a failure only means
+// the next /inbox poll brings the badge back.
+export async function markInboxRead(sessionId: string): Promise<void> {
+  try {
+    const u = new URL(base() + "/inbox/read");
+    u.searchParams.set("sessionId", sessionId);
+    await fetch(u.toString(), { method: "POST" });
+  } catch {
+    // ignore
+  }
+}
+
 // Answer a pending permission server-side: the gateway routes the chosen option
 // to the live agent, so any device can answer a prompt for any agent without
 // holding that agent's SSE connection. Returns whether the answer was accepted
