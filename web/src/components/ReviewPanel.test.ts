@@ -15,6 +15,11 @@ const COMMITS: CommitEntry[] = [
     subject: "Merge pull request #97" },
 ];
 
+const NEW_COMMIT: CommitEntry = {
+  sha: "eeee333ffff", shortSha: "eeee333", author: "Ada", date: "2026-08-14T10:00:00Z",
+  subject: "fix: the other thing", files: 1, additions: 2, deletions: 1,
+};
+
 const CHANGES: ChangesResult = {
   repo: "/repo",
   truncated: false,
@@ -87,6 +92,17 @@ describe("ReviewPanel", () => {
     return onCount;
   }
 
+  // Re-render in place with new keys: refreshKey is every reason to re-read the
+  // checkout (a turn ending, Refresh, opening the panel), reloadKey is Refresh
+  // alone.
+  async function bump(keys: { refreshKey?: number; reloadKey?: number }) {
+    const { ReviewPanel } = await import("./ReviewPanel.tsx");
+    await act(async () => {
+      root?.render(React.createElement(ReviewPanel, { cwd: "/repo", ...keys, onCount: vi.fn() }));
+    });
+    await act(async () => { await flush(); });
+  }
+
   const click = async (el: Element | null | undefined) => {
     await act(async () => { el?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
@@ -115,6 +131,76 @@ describe("ReviewPanel", () => {
 
     await click([...container.querySelectorAll(".rv-commit")][0]);
     expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { commit: "aaaa111bbbb" });
+  });
+
+  test("a refresh re-reads the log — an agent's commit lands mid-review", async () => {
+    await render();
+    await click(chip("Commits"));
+    expect(container.textContent).not.toContain("fix: the other thing");
+
+    getCommits.mockResolvedValue({
+      repo: "/repo", commits: [NEW_COMMIT, ...COMMITS], branch: "feature", defaultBase: "origin/main",
+    });
+    await bump({ refreshKey: 1 });
+    expect(container.textContent).toContain("fix: the other thing");
+  });
+
+  test("a refresh keeps the revision and the file being read", async () => {
+    await render();
+    await click(chip("Commits"));
+    await click([...container.querySelectorAll(".rv-commit")][0]);
+    await click(container.querySelector(".wf-row"));
+    expect(rows().length).toBeGreaterThan(0);
+
+    await bump({ refreshKey: 1 });
+    // Still that commit, and still that file: a refresh updates what is on
+    // screen, it doesn't send you back to the list.
+    expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { commit: "aaaa111bbbb" });
+    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/workspace.ts", { commit: "aaaa111bbbb" });
+    expect(rows().length).toBeGreaterThan(0);
+  });
+
+  test("a refresh doesn't overwrite a base someone typed", async () => {
+    await render();
+    await click(chip("Branch"));
+    await click(container.querySelector(".rv-ref"));
+    const input = container.querySelector("input");
+    await act(async () => {
+      if (input) {
+        // Through the native setter, or React's value tracker treats the write
+        // as a no-op and the field keeps what it was rendered with.
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!
+          .set!.call(input, "develop");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await act(async () => { await flush(); });
+    expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { base: "develop" });
+
+    await bump({ refreshKey: 1 });
+    expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { base: "develop" });
+  });
+
+  test("Refresh re-reads the open file's diff; a turn ending leaves it alone", async () => {
+    await render();
+    await click(container.querySelector(".wf-row"));
+    expect(getFileDiff).toHaveBeenCalledTimes(1);
+
+    // A turn ending refreshes the lists around the diff, not the diff itself:
+    // it could be redrawn under a comment being written.
+    await bump({ refreshKey: 1 });
+    expect(getFileDiff).toHaveBeenCalledTimes(1);
+    expect(rows().length).toBeGreaterThan(0);
+
+    // Refresh is an explicit ask, and takes the diff with it.
+    await bump({ refreshKey: 1, reloadKey: 1 });
+    expect(getFileDiff).toHaveBeenCalledTimes(2);
+    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/workspace.ts", null);
+    // Still readable throughout — a reload swaps the diff, it doesn't blank it.
+    expect(rows().length).toBeGreaterThan(0);
   });
 
   test("Branch defaults to the base the gateway resolved", async () => {
