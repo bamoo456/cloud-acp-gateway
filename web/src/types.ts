@@ -55,6 +55,11 @@ export interface MessageImage { mimeType: string; data?: string; uri?: string; }
 // a link it has to go and resolve.
 export interface MessageFile { name: string; uri?: string; range?: string; text?: string; }
 
+// A message typed while its conversation's turn was still in flight, waiting for
+// that turn to end before it is sent. `id` is what the rail's ✕ removes it by —
+// an index would shift under a drain landing between render and click.
+export interface QueuedPrompt { id: string; text: string; images?: MessageImage[]; files?: MessageFile[]; }
+
 // What an agent reports it can accept in a prompt (from `initialize`'s
 // agentCapabilities.promptCapabilities). We only gate on `image` today.
 export interface PromptCapabilities {
