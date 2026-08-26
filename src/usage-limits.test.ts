@@ -29,12 +29,12 @@ describe("normalizeLimits", () => {
   });
 
   it("drops a window the account doesn't have instead of calling it 0%", () => {
-    // This endpoint answers `{}` for a window that doesn't apply — showing that
+    // This endpoint answers `{}` or `null` for a window that doesn't apply — showing
     // as a full-width 0% bar would claim a quota the user doesn't have.
     const out = normalizeLimits({
       five_hour: { utilization: 4 },
       seven_day_opus: {},
-      seven_day_sonnet: {},
+      seven_day_sonnet: null,
     }, AT);
     assert.ok(out.status === "ok");
     assert.deepEqual(Object.keys(out.windows), ["five_hour"]);
@@ -60,15 +60,19 @@ describe("normalizeLimits", () => {
     assert.deepEqual(Object.keys(out.windows).sort(), ["five_hour", "weekly_scoped:Fable"]);
   });
 
-  it("skips an inactive scoped limit and one that names no model", () => {
+  it("keeps an inactive scoped limit, and skips one that names no model", () => {
+    // `is_active` marks the window currently binding, not the ones that apply:
+    // a live response has the session entry active at 41% while `weekly_all`
+    // reads false next to a flat `seven_day` of a real 15%. Skipping inactive
+    // entries hid the Fable cap entirely, which is why it isn't a filter.
     const out = normalizeLimits({
       limits: [
-        { kind: "weekly_scoped", percent: 10, scope: { model: { display_name: "Fable" } }, is_active: false },
+        { kind: "weekly_scoped", percent: 27, scope: { model: { id: null, display_name: "Fable" } }, is_active: false },
         { kind: "weekly_scoped", percent: 20 },
       ],
     }, AT);
     assert.ok(out.status === "ok");
-    assert.deepEqual(out.windows, {});
+    assert.deepEqual(out.windows, { "weekly_scoped:Fable": { utilization: 0.27, resetsAt: undefined, label: "Fable" } });
   });
 
   it("clamps out-of-range percentages", () => {
