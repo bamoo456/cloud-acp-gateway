@@ -70,8 +70,10 @@ type RowTarget = { sessionId: string; agentName: string; cwd: string; name: stri
 const rowLabel = (t: RowTarget) => t.name || t.sessionId.slice(0, 8);
 // One list row: the session button and its delete affordance as SIBLINGS — a
 // <button> cannot legally nest another. A component rather than a render
-// helper because useRowMenu is a hook. Rows with no `target` (Running, Current)
-// render without the affordance or the menu gestures.
+// helper because useRowMenu is a hook. Rows with no `target` (Current) render
+// without the affordance or the menu gestures. A running row keeps both: the
+// trash is disabled (the gateway refuses a delete mid-turn anyway) but renaming
+// or pairing a conversation is exactly what you want WHILE it works.
 function SessionRow({ className, onOpen, target, running, active, onAskDelete, onMenu, children }: {
   className: string; onOpen: () => void;
   target?: RowTarget; running?: boolean; active?: boolean;
@@ -79,7 +81,7 @@ function SessionRow({ className, onOpen, target, running, active, onAskDelete, o
   onMenu: (t: RowTarget, x: number, y: number) => void;
   children: React.ReactNode;
 }) {
-  const menu = useRowMenu((x, y) => { if (target && !running) onMenu(target, x, y); });
+  const menu = useRowMenu((x, y) => { if (target) onMenu(target, x, y); });
   return (
     <div className="sess-row">
       <button className={className} onClick={onOpen} aria-current={active ? "true" : undefined} {...(target ? menu : {})}>{children}</button>
@@ -97,7 +99,7 @@ const MENU_H = 250; // header + 4 rows now that Open as side chat joins Rename/H
 const SHEET_QUERY = "(max-width: 640px)"; // matches .wf-menu's own sheet breakpoint
 function SessionRowMenu({ target, onSideChat, onRename, onHideFolder, onDelete, onClose }: {
   target: RowTarget & { x: number; y: number };
-  onSideChat?: () => void; onRename: () => void; onHideFolder?: () => void; onDelete: () => void; onClose: () => void;
+  onSideChat?: () => void; onRename: () => void; onHideFolder?: () => void; onDelete?: () => void; onClose: () => void;
 }) {
   // Read once, on open: the menu lives for a few seconds and a device does not
   // cross the breakpoint inside them.
@@ -136,9 +138,13 @@ function SessionRowMenu({ target, onSideChat, onRename, onHideFolder, onDelete, 
             <IconHide /><span>Hide folder “{basename(target.cwd)}”</span>
           </button>
         )}
-        <button className="wf-menu-row danger" role="menuitem" onClick={onDelete}>
-          <IconTrash /><span>Delete conversation</span>
-        </button>
+        {/* Withheld while the conversation is running, same as the row's trash:
+            the gateway refuses the delete and all the row would get is a tip. */}
+        {onDelete && (
+          <button className="wf-menu-row danger" role="menuitem" onClick={onDelete}>
+            <IconTrash /><span>Delete conversation</span>
+          </button>
+        )}
       </div>
     </>
   );
@@ -456,9 +462,14 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
     const { title, cwd } = resolveRunningTask(t, s);
     const active = isCurrent(t.agentName, t.sessionId);
     return (
-      <button className={"sess-item recent with-folder" + (active ? " active" : "")} key={"running:" + t.agentName + ":" + t.sessionId}
-        aria-current={active ? "true" : undefined}
-        onClick={() => { s.jumpToTask(t); onClose(); }}>
+      <SessionRow key={"running:" + t.agentName + ":" + t.sessionId}
+        className={"sess-item recent with-folder" + (active ? " active" : "")}
+        onOpen={() => { s.jumpToTask(t); onClose(); }}
+        // The resolver's folder, falling back to the one on screen exactly as the
+        // row's `push()` does. `title || ""` and never the short-id label below
+        // it: that fallback is display-only and must not reach a rename box.
+        target={{ sessionId: t.sessionId, agentName: t.agentName, cwd: cwd || s.cwd, name: title || "" }}
+        running={isRunning(t.agentName, t.sessionId)} active={active} {...rowActions}>
         {coolingAt === undefined
           ? runDot(t.agentName, t.sessionId)
           : <span className="run-dot cooling" title="Recently active" />}
@@ -472,7 +483,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
             ? (t.state === "awaiting-input" ? "Needs input" : "Working")
             : timeAgo(new Date(coolingAt).toISOString())}
         </span>
-      </button>
+      </SessionRow>
     );
   };
   const renderRecentItem = (it: RecentSession) => {
@@ -808,7 +819,9 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
             onHideFolder={folderKey(rowMenu.cwd, home) !== folderKey(s.cwd, home)
               ? () => { s.toggleHiddenFolder(rowMenu.cwd); setRowMenu(null); }
               : undefined}
-            onDelete={() => { setConfirmDel(rowMenu); setRowMenu(null); }} />
+            onDelete={isRunning(rowMenu.agentName, rowMenu.sessionId)
+              ? undefined
+              : () => { setConfirmDel(rowMenu); setRowMenu(null); }} />
         )}
         {renaming && (
           <>
