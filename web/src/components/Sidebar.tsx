@@ -470,9 +470,12 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         // it: that fallback is display-only and must not reach a rename box.
         target={{ sessionId: t.sessionId, agentName: t.agentName, cwd: cwd || s.cwd, name: title || "" }}
         running={isRunning(t.agentName, t.sessionId)} active={active} {...rowActions}>
-        {coolingAt === undefined
-          ? runDot(t.agentName, t.sessionId)
-          : <span className="run-dot cooling" title="Recently active" />}
+        {/* Cooling only speaks for a turn with nothing to say: an unread finish (or
+            a prompt still waiting) is the more actionable statement, and burying
+            it under the muted ring for the length of the grace window is what
+            made the just-finished state unreadable. */}
+        {runDot(t.agentName, t.sessionId)
+          ?? (coolingAt === undefined ? null : <span className="run-dot cooling" title="Recently active" />)}
         {mark(t.agentName)}
         <span className="sess-main">
           <span className="name">{title || t.sessionId.slice(0, 8)}</span>
