@@ -554,6 +554,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
     rows.push({
       key, cwd, when: Number.isFinite(ms) ? ms : 0, running,
       needsYou: needsYouKeys.has(key) || awaitingKeys.has(key),
+      unread: unreadKeys.has(key),
       data: node,
     });
   };
@@ -687,9 +688,13 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                           <span className="fi"><IconFolder /></span>
                           <span className="fname">{g.label}</span>
                           <span className="fcount">{g.rows.length}</span>
-                          {(g.needsYou || g.running) && (
-                            <span className={"run-dot" + (g.needsYou ? " awaiting" : "")}
-                              title={g.needsYou ? "Needs input" : "Working"} />
+                          {/* One dot for the whole folder, in the row dots' own
+                              precedence: blocked on you beats working beats
+                              something-to-read. A collapsed folder is the only
+                              place its conversations' state can show. */}
+                          {(g.needsYou || g.running || g.unread) && (
+                            <span className={"run-dot" + (g.needsYou ? " awaiting" : g.running ? "" : " unread")}
+                              title={g.needsYou ? "Needs input" : g.running ? "Working" : "Finished — not read yet"} />
                           )}
                           {/* hideFolders() always exempts the folder you're working in, so
                               a toggle here would look broken — offer it on every group but

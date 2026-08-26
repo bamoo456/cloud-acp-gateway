@@ -97,6 +97,16 @@ describe("Sidebar unread marker", () => {
     expect(rowFor("Nothing happened here")?.querySelector(".run-dot")).toBeFalsy();
   });
 
+  test("the folder header carries the unread dot too", async () => {
+    // A collapsed folder is the only place its conversations' state can show,
+    // and the header dot follows the rows' own precedence.
+    await renderWith([inboxItem({})]);
+
+    const header = container.querySelector(".fgroup")!;
+    expect(header.querySelector(".run-dot.unread")).toBeTruthy();
+    expect(header.querySelector(".run-dot.awaiting")).toBeFalsy();
+  });
+
   test("a prompt waiting on an answer stays amber, not unread", async () => {
     // Both rows exist in the inbox; only the one that can be answered is amber,
     // because amber is the colour that means the turn is blocked on you.

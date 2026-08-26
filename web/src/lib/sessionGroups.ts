@@ -13,6 +13,8 @@ export interface GroupableRow<T> {
   when: number;
   running: boolean;
   needsYou: boolean;
+  /** a finished turn nobody has opened yet — shown, but never re-orders a list */
+  unread: boolean;
   data: T;
 }
 
@@ -26,6 +28,7 @@ export interface FolderGroup<T> {
   rows: Array<GroupableRow<T>>;
   running: boolean;
   needsYou: boolean;
+  unread: boolean;
   /** the folder the app is currently working in */
   current: boolean;
 }
@@ -49,19 +52,20 @@ export function groupByFolder<T>(
     if (!g) {
       g = {
         key, label: folderLabel(row.cwd) || key, cwd: row.cwd,
-        rows: [], running: false, needsYou: false, current: key === currentKey,
+        rows: [], running: false, needsYou: false, unread: false, current: key === currentKey,
       };
       groups.set(key, g);
     }
     g.rows.push(row);
     g.running ||= row.running;
     g.needsYou ||= row.needsYou;
+    g.unread ||= row.unread;
   }
   // The folder you are in belongs in the list even before it has a session.
   if (currentKey && !groups.has(currentKey)) {
     groups.set(currentKey, {
       key: currentKey, label: folderLabel(currentCwd) || currentKey, cwd: currentCwd,
-      rows: [], running: false, needsYou: false, current: true,
+      rows: [], running: false, needsYou: false, unread: false, current: true,
     });
   }
   const out = [...groups.values()];
