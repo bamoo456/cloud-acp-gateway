@@ -137,6 +137,18 @@ export function IconHide() {
   );
 }
 
+// A pushpin: head, then the shaft running down to the point. `filled` paints the
+// head solid, which is how a pinned row's inline badge reads as "on" at 12px —
+// the outline alone is indistinguishable from the other row glyphs at that size.
+export function IconPin({ filled = false }: { filled?: boolean } = {}) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5z" fill={filled ? "currentColor" : "none"} />
+      <path d="M12 14v6" />
+    </svg>
+  );
+}
+
 export function IconSlash() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
