@@ -5,14 +5,28 @@ const HOME = "/Users/dev";
 const HOUR = 3600_000;
 const NOW = Date.UTC(2026, 7, 14, 12, 0);
 
-function row(key: string, cwd: string, hoursAgo: number, flags: { running?: boolean; needsYou?: boolean; unread?: boolean } = {}): GroupableRow<string> {
+function row(key: string, cwd: string, hoursAgo: number, flags: { running?: boolean; needsYou?: boolean; unread?: boolean; pinned?: boolean } = {}): GroupableRow<string> {
   return {
-    key, cwd, when: NOW - hoursAgo * HOUR,
-    running: !!flags.running, needsYou: !!flags.needsYou, unread: !!flags.unread, data: key,
+    key, cwd, when: NOW - hoursAgo * HOUR, running: !!flags.running,
+    needsYou: !!flags.needsYou, unread: !!flags.unread, pinned: !!flags.pinned, data: key,
   };
 }
 
 describe("latestWithPinned", () => {
+  test("a pinned session outranks one that needs you, and never lands in rest", () => {
+    // The whole point of a pin: it is the one ordering signal the reader set by
+    // hand, so nothing the gateway reports about another session may displace it.
+    const { pinned, rest } = latestWithPinned([
+      row("idle-1h", "/a", 1),
+      row("needs-3h", "/a", 3, { needsYou: true }),
+      row("pinned-40h", "/a", 40, { pinned: true }),
+    ]);
+
+    expect(pinned.map((r) => r.key)).toEqual(["pinned-40h", "needs-3h"]);
+    expect(rest.map((r) => r.key)).toEqual(["idle-1h"]);
+  });
+
+
   test("a three-hour-old session that needs you outranks a one-hour-old idle one", () => {
     // The plan's own acceptance case (§5): waiting on an Allow must not sink
     // out of sight for being quiet — that is why the phone was opened.
@@ -111,7 +125,7 @@ describe("splitByAge", () => {
 
   test("no usable timestamp lands in older, not fresh", () => {
     const noTime: GroupableRow<string> = {
-      key: "no-time", cwd: "/a", when: 0, running: false, needsYou: false, unread: false, data: "no-time",
+      key: "no-time", cwd: "/a", when: 0, running: false, needsYou: false, unread: false, pinned: false, data: "no-time",
     };
     const { fresh, older } = splitByAge([noTime], NOW);
     expect(fresh).toEqual([]);
@@ -168,5 +182,20 @@ describe("hideFolders", () => {
   test("an empty list is a no-op", () => {
     const rows = [row("a", "/Users/dev/anything", 1)];
     expect(hideFolders(rows, [], "/elsewhere", HOME)).toBe(rows);
+  });
+});
+
+describe("pins in the folder view", () => {
+  test("a pinned row sorts to the top of its folder, and its folder above quieter ones", () => {
+    const groups = groupByFolder([
+      row("fresh", "/Users/dev/quiet", 0.5),
+      row("stale", "/Users/dev/repo", 40),
+      row("pin", "/Users/dev/repo", 50, { pinned: true }),
+    ], "", HOME);
+
+    expect(groups.map((g) => g.key)).toEqual(["/users/dev/repo", "/users/dev/quiet"]);
+    expect(groups[0].hasPinned).toBe(true);
+    expect(groups[0].rows.map((r) => r.key)).toEqual(["pin", "stale"]);
+    expect(groups[1].hasPinned).toBe(false);
   });
 });

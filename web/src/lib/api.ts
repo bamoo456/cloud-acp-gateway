@@ -518,6 +518,18 @@ export async function toggleHiddenFolder(path: string): Promise<string[]> {
   return Array.isArray(r.hidden) ? r.hidden : [];
 }
 
+// Pinned conversations live on the server for the same reason the folder lists do:
+// a pin is curation, not a per-device view preference, so it has to follow the
+// account. Keys are "agentName\nsessionId" — the sidebar's own row key. There is no
+// reader here on purpose: GET /prefs hydrates the list on startup, and this toggle
+// returns the updated one.
+export async function togglePinnedSession(agentName: string, sessionId: string): Promise<string[]> {
+  const url = base() + "/history/pinned?agent=" + encodeURIComponent(agentName)
+    + "&session=" + encodeURIComponent(sessionId);
+  const r = await readJson(await fetch(url, { method: "POST" }), "Couldn't update pinned conversations.");
+  return Array.isArray(r.pinned) ? r.pinned : [];
+}
+
 // Archived conversations live on the server like hidden folders — the flag must
 // follow the account across devices. The gateway speaks {agentName, sessionId}
 // objects; here they flatten to the "agent\nsessionId" keys the sidebar already
@@ -550,12 +562,13 @@ export interface PrefsDto {
   recentSessions: Array<Record<string, unknown>>;
   recentFolders: Array<Record<string, unknown>>;
   hiddenFolders: string[];
+  pinnedSessions: string[];
   /** "agent\nsessionId" keys — see archivedKeys above */
   archivedSessions: string[];
 }
 
 export async function getPrefs(): Promise<PrefsDto> {
-  const empty: PrefsDto = { textSize: null, lock: null, recentSessions: [], recentFolders: [], hiddenFolders: [], archivedSessions: [] };
+  const empty: PrefsDto = { textSize: null, lock: null, recentSessions: [], recentFolders: [], hiddenFolders: [], pinnedSessions: [], archivedSessions: [] };
   try {
     const r = await fetch(base() + "/prefs");
     if (!r.ok) return empty;
@@ -566,6 +579,7 @@ export async function getPrefs(): Promise<PrefsDto> {
       recentSessions: Array.isArray(j?.recentSessions) ? j.recentSessions : [],
       recentFolders: Array.isArray(j?.recentFolders) ? j.recentFolders : [],
       hiddenFolders: Array.isArray(j?.hiddenFolders) ? j.hiddenFolders : [],
+      pinnedSessions: Array.isArray(j?.pinnedSessions) ? j.pinnedSessions : [],
       archivedSessions: archivedKeys(j?.archivedSessions),
     };
   } catch {

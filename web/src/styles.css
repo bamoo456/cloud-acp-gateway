@@ -106,15 +106,19 @@
     --chat-table-size: 16.5px;
     --chat-plan-size: 18px;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #1f1e1d; --surface: #292826; --surface-2: #211f1e; --text: #eeede9;
-      --muted: #9a978f; --faint: #7d7a72; --border: #38362f; --border-strong: #46443c;
-      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
-      --prompt-tint: #4a6fa5;
-      --prompt-tint-mix: 27%;
-      --prompt-radius: 10px;
-    }
+  /* Dark is an attribute, not a media query: lib/theme.ts resolves the mode
+     setting (system / light / dark) to data-mode="dark" on <html>, so the
+     reader can pin either end regardless of the OS. color-scheme keeps the
+     browser's own chrome (scrollbars, form controls) on the same side. */
+  :root { color-scheme: light; }
+  :root[data-mode="dark"] {
+    color-scheme: dark;
+    --bg: #1f1e1d; --surface: #292826; --surface-2: #211f1e; --text: #eeede9;
+    --muted: #9a978f; --faint: #7d7a72; --border: #38362f; --border-strong: #46443c;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+    --prompt-tint: #4a6fa5;
+    --prompt-tint-mix: 27%;
+    --prompt-radius: 10px;
   }
   /* The skins are a palette shift, not a brand hue: they move the paper and the
      type, and --ink/--accent follow --text on their own. Nothing here may
@@ -124,11 +128,9 @@
     --text: #20201d; --muted: #73736b; --faint: #9d9d94; --border: #e3e3de; --border-strong: #d3d3cc;
     --radius: 12px;
   }
-  @media (prefers-color-scheme: dark) {
-    :root[data-agent-skin="codex"] {
-      --bg: #1c1c1a; --surface: #262624; --surface-2: #201f1d;
-      --text: #ededea; --muted: #9a988f; --faint: #7b7a73; --border: #353430; --border-strong: #45443d;
-    }
+  :root[data-mode="dark"][data-agent-skin="codex"] {
+    --bg: #1c1c1a; --surface: #262624; --surface-2: #201f1d;
+    --text: #ededea; --muted: #9a988f; --faint: #7b7a73; --border: #353430; --border-strong: #45443d;
   }
   /* ---- themes (lib/theme.ts) ----
      The reader's own palette, and the ONLY other thing allowed to move the
@@ -157,24 +159,22 @@
     --border: #e0dbd1; --border-strong: #cec8bb;
     --ok: #4f8a5f; --warn: #b8823a; --err: #c1685c;
   }
-  @media (prefers-color-scheme: dark) {
-    :root[data-theme="slate"] {
-      --bg: #15171a; --surface: #1e2125; --surface-2: #191c1f;
-      --text: #e9eaec; --muted: #8f959d; --faint: #767c84;
-      --border: #2b2f34; --border-strong: #3a3f45;
-    }
-    :root[data-theme="contrast"] {
-      --bg: #000000; --surface: #111111; --surface-2: #0a0a0a;
-      --text: #fafafa; --muted: #a1a1a1; --faint: #7a7a7a;
-      --border: #262626; --border-strong: #3d3d3d;
-      --ok: #4ec27a; --warn: #e0a63a; --err: #f0705f;
-    }
-    :root[data-theme="sepia"] {
-      --bg: #22201d; --surface: #2c2925; --surface-2: #26231f;
-      --text: #ece8e0; --muted: #9c968a; --faint: #7c766a;
-      --border: #3a362f; --border-strong: #4a453c;
-      --ok: #67ab77; --warn: #d0a05c; --err: #d8837a;
-    }
+  :root[data-mode="dark"][data-theme="slate"] {
+    --bg: #15171a; --surface: #1e2125; --surface-2: #191c1f;
+    --text: #e9eaec; --muted: #8f959d; --faint: #767c84;
+    --border: #2b2f34; --border-strong: #3a3f45;
+  }
+  :root[data-mode="dark"][data-theme="contrast"] {
+    --bg: #000000; --surface: #111111; --surface-2: #0a0a0a;
+    --text: #fafafa; --muted: #a1a1a1; --faint: #7a7a7a;
+    --border: #262626; --border-strong: #3d3d3d;
+    --ok: #4ec27a; --warn: #e0a63a; --err: #f0705f;
+  }
+  :root[data-mode="dark"][data-theme="sepia"] {
+    --bg: #22201d; --surface: #2c2925; --surface-2: #26231f;
+    --text: #ece8e0; --muted: #9c968a; --faint: #7c766a;
+    --border: #3a362f; --border-strong: #4a453c;
+    --ok: #67ab77; --warn: #d0a05c; --err: #d8837a;
   }
   /* Identity mode (§1.2). Default — no attribute, or "mono"/"dot" — keeps every
      interactive surface ink and confines the agent's colour to the 7px .idot.
@@ -465,10 +465,10 @@
     font-size: 10.5px; color: var(--faint); }
   /* A 13px glyph is a miss-prone touch target sitting next to the collapse
      toggle, so the box is padded out well past the icon it draws. */
-  .fgroup .hide { flex: 0 0 auto; width: 24px; height: 24px; margin: -4px -3px -4px 0;
+  .fgroup .hide, .fgroup .new { flex: 0 0 auto; width: 24px; height: 24px; margin: -4px -3px -4px 0;
     display: grid; place-items: center; color: var(--faint); border-radius: 6px; }
-  .fgroup .hide svg { width: 13px; height: 13px; }
-  .fgroup .hide:hover { background: var(--surface); color: var(--text); }
+  .fgroup .hide svg, .fgroup .new svg { width: 13px; height: 13px; }
+  .fgroup .hide:hover, .fgroup .new:hover { background: var(--surface); color: var(--text); }
   .fkids { position: relative; padding-bottom: 4px; }
   .fkids::before { content: ""; position: absolute; left: 16px; top: 0; bottom: 6px; width: 1px; background: var(--border); }
   .fkids .sess-item { padding-left: 26px; }
@@ -619,6 +619,10 @@
     padding: 1px 6px; border-radius: 999px; }
   /* Cooling-down: recently finished, lingering in Running — a muted hollow ring, no pulse. */
   .sess-item .run-dot.cooling { background: transparent; border-color: var(--muted); animation: none; }
+  /* Pinned: the reader's own mark on the row, so it is the accent colour rather
+     than any of the state colours above — a pin is not a state the agent is in. */
+  .sess-item .sess-pin { flex: 0 0 auto; align-self: center; display: inline-flex; color: var(--accent); }
+  .sess-item .sess-pin svg { width: 12px; height: 12px; }
   /* .search-more (搜尋全部 / 繼續搜更早) plays the same role in Conversations that
      .see-more plays in Recent — the one way out of a bounded list — so it wears the
      same style instead of falling through the bare `button` reset as plain text. */
@@ -969,6 +973,9 @@
   .tool .tstatus.failed { color: var(--err); }
   .tool .tbody { min-width: 0; max-width: 100%; padding: 11px 13px 13px; }
   .tool .loc { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin-bottom: 8px; }
+  /* "!" shell-escape transcript: the command line and its output, as printed. */
+  .shell-note { font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+    white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; }
   /* Truncate a path from the front on a phone. `file:///Users/…/cloud-acp-g…`
      cuts off the one part that identifies the file; reversing the direction
      puts the ellipsis at the head instead, so the row reads
@@ -1108,6 +1115,14 @@
   .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface-2);
     border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 6px 6px 10px; }
   .composer:focus-within { border-color: var(--muted); }
+  /* "!" shell escape: the box stops being a message and says so — terminal-green
+     border, mono text, and a "shell" tag where the composer meets the thread.
+     The send button reads "run" (Composer.tsx). */
+  .composer.shell, .composer.shell:focus-within { border-color: var(--accent); position: relative; }
+  .composer.shell .cm-content, .composer.shell .cm-line { font-family: var(--mono); font-size: 13px; }
+  .composer.shell::before { content: "shell"; position: absolute; top: -9px; left: 10px; padding: 0 6px;
+    background: var(--surface-2); border: 1px solid var(--accent); border-radius: 4px;
+    font-family: var(--mono); font-size: 10px; line-height: 16px; color: var(--accent); }
   /* CodeMirror-backed composer input: the document is plain markdown, rendered
      inline as you type. Override CodeMirror's monospace defaults so prose uses
      the app font; code spans/blocks switch back to monospace below. */
@@ -2171,21 +2186,19 @@
   .wf-hl .hljs-bullet { color: #735c0f; }
   .wf-hl .hljs-emphasis { font-style: italic; }
   .wf-hl .hljs-strong { font-weight: bold; }
-  @media (prefers-color-scheme: dark) {
-    .wf-hl .hljs-doctag, .wf-hl .hljs-keyword, .wf-hl .hljs-meta .hljs-keyword,
-    .wf-hl .hljs-template-tag, .wf-hl .hljs-template-variable, .wf-hl .hljs-type,
-    .wf-hl .hljs-variable.language_ { color: #ff7b72; }
-    .wf-hl .hljs-title, .wf-hl .hljs-title.class_, .wf-hl .hljs-title.function_ { color: #d2a8ff; }
-    .wf-hl .hljs-attr, .wf-hl .hljs-attribute, .wf-hl .hljs-literal, .wf-hl .hljs-meta,
-    .wf-hl .hljs-number, .wf-hl .hljs-operator, .wf-hl .hljs-variable,
-    .wf-hl .hljs-selector-attr, .wf-hl .hljs-selector-class, .wf-hl .hljs-selector-id { color: #79c0ff; }
-    .wf-hl .hljs-regexp, .wf-hl .hljs-string, .wf-hl .hljs-meta .hljs-string { color: #a5d6ff; }
-    .wf-hl .hljs-built_in, .wf-hl .hljs-symbol { color: #ffa657; }
-    .wf-hl .hljs-comment, .wf-hl .hljs-code, .wf-hl .hljs-formula { color: #8b949e; }
-    .wf-hl .hljs-name, .wf-hl .hljs-quote, .wf-hl .hljs-selector-tag, .wf-hl .hljs-selector-pseudo { color: #7ee787; }
-    .wf-hl .hljs-section { color: #1f6feb; }
-    .wf-hl .hljs-bullet { color: #f2cc60; }
-  }
+  [data-mode="dark"] .wf-hl .hljs-doctag, [data-mode="dark"] .wf-hl .hljs-keyword, [data-mode="dark"] .wf-hl .hljs-meta .hljs-keyword,
+  [data-mode="dark"] .wf-hl .hljs-template-tag, [data-mode="dark"] .wf-hl .hljs-template-variable, [data-mode="dark"] .wf-hl .hljs-type,
+  [data-mode="dark"] .wf-hl .hljs-variable.language_ { color: #ff7b72; }
+  [data-mode="dark"] .wf-hl .hljs-title, [data-mode="dark"] .wf-hl .hljs-title.class_, [data-mode="dark"] .wf-hl .hljs-title.function_ { color: #d2a8ff; }
+  [data-mode="dark"] .wf-hl .hljs-attr, [data-mode="dark"] .wf-hl .hljs-attribute, [data-mode="dark"] .wf-hl .hljs-literal, [data-mode="dark"] .wf-hl .hljs-meta,
+  [data-mode="dark"] .wf-hl .hljs-number, [data-mode="dark"] .wf-hl .hljs-operator, [data-mode="dark"] .wf-hl .hljs-variable,
+  [data-mode="dark"] .wf-hl .hljs-selector-attr, [data-mode="dark"] .wf-hl .hljs-selector-class, [data-mode="dark"] .wf-hl .hljs-selector-id { color: #79c0ff; }
+  [data-mode="dark"] .wf-hl .hljs-regexp, [data-mode="dark"] .wf-hl .hljs-string, [data-mode="dark"] .wf-hl .hljs-meta .hljs-string { color: #a5d6ff; }
+  [data-mode="dark"] .wf-hl .hljs-built_in, [data-mode="dark"] .wf-hl .hljs-symbol { color: #ffa657; }
+  [data-mode="dark"] .wf-hl .hljs-comment, [data-mode="dark"] .wf-hl .hljs-code, [data-mode="dark"] .wf-hl .hljs-formula { color: #8b949e; }
+  [data-mode="dark"] .wf-hl .hljs-name, [data-mode="dark"] .wf-hl .hljs-quote, [data-mode="dark"] .wf-hl .hljs-selector-tag, [data-mode="dark"] .wf-hl .hljs-selector-pseudo { color: #7ee787; }
+  [data-mode="dark"] .wf-hl .hljs-section { color: #1f6feb; }
+  [data-mode="dark"] .wf-hl .hljs-bullet { color: #f2cc60; }
 
   /* A file path in a tool card, turned into a control that opens the panel on
      that file. Inherits the surrounding .loc/.path look; only the affordances

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, toggleHiddenFolder as apiToggleHiddenFolder, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
@@ -181,6 +181,10 @@ interface State {
   // like pinned folders, this lives on the gateway so it's the same on every
   // device. Paths, not patterns (see lib/sessionGroups.ts's hideFolders).
   hiddenFolders: string[];
+  // Conversations pinned to the top of the sidebar list, as "agent\nsessionId"
+  // keys — the sidebar's own row key. On the gateway like hiddenFolders: a pin is
+  // curation, not a per-device view preference, so it follows the account.
+  pinnedSessions: string[];
   // Conversations archived out of the default sidebar list — "agent\nsessionId"
   // keys, the same shape the sidebar keys its rows by. Server-persisted like
   // hiddenFolders; the transcript itself is untouched and stays searchable.
@@ -287,6 +291,9 @@ interface State {
   // folder picker's own pin toggle, so a failed round-trip just leaves the
   // list as it was.
   toggleHiddenFolder: (path: string) => void;
+  // Toggles a conversation's pin via the gateway, best-effort like
+  // toggleHiddenFolder — a failed round-trip leaves the list as it was.
+  togglePinnedSession: (agentName: string, sessionId: string) => void;
   // Toggles a conversation's archived state via the gateway; best-effort for
   // the same reason as toggleHiddenFolder.
   toggleArchivedSession: (agentName: string, sessionId: string) => void;
@@ -1360,6 +1367,7 @@ export const useStore = create<State>((set, get) => {
     historyNonce: 0,
     recentSessions: readRecentSessions(),
     hiddenFolders: [],
+    pinnedSessions: [],
     archivedSessions: [],
     historyTitles: {},
     runningTasks: [],
@@ -1398,6 +1406,7 @@ export const useStore = create<State>((set, get) => {
           textSize,
           recentSessions: readRecentSessions(),
           hiddenFolders: p.hiddenFolders,
+          pinnedSessions: p.pinnedSessions,
           archivedSessions: p.archivedSessions,
           lockEnabled,
         });
@@ -1602,6 +1611,9 @@ export const useStore = create<State>((set, get) => {
     },
     toggleHiddenFolder(path) {
       apiToggleHiddenFolder(path).then((list) => set({ hiddenFolders: list })).catch(() => {});
+    },
+    togglePinnedSession(agentName, sessionId) {
+      apiTogglePinnedSession(agentName, sessionId).then((list) => set({ pinnedSessions: list })).catch(() => {});
     },
     toggleArchivedSession(agentName, sessionId) {
       apiToggleArchivedSession(agentName, sessionId).then((list) => set({ archivedSessions: list })).catch(() => {});
