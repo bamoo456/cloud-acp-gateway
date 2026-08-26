@@ -54,6 +54,35 @@ test("hide / unhide round-trips and reports membership", () => {
   db.close();
 });
 
+test("pin / unpin a conversation round-trips, keyed by agent + session", () => {
+  const db = new Db(":memory:");
+  assert.deepEqual(db.pinnedSessions(), []);
+  assert.equal(db.isSessionPinned("claude", "s1"), false);
+
+  db.pinSession("claude", "s1");
+  assert.equal(db.isSessionPinned("claude", "s1"), true);
+  assert.deepEqual(db.pinnedSessions(), ["claude\ns1"]);
+
+  // pinning again is idempotent
+  db.pinSession("claude", "s1");
+  assert.deepEqual(db.pinnedSessions(), ["claude\ns1"]);
+
+  // the same session id under another agent is a different pin
+  assert.equal(db.isSessionPinned("codex", "s1"), false);
+  db.pinSession("codex", "s1");
+  assert.deepEqual(db.pinnedSessions(), ["claude\ns1", "codex\ns1"]);
+
+  db.unpinSession("claude", "s1");
+  assert.equal(db.isSessionPinned("claude", "s1"), false);
+  assert.deepEqual(db.pinnedSessions(), ["codex\ns1"]);
+
+  // deleting the conversation drops the pin under EVERY agent — otherwise /prefs
+  // rehydrates a pin for a transcript that now 404s.
+  db.deletePinnedSession("s1");
+  assert.deepEqual(db.pinnedSessions(), []);
+  db.close();
+});
+
 test("hiddenFolders orders oldest-hidden first", () => {
   const db = new Db(":memory:");
   db.hide("/a");
