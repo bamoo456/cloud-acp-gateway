@@ -28,6 +28,7 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 import { Terminal } from "./components/Terminal.tsx";
 import { UsageStrip } from "./components/UsageStrip.tsx";
 import { IconTerminal } from "./lib/icons.tsx";
+import { applyUnread } from "./lib/favicon.ts";
 import { isDesktopSidebarWidth } from "./lib/sidebarWidth.ts";
 import type { AgentRef } from "./types.ts";
 
@@ -99,24 +100,30 @@ export function App() {
     return () => document.removeEventListener("keydown", onKey);
   }, []);
   // Poll the gateway for tasks running anywhere (any agent, any device) so the
-  // TopBar can surface and jump to them. Independent of the active SSE connection.
-  // Skip the request while the tab is hidden — a backgrounded tab has nothing to
-  // render and shouldn't wake the gateway every 5s (battery/radio on mobile/PWA);
-  // refresh immediately when it returns to the foreground so it isn't stale.
+  // TopBar can surface and jump to them, and for the durable inbox behind the tab
+  // badge. Independent of the active SSE connection. /running is skipped while the
+  // tab is hidden — a backgrounded tab has nothing to render and shouldn't wake
+  // the gateway every 5s (battery/radio on mobile/PWA) — and refreshed
+  // immediately when it returns to the foreground so it isn't stale.
   useEffect(() => {
     let alive = true;
     const tick = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       if (useStore.getState().locked) return; // don't poll the gateway while locked
-      void getRunning().then((tasks) => { if (alive) useStore.getState().ingestRunningTasks(tasks); });
-      // Durable, cross-agent pending permissions — survives reload and surfaces
-      // prompts on agents this client has no live SSE connection to.
+      const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+      // Durable, cross-agent pending permissions and finished turns — survives a
+      // reload and surfaces work on agents this client has no live SSE connection
+      // to. Deliberately the one poll that keeps running while hidden: a tab that
+      // only learns it has unread work once you look at it has nothing left to
+      // tell you. Browsers throttle background timers to roughly a minute
+      // regardless of the interval below, which is the real refresh rate here.
       const promptRevision = useStore.getState().promptStateRevision;
       void getInboxPending().then((items) => {
         if (alive && items !== null) {
           useStore.getState().ingestInboxItems(items, promptRevision);
         }
       });
+      if (hidden) return; // nothing renders the Running section right now
+      void getRunning().then((tasks) => { if (alive) useStore.getState().ingestRunningTasks(tasks); });
     };
     tick();
     const id = setInterval(tick, 5000);
@@ -160,6 +167,28 @@ export function App() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { alive = false; clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, [quotaKinds]);
+  // Badge the tab (favicon + title) with conversations that have something to
+  // read — a turn that finished or a prompt waiting on an answer. Counted from
+  // the gateway's inbox rather than from this tab's own sessions, so a run
+  // started on the laptop still badges the phone. One conversation is one badge
+  // however many rows it holds (same dedupe as the sidebar's waiting badge).
+  const unread = useStore((s) => new Set(s.inboxItems.map((it) => it.sessionId).filter(Boolean)).size);
+  useEffect(() => { applyUnread(unread); }, [unread]);
+  // Reading is "this conversation is open and this tab has the reader's
+  // attention". focus covers switching apps or windows, visibilitychange covers
+  // switching tabs, and the deps cover opening a conversation or a turn landing
+  // in one already open.
+  const readActiveSession = useStore((s) => s.readActiveSession);
+  const activeId = useStore((s) => s.activeId);
+  useEffect(() => {
+    readActiveSession();
+    window.addEventListener("focus", readActiveSession);
+    document.addEventListener("visibilitychange", readActiveSession);
+    return () => {
+      window.removeEventListener("focus", readActiveSession);
+      document.removeEventListener("visibilitychange", readActiveSession);
+    };
+  }, [readActiveSession, activeId, unread]);
   // Reconnect the SSE stream when the tab returns to the foreground (or a bfcache
   // restore). A backgrounded mobile tab can have its stream dropped with the
   // onclose-driven reconnect frozen; ensureConnected() reopens a dead socket — and,

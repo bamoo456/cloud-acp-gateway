@@ -3062,6 +3062,11 @@ class Channel {
         this.promptReq.delete(Number(f.id));
         this.releasePrompt(endedSid);
         this.tasks.delete(endedSid);
+        // The turn is over and no device necessarily saw it end — record it as
+        // unread so every device's /inbox poll can badge it, not just whichever
+        // browser happened to be holding the connection. Cleared by /inbox/read
+        // when a reader opens the conversation.
+        this.store?.addSessionUnread(this.name, endedSid, this.sessionTitle.get(endedSid) ?? "", new Date().toISOString());
         // Drop any prompt the ended turn was still blocked on. Usually there is
         // none — answering it is what let the turn finish — but a turn that ends
         // another way (interrupted, or a Codex reply forking a fresh session)
@@ -3771,6 +3776,12 @@ export class Gateway {
     return this.store().inbox(opts);
   }
 
+  // The reader opened this conversation, so its finished turns are no longer
+  // unread — on every device, since the inbox is the shared source of truth.
+  markSessionRead(sessionId: string): void {
+    this.store().markSessionRead(sessionId, new Date().toISOString());
+  }
+
   // Answer a pending permission for any agent from the server side. Returns false
   // if that agent has no live channel (e.g. died/never started this run) or the
   // prompt is no longer answerable.
@@ -4273,6 +4284,32 @@ export function handleSseRpc(
   req.on("close", () => {
     if (!req.complete) console.warn(`client: dropped an incomplete frame agent="${agentName}" conn=${conn.id} (${size}B received)`);
   });
+  return true;
+}
+
+// Mark a conversation's finished turns read. Sent when a reader opens the
+// conversation on any device: the unread badge lives server-side, so it can only
+// be cleared server-side. Storage-only — no agent channel is involved, unlike
+// answering a permission.
+function handleInboxReadRequest(
+  gateway: Gateway,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): boolean {
+  const pathname = (req.url ?? "/").split("?")[0];
+  if (pathname !== "/inbox/read") return false;
+  if (req.method !== "POST") { res.writeHead(405); res.end(); return true; }
+  const sid = new URL(req.url ?? "/", "http://x").searchParams.get("sessionId") ?? "";
+  if (!sid) { res.writeHead(400); res.end(); return true; }
+  try {
+    gateway.markSessionRead(sid);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  } catch (error) {
+    console.error(`failed to mark inbox read: ${String(error)}`);
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: String(error) }));
+  }
   return true;
 }
 
@@ -4971,6 +5008,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // to the live agent, so any device can answer a prompt for any agent without
   // holding that agent's SSE connection.
   if (consoleEnabled && handleInboxAnswerRequest(gateway, req, res)) return;
+  if (consoleEnabled && handleInboxReadRequest(gateway, req, res)) return;
   // Rename a conversation (persist a custom title to the per-cwd sidecar).
   if (consoleEnabled && pathname === "/history/rename") {
     if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
@@ -5258,6 +5296,7 @@ export async function makeTestServer(opts?: {
         wsAuthOk({ authorization, user, token, expectedUser: "u", expectedPass: "t" }),
     })) return;
     if (handleInboxAnswerRequest(b, req, res)) return;
+    if (handleInboxReadRequest(b, req, res)) return;
     res.writeHead(404);
     res.end();
   });
