@@ -97,6 +97,47 @@ describe("Sidebar unread marker", () => {
     expect(rowFor("Nothing happened here")?.querySelector(".run-dot")).toBeFalsy();
   });
 
+  // Drive a turn to completion so its row sits in the Running grace window: the
+  // gateway reports it live, then stops, and the store keeps it as "cooling".
+  async function enterCooling() {
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => {
+      useStore.getState().ingestRunningTasks([{ agentName: "claude", sessionId: "s-done", state: "active", cwd: "/repo" }]);
+      useStore.getState().ingestRunningTasks([]);
+      await flush();
+    });
+  }
+
+  test("the cooling ring is what a read just-finished conversation wears", async () => {
+    // The control for the test below: with nothing unread, the grace window still
+    // renders its muted ring — so the absence of that ring there means something.
+    await renderWith([]);
+    await enterCooling();
+
+    expect(rowFor("Finished while you were away")?.querySelector(".run-dot.cooling")).toBeTruthy();
+  });
+
+  test("a just-finished conversation shows unread, not the cooling ring", async () => {
+    // Wearing the muted ring for the whole grace window is what made the
+    // just-finished state unreadable, so unread wins while it lasts.
+    await renderWith([inboxItem({})]);
+    await enterCooling();
+
+    const row = rowFor("Finished while you were away")!;
+    expect(row.querySelector(".run-dot.unread")).toBeTruthy();
+    expect(row.querySelector(".run-dot.cooling")).toBeFalsy();
+  });
+
+  test("the folder header carries the unread dot too", async () => {
+    // A collapsed folder is the only place its conversations' state can show,
+    // and the header dot follows the rows' own precedence.
+    await renderWith([inboxItem({})]);
+
+    const header = container.querySelector(".fgroup")!;
+    expect(header.querySelector(".run-dot.unread")).toBeTruthy();
+    expect(header.querySelector(".run-dot.awaiting")).toBeFalsy();
+  });
+
   test("a prompt waiting on an answer stays amber, not unread", async () => {
     // Both rows exist in the inbox; only the one that can be answered is amber,
     // because amber is the colour that means the turn is blocked on you.
