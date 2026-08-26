@@ -2,7 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
 import { applyIdentity, readIdentity } from "./lib/identity.ts";
-import { applyTheme, readTheme } from "./lib/theme.ts";
+import { applyMode, applyTheme, readMode, readTheme } from "./lib/theme.ts";
 // Self-hosted, not a CDN: the gateway is routinely reached over a LAN with no
 // way out. Only the latin subsets are fetched (unicode-range decides), and
 // italics are synthesised rather than shipped as a second file.
@@ -13,6 +13,10 @@ import "./styles.css";
 // Before the first paint, so an opted-in reader never sees a mono frame first.
 applyIdentity(readIdentity());
 applyTheme(readTheme());
+applyMode(readMode());
+// "system" stays live when the OS flips light/dark; a pinned mode ignores it.
+window.matchMedia?.("(prefers-color-scheme: dark)")
+  ?.addEventListener?.("change", () => { if (readMode() === "system") applyMode("system"); });
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
