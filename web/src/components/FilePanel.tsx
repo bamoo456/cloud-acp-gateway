@@ -244,6 +244,10 @@ export function FilePanel() {
   // through the two loaders below, so bumping there is what reaches it — turn
   // end, Refresh, opening the panel.
   const [refreshKey, setRefreshKey] = useState(0);
+  // The Refresh button only. Pressing it says "re-read everything now", which
+  // includes the file open in Review — where a turn ending stops short, because
+  // redrawing a diff someone is commenting on is the panel fighting them.
+  const [reloadKey, setReloadKey] = useState(0);
 
   // What the conversation wrote, as the thread itself recorded it. Also the
   // source of the folder candidates below, so it is computed before the loader
@@ -459,7 +463,7 @@ export function FilePanel() {
           </span>
           {(!target || split) && (
             <button className="icon-btn" title="Refresh" disabled={loading}
-              onClick={() => { loadChanges(); setTreeKey((k) => k + 1); }}><IconRefresh /></button>
+              onClick={() => { loadChanges(); setTreeKey((k) => k + 1); setReloadKey((k) => k + 1); }}><IconRefresh /></button>
           )}
           {/* Only while there are two panes — with one, folding it away would
               leave the panel showing nothing. */}
@@ -617,7 +621,7 @@ export function FilePanel() {
               component can draw. Keyed on cwd so a folder change restarts the
               review rather than leaving one checkout's draft over another's. */}
           {(!target || split) && mode === "review" && (
-            <ReviewPanel key={cwd} cwd={cwd} refreshKey={refreshKey} onCount={setReviewCount}
+            <ReviewPanel key={cwd} cwd={cwd} refreshKey={refreshKey} reloadKey={reloadKey} onCount={setReviewCount}
               split={canSplit} onDetail={setReviewOpen} />
           )}
 
