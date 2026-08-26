@@ -16,7 +16,7 @@ import {
 } from "./reducers.ts";
 import type {
   Session, SessionEngine, ConfigOption, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
-  AgentSkin, MessageImage, MessageFile, PromptCapabilities, ElicitationResponse, RateLimit,
+  AgentSkin, MessageImage, MessageFile, QueuedPrompt, PromptCapabilities, ElicitationResponse, RateLimit,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
 
@@ -166,6 +166,14 @@ interface State {
   textSize: TextSize;
   busy: boolean;
   busySessionIds: Record<string, true>;
+  // sessionId -> messages typed while that session's turn was in flight, in the
+  // order they were typed. Drained ONE per turn end (runPrompt's finally), so two
+  // queued messages become two consecutive turns rather than one merged prompt —
+  // the agent gets to finish reacting to the first before it reads the second.
+  // ponytail: per-tab. A queue dies with the page and no other device sees it;
+  // park it in the gateway (Agent.reviveQueue already parks frames per session)
+  // if it ever has to survive a reload or show up on the phone.
+  queuedPrompts: Record<string, QueuedPrompt[]>;
   joining: boolean; // resolving a ?session= deep-link (show a loading state, not "Ready to code?")
   historyNonce: number; // bumped to ask the sidebar to refresh its conversation list (e.g. after rename)
   recentSessions: RecentSession[];
@@ -228,8 +236,21 @@ interface State {
   // branch window's own composer sends through. Unlike sendPrompt it does not
   // start, resume, or remap anything: a branch is created live by session/fork,
   // so none of that resolution applies and a caller naming a session that isn't
-  // live is a no-op rather than a silent new conversation.
-  sendPromptTo: (sessionId: string, text: string, images?: MessageImage[], files?: MessageFile[]) => Promise<void>;
+  // live is a no-op rather than a silent new conversation. Resolves true when the
+  // message was taken — on false the caller still holds the only copy of it, which
+  // is what lets the queue drain put a refused message back rather than eat it.
+  sendPromptTo: (sessionId: string, text: string, images?: MessageImage[], files?: MessageFile[]) => Promise<boolean>;
+  // Park a message typed mid-turn (see queuedPrompts). The composer clears its box
+  // on queue, so from here on this is the only copy — takeQueuedPrompts hands them
+  // back, which is what stop does instead of firing or dropping them.
+  queuePrompt: (sessionId: string, prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => void;
+  // Cut the running turn short and send this message as the next one — the
+  // composer's stop button with something typed in the box. The already-queued
+  // messages keep their place behind it (V1): an interrupt says "this one first",
+  // not "forget what I asked for".
+  interruptWith: (sessionId: string, prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => void;
+  unqueuePrompt: (sessionId: string, id: string) => void;
+  takeQueuedPrompts: (sessionId: string) => QueuedPrompt[];
   // Fork the open conversation into a new one (whole history, agent-side), open
   // it as the branch window, and ask the fork the message the caller was
   // holding. The prompt is the point, not a convenience: a branch nobody says
@@ -396,6 +417,25 @@ function freeSlot(wins: SideWindow[]): number {
   for (let n = 0; n < MAX_SIDE_WINDOWS; n++) if (!wins.some((w) => w.slot === n)) return n;
   return 0;
 }
+// Ids for queued messages. A counter rather than the session's own `seq`: a queued
+// message is not in the transcript yet, and reusing seq would collide with the item
+// the send eventually appends.
+let queueSeq = 0;
+const QUEUE_ID = () => "q" + (queueSeq += 1);
+
+// Move a session's queue onto its real id. sendPromptTo refuses a provisional
+// ("pending-") session, so a message queued against one while session/new was in
+// flight would sit under a key nothing ever drains. Appends rather than replaces:
+// the destination is normally empty, and losing either side to a clobber is the one
+// outcome worse than an odd order.
+function remapQueue(q: Record<string, QueuedPrompt[]>, from: string, to: string): Record<string, QueuedPrompt[]> {
+  if (!q[from]?.length) return q;
+  const next = { ...q };
+  delete next[from];
+  next[to] = [...(next[to] ?? []), ...q[from]];
+  return next;
+}
+
 const HISTORY_PAGE = 50;
 // A search hit deep-links to an absolute message index. Anchor its page a little
 // BEFORE the match so the lead-in to it is on screen rather than the match sitting
@@ -704,6 +744,10 @@ export const useStore = create<State>((set, get) => {
       // independent of this connection, and a restart shouldn't blank it.
       promptCapabilities: {}, pendingPermissions: [],
       busy: false, busySessionIds: {},
+      // Every session on this connection is gone, so anything queued against one
+      // has nowhere left to drain. It is dropped with them (see queuedPrompts'
+      // per-tab note) rather than left keyed to an id that never comes back.
+      queuedPrompts: {},
       promptStateRevision: get().promptStateRevision + 1,
     });
     // An agent restart is an involuntary reconnect — lock first when the lock is on.
@@ -969,6 +1013,11 @@ export const useStore = create<State>((set, get) => {
   // remapping one) and sendPromptTo (which is handed a live one). The caller has
   // already added the user bubble and marked the session busy; this releases both.
   async function runPrompt(sid: string, text: string, imgs: MessageImage[], refs: MessageFile[]): Promise<void> {
+    // Read in the finally below: a turn the user cancelled must not release the
+    // queue. Every cancel surface (the composer's stop, a running-row menu, a
+    // deep-linked one) lands here as stopReason "cancelled", so gating on it once
+    // is what keeps them all honest — a per-caller guard is what drifts.
+    let stopReason: string | undefined;
     try {
       // text block first (when non-empty), then one image block per attachment,
       // then a block per file reference.
@@ -992,6 +1041,7 @@ export const useStore = create<State>((set, get) => {
           : { type: "resource_link", uri: f.uri, name: f.name });
       }
       const res = (await acp.request("session/prompt", { sessionId: sid, prompt })) as { stopReason?: string };
+      stopReason = res?.stopReason;
       patch(sid, (s) => ({ ...s, curAssistantId: null, curThoughtId: null }));
       if (res?.stopReason && res.stopReason !== "end_turn") {
         patch(sid, (s) => ({ ...s, seq: s.seq + 1, items: [...s.items, { id: s.id + ":" + (s.seq + 1), kind: "note", text: "· " + res.stopReason }] }));
@@ -1001,7 +1051,53 @@ export const useStore = create<State>((set, get) => {
     } finally {
       setSessionBusy(sid, false);
       patch(sid, (s) => ({ ...s, working: false }));
+      // A refusal or a token ceiling is still the turn finishing on its own, so
+      // those drain. A cancel is the user saying "not this" — the queue stays
+      // parked on the rail, where they can send, edit or drop it themselves.
+      // Unless the cancel WAS the send: an interrupt cuts the turn precisely so the
+      // message at the head can go out now. delete-as-read, so the exemption is
+      // spent on this settle and never leaks into the next stop.
+      const interrupted = interrupting.delete(sid);
+      if (stopReason !== "cancelled" || interrupted) drainQueue(sid);
     }
+  }
+
+  // One queued message per turn end. The next one rides this same path, so its own
+  // finally drains the one after it — the chain, not a loop here, is what turns N
+  // queued messages into N consecutive turns.
+  //
+  // The message comes OUT of the queue before the send, not after: sendPromptTo's
+  // own finally calls back into here, and an item still at the head then would be
+  // sent forever. It goes back to the head if the send was refused (a session gone
+  // view-only, an agent no longer ready) — that refusal is synchronous, so nothing
+  // can drain in between and reorder the queue.
+  // Sessions whose running turn was cancelled BY an interrupt (see interruptWith).
+  // The flag lives for exactly one turn settle: it is what tells that "cancelled"
+  // apart from a plain stop, which parks the queue instead of releasing it.
+  const interrupting = new Set<string>();
+
+  // A queued item from what the composer handed over, with the same capability
+  // filter a send applies — parking a block this agent will reject only moves the
+  // failure a turn later. Null when there is nothing to send.
+  function makeQueued(prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }): QueuedPrompt | null {
+    const imgs = get().promptCapabilities.image ? (prompt.images || []) : [];
+    const refs = get().promptCapabilities.embeddedContext ? (prompt.files || []) : [];
+    if (!prompt.text.trim() && !imgs.length && !refs.length) return null;
+    return {
+      id: QUEUE_ID(), text: prompt.text,
+      ...(imgs.length ? { images: imgs } : {}),
+      ...(refs.length ? { files: refs } : {}),
+    };
+  }
+
+  function drainQueue(sid: string) {
+    const next = get().queuedPrompts[sid]?.[0];
+    if (!next) return;
+    get().unqueuePrompt(sid, next.id);
+    void get().sendPromptTo(sid, next.text, next.images, next.files).then((sent) => {
+      if (sent) return;
+      set((st) => ({ queuedPrompts: { ...st.queuedPrompts, [sid]: [next, ...(st.queuedPrompts[sid] ?? [])] } }));
+    });
   }
 
   function initSession(): Promise<unknown> {
@@ -1122,7 +1218,7 @@ export const useStore = create<State>((set, get) => {
       // rateLimits carries over: it's keyed by provider and polled independent
       // of which agent is active, so a different provider's quota is still valid.
       sessions: {}, activeId: null,
-      promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, joining: true,
+      promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
     openConnection();
@@ -1252,7 +1348,7 @@ export const useStore = create<State>((set, get) => {
     promptCapabilities: {},
     pendingPermissions: [],
     promptStateRevision: 0,
-    autoApprove: false, textSize: initialTextSize, busy: false, busySessionIds: {},
+    autoApprove: false, textSize: initialTextSize, busy: false, busySessionIds: {}, queuedPrompts: {},
     joining: !!linkParams().session, // deep-link present → show "Joining…" from first paint
     historyNonce: 0,
     recentSessions: readRecentSessions(),
@@ -1344,7 +1440,7 @@ export const useStore = create<State>((set, get) => {
         // the new connection — reopen from the sidebar under the agent that owns
         // them, which is the same rule the "Open as side chat" row is gated on.
         sideWindows: [],
-        promptCapabilities: {}, busy: false, busySessionIds: {}, joining: false,
+        promptCapabilities: {}, busy: false, busySessionIds: {}, queuedPrompts: {}, joining: false,
         promptStateRevision: get().promptStateRevision + 1,
       });
       openConnection();
@@ -1771,6 +1867,7 @@ export const useStore = create<State>((set, get) => {
               sessions: trimSessions(sessions, ns.sessionId),
               activeId: ns.sessionId, tip: "",
               busySessionIds, busy: Object.keys(busySessionIds).length > 0,
+              queuedPrompts: remapQueue(st.queuedPrompts, activeId!, ns.sessionId),
             };
           });
           activeId = get().activeId!;
@@ -1811,6 +1908,7 @@ export const useStore = create<State>((set, get) => {
                 sessions: trimSessions(sessions, ns.sessionId),
                 activeId: ns.sessionId, tip: "",
                 busySessionIds, busy: Object.keys(busySessionIds).length > 0,
+                queuedPrompts: remapQueue(st.queuedPrompts, activeId!, ns.sessionId),
               };
             });
             activeId = get().activeId!;
@@ -1820,10 +1918,13 @@ export const useStore = create<State>((set, get) => {
       } catch (e: any) {
         setSessionBusy(activeId, false);
         if (provisional) {
-          // roll back the throwaway session (matches legacy console.html:1050-1052)
+          // roll back the throwaway session (matches legacy console.html:1050-1052).
+          // Anything queued against it goes with it — there is no session left to
+          // drain into, and the tip below says the send never happened.
           set((st) => {
             const sessions = { ...st.sessions }; delete sessions[activeId!];
-            return { sessions, activeId: null };
+            const queuedPrompts = { ...st.queuedPrompts }; delete queuedPrompts[activeId!];
+            return { sessions, activeId: null, queuedPrompts };
           });
         } else {
           patch(activeId, (s) => ({ ...s, suppressReplay: false, working: false }));
@@ -1841,11 +1942,11 @@ export const useStore = create<State>((set, get) => {
       // a request about a session that does not exist. The branch window already
       // shows a waiting strip instead of a composer; this is the belt to that
       // braces, for any other caller.
-      if (!target || target.viewOnly || sessionId.startsWith("pending-") || !get().agentReady) return;
-      if (get().busySessionIds[sessionId]) return;
+      if (!target || target.viewOnly || sessionId.startsWith("pending-") || !get().agentReady) return false;
+      if (get().busySessionIds[sessionId]) return false;
       const imgs = get().promptCapabilities.image ? (images || []) : [];
       const refs = get().promptCapabilities.embeddedContext ? (files || []) : [];
-      if (!text.trim() && !imgs.length && !refs.length) return;
+      if (!text.trim() && !imgs.length && !refs.length) return false;
       patch(sessionId, (s) => ({
         ...addUserBubble(s, text, imgs.length ? imgs : undefined, refs.length ? refs : undefined),
         working: true, curAssistantId: null, curThoughtId: null,
@@ -1853,6 +1954,50 @@ export const useStore = create<State>((set, get) => {
       touchSessionActivity(sessionId);
       setSessionBusy(sessionId, true);
       await runPrompt(sessionId, text, imgs, refs);
+      return true;
+    },
+
+    queuePrompt(sessionId, prompt) {
+      const item = makeQueued(prompt);
+      if (!item) return;
+      set((st) => ({ queuedPrompts: { ...st.queuedPrompts, [sessionId]: [...(st.queuedPrompts[sessionId] ?? []), item] } }));
+    },
+
+    interruptWith(sessionId, prompt) {
+      const item = makeQueued(prompt);
+      if (!item) return;
+      // Head of the queue, not the tail: interrupt means "this one, now". Anything
+      // already queued keeps its place behind it and goes out after this turn.
+      set((st) => ({ queuedPrompts: { ...st.queuedPrompts, [sessionId]: [item, ...(st.queuedPrompts[sessionId] ?? [])] } }));
+      // Whether there is still a turn to cut is read HERE, not from the composer's
+      // `activeBusy`: that is React state, and over a phone link the turn can settle
+      // while the tap is landing. Cancelling a finished turn is a no-op that nothing
+      // settles, so the message would sit parked — and the exemption below would
+      // stay armed and fire the queue after the NEXT deliberate stop.
+      if (!get().busySessionIds[sessionId]) { drainQueue(sessionId); return; }
+      // The agent cannot take a second prompt mid-turn, so the send is the drain
+      // that the cancel's own settle triggers. That settle arrives as "cancelled",
+      // which normally parks the queue — this is the one cancel that must not.
+      interrupting.add(sessionId);
+      get().cancel(sessionId);
+    },
+
+    unqueuePrompt(sessionId, id) {
+      set((st) => {
+        const rest = (st.queuedPrompts[sessionId] ?? []).filter((q) => q.id !== id);
+        const queuedPrompts = { ...st.queuedPrompts };
+        // Drop the key rather than leave an empty array: the rail renders on
+        // length, and an empty entry per session ever queued into is litter.
+        if (rest.length) queuedPrompts[sessionId] = rest; else delete queuedPrompts[sessionId];
+        return { queuedPrompts };
+      });
+    },
+
+    takeQueuedPrompts(sessionId) {
+      const items = get().queuedPrompts[sessionId] ?? [];
+      if (!items.length) return [];
+      set((st) => { const queuedPrompts = { ...st.queuedPrompts }; delete queuedPrompts[sessionId]; return { queuedPrompts }; });
+      return items;
     },
 
     async branchSession(prompt) {

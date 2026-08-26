@@ -323,7 +323,7 @@ describe("Composer session busy state", () => {
     });
 
     const stop = container.querySelector<HTMLButtonElement>("button.send.stop")!;
-    expect(stop).toBeEnabled(); // canSend short-circuits on activeBusy, upload or not
+    expect(stop).toBeEnabled(); // stop is its own button, never gated on canSend
     await act(async () => { stop.click(); });
 
     expect(cancel).toHaveBeenCalled();
@@ -741,6 +741,194 @@ describe("Composer session busy state", () => {
   test("a bound instance never offers to branch the conversation behind it", async () => {
     await mountWithFork({ sessionId: "b1" });
     expect(container.querySelector(".branch-btn")).toBeNull();
+  });
+
+  // ---- queueing a message typed mid-turn ----
+
+  // The primary button; while a turn runs, stop sits in front of it in the row.
+  const primary = () => container.querySelector<HTMLButtonElement>("button.send:not(.stop):not(.branch-btn)")!;
+
+  async function mountBusy(props: ComposerProps = {}, over: Record<string, unknown> = {}) {
+    const { Composer } = await import("./Composer.tsx");
+    const { useStore } = await import("../store/store.ts");
+    const queuePrompt = vi.fn();
+    const sendPrompt = vi.fn();
+    const sendPromptTo = vi.fn();
+    const cancel = vi.fn();
+    const takeQueuedPrompts = vi.fn(() => []);
+    const interruptWith = vi.fn();
+    useStore.setState({
+      agentReady: true,
+      activeId: "s1",
+      busySessionIds: { s1: true, "branch-1": true },
+      queuePrompt, sendPrompt, sendPromptTo, cancel, takeQueuedPrompts, interruptWith,
+      ...over,
+    } as any);
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement<ComposerProps>(Composer, props));
+    });
+    return { useStore, queuePrompt, sendPrompt, sendPromptTo, cancel, takeQueuedPrompts, interruptWith };
+  }
+
+  test("a message typed mid-turn is queued, not sent", async () => {
+    const { queuePrompt, sendPrompt } = await mountBusy();
+
+    await act(async () => { cmSet(cmView(container), "and then run the tests"); });
+    expect(primary().textContent).toContain("queue");
+    await act(async () => { primary().click(); });
+
+    expect(queuePrompt).toHaveBeenCalledWith("s1", { text: "and then run the tests", images: [], files: [] });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    // The box is cleared on queue — the store holds the only copy from here.
+    expect(cmView(container).state.doc.toString()).toBe("");
+  });
+
+  test("a bound instance queues against its own conversation", async () => {
+    const { queuePrompt } = await mountBusy({ sessionId: "branch-1" });
+
+    await act(async () => { cmSet(cmView(container), "in the branch"); });
+    await act(async () => { primary().click(); });
+
+    expect(queuePrompt).toHaveBeenCalledWith("branch-1", { text: "in the branch", images: [], files: [] });
+  });
+
+  test("Enter queues mid-turn, and on an empty box still stops", async () => {
+    // isTouchDevice is read once at module import, and jsdom always looks touchy —
+    // delete it first or Enter takes the newline path instead of submit (see the
+    // upload test above).
+    delete (window as any).ontouchstart;
+    const { queuePrompt, cancel, takeQueuedPrompts } = await mountBusy();
+
+    await act(async () => { cmSet(cmView(container), "queue me"); });
+    await act(async () => { cmKey(cmView(container), "Enter"); });
+    expect(queuePrompt).toHaveBeenCalledTimes(1);
+    expect(cancel).not.toHaveBeenCalled();
+
+    await act(async () => { cmKey(cmView(container), "Enter"); });
+    expect(queuePrompt).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalled();
+    // Enter-stop is the same stop the button is, queue recovery included — the two
+    // affordances diverging is exactly how one of them ends up firing the queue.
+    expect(takeQueuedPrompts).toHaveBeenCalledWith("s1");
+  });
+
+  test("the left button cuts the turn either way: stop empty, interrupt with a message", async () => {
+    const { cancel, interruptWith, queuePrompt } = await mountBusy();
+
+    // Empty box: it is plain stop.
+    const stop = container.querySelector<HTMLButtonElement>("button.send.stop")!;
+    expect(stop).toBeEnabled();
+    expect(stop.textContent).toContain("stop");
+    await act(async () => { stop.click(); });
+    expect(cancel).toHaveBeenCalled();
+    expect(interruptWith).not.toHaveBeenCalled();
+
+    // Something typed: the same slot becomes interrupt, carrying it.
+    await act(async () => { cmSet(cmView(container), "actually, read the config first"); });
+    const cut = container.querySelector<HTMLButtonElement>("button.send.stop")!;
+    expect(cut.textContent).toContain("interrupt");
+    await act(async () => { cut.click(); });
+
+    expect(interruptWith).toHaveBeenCalledWith("s1", {
+      text: "actually, read the config first", images: [], files: [],
+    });
+    // Interrupt is a send, not a queue — and the box is cleared like any send.
+    expect(queuePrompt).not.toHaveBeenCalled();
+    expect(cmView(container).state.doc.toString()).toBe("");
+  });
+
+  test("a bound instance interrupts its own conversation", async () => {
+    const { interruptWith } = await mountBusy({ sessionId: "branch-1" });
+
+    await act(async () => { cmSet(cmView(container), "stop and do this"); });
+    await act(async () => { container.querySelector<HTMLButtonElement>("button.send.stop")!.click(); });
+
+    expect(interruptWith).toHaveBeenCalledWith("branch-1", { text: "stop and do this", images: [], files: [] });
+  });
+
+  test("an upload still landing leaves the button as plain stop", async () => {
+    // Gated on canSend, not on the typed text: an interrupt that cannot fire yet
+    // would cut the turn AND strand the message, and it would take stop's place
+    // while doing it.
+    const { cancel, interruptWith } = await mountBusy({}, { promptCapabilities: { embeddedContext: true } });
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {}))); // upload never settles
+
+    await act(async () => { cmSet(cmView(container), "typed while uploading"); });
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    await act(async () => {
+      Object.defineProperty(input, "files", { value: [new File(["# hi"], "notes.md")], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+
+    const btn = container.querySelector<HTMLButtonElement>("button.send.stop")!;
+    expect(btn.textContent).toContain("stop");
+    await act(async () => { btn.click(); });
+    expect(cancel).toHaveBeenCalled();
+    expect(interruptWith).not.toHaveBeenCalled();
+  });
+
+  test("stop hands the queue back to the box instead of firing or dropping it", async () => {
+    const takeQueuedPrompts = vi.fn(() => [
+      { id: "q1", text: "second" },
+      { id: "q2", text: "third" },
+    ]);
+    const { cancel } = await mountBusy({}, { takeQueuedPrompts });
+
+    // Empty box — with something typed this button interrupts instead, which is
+    // its own test above.
+    await act(async () => { container.querySelector<HTMLButtonElement>("button.send.stop")!.click(); });
+
+    expect(cancel).toHaveBeenCalled();
+    expect(takeQueuedPrompts).toHaveBeenCalledWith("s1");
+    expect(cmView(container).state.doc.toString()).toBe("second\n\nthird");
+  });
+
+  test("stop recovers the queue before it sends the cancel", async () => {
+    // Order matters, not just outcome: cancel reaches for the socket and can
+    // throw when it has just gone, and the messages must not be left parked
+    // against a turn nobody is going to end. A failed stop can be pressed
+    // again; typed text dropped on the way is gone.
+    const calls: string[] = [];
+    const takeQueuedPrompts = vi.fn(() => { calls.push("take"); return [{ id: "q1", text: "second" }]; });
+    const cancel = vi.fn(() => { calls.push("cancel"); });
+    await mountBusy({}, { takeQueuedPrompts, cancel });
+
+    await act(async () => { container.querySelector<HTMLButtonElement>("button.send.stop")!.click(); });
+
+    expect(calls).toEqual(["take", "cancel"]);
+    expect(cmView(container).state.doc.toString()).toBe("second");
+  });
+
+  test("the rail lists the queue in send order and removes one by id", async () => {
+    const unqueuePrompt = vi.fn();
+    await mountBusy({}, {
+      unqueuePrompt,
+      queuedPrompts: { s1: [{ id: "q1", text: "second" }, { id: "q2", text: "third" }] },
+    });
+
+    const items = [...container.querySelectorAll(".queue-item")];
+    expect(items).toHaveLength(2);
+    expect(items.map((n) => n.querySelector(".queue-body")!.textContent)).toEqual(["second", "third"]);
+    expect(items[0].querySelector(".queue-meta")!.textContent).toContain("next 1");
+
+    await act(async () => { items[1].querySelector<HTMLButtonElement>("button.x")!.click(); });
+    expect(unqueuePrompt).toHaveBeenCalledWith("s1", "q2");
+  });
+
+  test("another conversation's queue is not drawn here", async () => {
+    await mountBusy({}, { queuedPrompts: { "other-session": [{ id: "q1", text: "not mine" }] } });
+    expect(container.querySelector(".queue-rail")).toBeNull();
+  });
+
+  test("a queued message carrying only attachments says what it holds", async () => {
+    // Rendering its (empty) text would look like a broken row.
+    await mountBusy({}, {
+      queuedPrompts: { s1: [{ id: "q1", text: "", images: [{ mimeType: "image/png", data: "AAAA" }], files: [{ name: "a.ts" }] }] },
+    });
+    expect(container.querySelector(".queue-body")!.textContent).toBe("1 image · a.ts");
   });
 
 });

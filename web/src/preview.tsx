@@ -231,6 +231,20 @@ if (SCENE.has("idle")) {
     sessions: { "s-usage": { ...session, working: false, items: session.items.slice(0, 5) } },
   });
 }
+// "queued" is the send queue mid-turn: two messages typed while the turn above is
+// still running, waiting on the rail that runs down into the composer. Needs
+// busySessionIds, not the session's `working` flag — that is what the composer reads.
+if (SCENE.has("queued")) {
+  useStore.setState({
+    busy: true, busySessionIds: { "s-usage": true },
+    queuedPrompts: { "s-usage": [
+      // "pq" ids, not "q1"/"q2": the store's own generator starts at q1, so a
+      // message queued by hand in this harness would collide with a canned one.
+      { id: "pq1", text: "順便把 ACPG_REAP_TTL 寫進 env.example，預設維持 30 分鐘" },
+      { id: "pq2", text: "然後幫我開 PR，記得也要開 legacy/node20 那條" },
+    ] },
+  });
+}
 if (SCENE.has("codex")) useStore.setState({ agentName: "codex" });
 if (SCENE.has("opencode")) {
   useStore.setState((st) => ({
