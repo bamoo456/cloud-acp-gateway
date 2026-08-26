@@ -465,10 +465,10 @@
     font-size: 10.5px; color: var(--faint); }
   /* A 13px glyph is a miss-prone touch target sitting next to the collapse
      toggle, so the box is padded out well past the icon it draws. */
-  .fgroup .hide { flex: 0 0 auto; width: 24px; height: 24px; margin: -4px -3px -4px 0;
+  .fgroup .hide, .fgroup .new { flex: 0 0 auto; width: 24px; height: 24px; margin: -4px -3px -4px 0;
     display: grid; place-items: center; color: var(--faint); border-radius: 6px; }
-  .fgroup .hide svg { width: 13px; height: 13px; }
-  .fgroup .hide:hover { background: var(--surface); color: var(--text); }
+  .fgroup .hide svg, .fgroup .new svg { width: 13px; height: 13px; }
+  .fgroup .hide:hover, .fgroup .new:hover { background: var(--surface); color: var(--text); }
   .fkids { position: relative; padding-bottom: 4px; }
   .fkids::before { content: ""; position: absolute; left: 16px; top: 0; bottom: 6px; width: 1px; background: var(--border); }
   .fkids .sess-item { padding-left: 26px; }
