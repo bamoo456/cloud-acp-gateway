@@ -12,6 +12,16 @@ function cssRule(selector: string): string {
 }
 
 describe("global styles", () => {
+  test("an unread row badges its timestamp, and only when there is one", () => {
+    // The pill is keyed off the dot with :has(), so nothing threads an unread
+    // flag through the five row renderers — and :not(:empty) keeps a row with no
+    // timestamp from wearing a bare red blob.
+    const pill = cssRule(".sess-item:has(.run-dot.unread) .when:not(:empty)");
+    expect(pill).toContain("var(--unread)");
+    expect(pill).toContain("border-radius: 999px");
+  });
+
+
   test("action menu stays within the viewport and scrolls", () => {
     const rule = cssRule(".amenu");
 
