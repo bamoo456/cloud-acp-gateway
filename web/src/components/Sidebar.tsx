@@ -11,7 +11,7 @@ import {
   clampSidebarWidth, readSidebarWidth, saveSidebarWidth, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH,
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
-import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, IconArchive, IconSideChat, IconPin, WorkingDots,
+import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, IconArchive, IconPlus, IconSideChat, IconPin, WorkingDots,
   Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { folderKey, homeFrom } from "../lib/folderKey.ts";
@@ -755,6 +755,13 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                             <span className={"run-dot" + (g.needsYou ? " awaiting" : g.running ? "" : " unread")}
                               title={g.needsYou ? "Needs input" : g.running ? "Working" : "Finished — not read yet"} />
                           )}
+                          {/* New chat in this group's folder: the current one gets the
+                              optimistic newSession(); any other goes through setCwd, which
+                              adopts that folder and starts a fresh session there. */}
+                          <span className="new" role="button" aria-label="New chat"
+                            onClick={(e) => { e.stopPropagation(); if (g.current) void s.newSession(); else s.setCwd(g.cwd); onClose(); }}>
+                            <IconPlus />
+                          </span>
                           {/* hideFolders() always exempts the folder you're working in, so
                               a toggle here would look broken — offer it on every group but
                               this one. `.fgroup` is itself a <button>, so this is a <span

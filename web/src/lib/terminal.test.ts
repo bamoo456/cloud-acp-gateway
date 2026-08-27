@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { newTerminalId, sendTerminalInput } from "./terminal.ts";
+import { newTerminalId, sendTerminalInput, execCommand, shellContext, shellNote } from "./terminal.ts";
 
 // The gateway rejects anything outside this (src/terminal.ts's ID_RE), so an id
 // the browser can't produce is a terminal that can't open.
@@ -48,5 +48,40 @@ describe("sendTerminalInput", () => {
 
     expect(maxOpen).toBe(1);
     expect(bodies.join("")).toBe("vp3.txt");
+  });
+});
+
+describe("execCommand", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("POSTs the command and hands back the gateway's result", async () => {
+    let sent: { url: string; body: string } | null = null;
+    vi.stubGlobal("fetch", (url: string, init: { body: string }) => {
+      sent = { url, body: init.body };
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ code: 0, stdout: "hi\n", stderr: "" }) });
+    });
+    const res = await execCommand("echo hi", "/repo");
+    expect(sent!.url).toContain("/terminal/exec");
+    expect(JSON.parse(sent!.body)).toEqual({ cmd: "echo hi", cwd: "/repo" });
+    expect(res.stdout).toBe("hi\n");
+  });
+
+  it("rejects on a non-OK answer (terminal withheld → 404)", async () => {
+    vi.stubGlobal("fetch", () => Promise.resolve({ ok: false, status: 404 }));
+    await expect(execCommand("ls")).rejects.toThrow(/404/);
+  });
+});
+
+describe("shellContext / shellNote", () => {
+  it("wraps the run in Claude Code's bash tags, omitting empty streams", () => {
+    expect(shellContext("ls", { code: 0, stdout: "a\n", stderr: "" }))
+      .toBe("<bash-input>ls</bash-input>\n<bash-stdout>a\n</bash-stdout>");
+    expect(shellContext("boom", { code: 2, stdout: "", stderr: "no\n" }))
+      .toBe("<bash-input>boom</bash-input>\n<bash-stderr>no\n</bash-stderr>\n<bash-exit-code>2</bash-exit-code>");
+  });
+
+  it("renders a silent run and a failing exit legibly", () => {
+    expect(shellNote({ code: 0, stdout: "", stderr: "" })).toBe("(no output)");
+    expect(shellNote({ code: 1, stdout: "partial\n", stderr: "err\n" })).toBe("partial\nerr\n(exit 1)");
   });
 });
