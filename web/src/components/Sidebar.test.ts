@@ -1590,6 +1590,37 @@ describe("Sidebar recent conversations", () => {
     expect(header.classList.contains("closed")).toBe(true);
   });
 
+  // New chat straight from a folder header: the current folder uses the
+  // optimistic newSession; any other adopts that folder via setCwd (which
+  // starts a fresh session there itself).
+  test("folder view: a folder group's + starts a new chat in that folder", async () => {
+    getHistory.mockResolvedValue([]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "r1", title: "Current repo work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/other-repo", sessionId: "o1", title: "Other repo work", lastActiveAt: "2026-06-10T03:58:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    const newSession = vi.fn(async () => {});
+    const setCwd = vi.fn();
+    await act(async () => { useStore.setState({ newSession, setCwd } as any); });
+
+    const groups = Array.from(container.querySelectorAll(".folder-group"));
+    const otherHeader = groups.find((g) => g.textContent?.includes("other-repo"))!
+      .querySelector<HTMLButtonElement>(".fgroup")!;
+    await act(async () => { otherHeader.querySelector<HTMLElement>(".new")!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(setCwd).toHaveBeenCalledWith("/other-repo");
+    expect(newSession).not.toHaveBeenCalled();
+    // The click must not also expand/collapse the header underneath it.
+    expect(otherHeader.classList.contains("closed")).toBe(true);
+
+    const curHeader = groups.find((g) => g.textContent?.includes("repo") && !g.textContent?.includes("other-repo"))!
+      .querySelector<HTMLButtonElement>(".fgroup")!;
+    await act(async () => { curHeader.querySelector<HTMLElement>(".new")!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(newSession).toHaveBeenCalled();
+    expect(setCwd).toHaveBeenCalledTimes(1);
+  });
+
   test("folder view: the current folder's group has no hide affordance", async () => {
     await renderSidebar();
 
