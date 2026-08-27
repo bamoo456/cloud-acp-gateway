@@ -17,6 +17,8 @@ export interface GroupableRow<T> {
   unread: boolean;
   /** the reader pinned this conversation — see rankThen for what that outranks */
   pinned: boolean;
+  /** archived — sinks to the bottom of whatever list it is in, see rankThen */
+  archived?: boolean;
   data: T;
 }
 
@@ -87,8 +89,12 @@ export function groupByFolder<T>(
     freshest(b) - freshest(a));
 }
 
+// Archived outranks every hoist, pin included, for the reason hideFolders gives:
+// both are explicit choices, and the later one is the one that applies. A row
+// archived after it was pinned belongs at the bottom, not at the top.
 function rankThen<T>(tie: (a: GroupableRow<T>, b: GroupableRow<T>) => number) {
   return (a: GroupableRow<T>, b: GroupableRow<T>) =>
+    Number(!!a.archived) - Number(!!b.archived) ||
     Number(b.pinned) - Number(a.pinned) ||
     Number(b.needsYou) - Number(a.needsYou) ||
     Number(b.running) - Number(a.running) ||
@@ -106,7 +112,8 @@ export function latestWithPinned<T>(rows: Array<GroupableRow<T>>): {
   rest: Array<GroupableRow<T>>;
 } {
   const pinned = rows.filter((r) => r.pinned || r.needsYou || r.running).sort(rankThen(byWhen));
-  const rest = rows.filter((r) => !r.pinned && !r.needsYou && !r.running).sort(byWhen);
+  const rest = rows.filter((r) => !r.pinned && !r.needsYou && !r.running)
+    .sort((a, b) => Number(!!a.archived) - Number(!!b.archived) || byWhen(a, b));
   return { pinned, rest };
 }
 
