@@ -4824,6 +4824,29 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     }
     return;
   }
+  // Archived conversations, persisted server-side like hidden folders: the row
+  // leaves the default sidebar list but the transcript stays intact (and
+  // searchable). GET returns the list; POST ?agent=&session= toggles.
+  if (consoleEnabled && pathname === "/sessions/archived") {
+    try {
+      if (req.method === "POST") {
+        const q = new URL(req.url ?? "/", "http://x").searchParams;
+        const agent = q.get("agent") ?? "";
+        // Same id sanitizing as /history/messages (underscores for opencode).
+        const sid = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+        if (!agent || !sid) { res.writeHead(400); res.end(); return; }
+        if (db().isArchived(agent, sid)) db().unarchiveSession(agent, sid);
+        else db().archiveSession(agent, sid);
+      } else if (req.method !== "GET") {
+        res.writeHead(405); res.end(); return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ archived: db().archivedSessions() }));
+    } catch (e) {
+      res.writeHead(500); res.end(JSON.stringify({ error: String(e) }));
+    }
+    return;
+  }
   // Cross-device UI state that used to live in browser localStorage (text size,
   // screen-lock config, recent sessions/folders). Persisted server-side so the
   // single gateway account sees the same prefs from any device — like SSHing into
@@ -4843,6 +4866,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         recentFolders: db().recentFolders(),
         hiddenFolders: db().hiddenFolders(),
         pinnedSessions: db().pinnedSessions(),
+        archivedSessions: db().archivedSessions(),
       }));
     } catch (e) {
       res.writeHead(500); res.end(JSON.stringify({ error: String(e) }));
@@ -5099,6 +5123,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         db().deleteTranscriptMeta(sid);
         db().deleteSessionControls(sid);
         db().deletePinnedSession(sid);
+        db().deleteArchivedSession(sid);
         db().cancelInboxForSessionId(sid, new Date().toISOString());
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, deleted }));

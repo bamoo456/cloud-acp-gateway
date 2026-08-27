@@ -71,6 +71,7 @@ describe("Sidebar recent conversations", () => {
       listDir: vi.fn(),
       toggleHiddenFolder: vi.fn().mockResolvedValue([]),
       togglePinnedSession: vi.fn().mockResolvedValue([]),
+      toggleArchivedSession: vi.fn().mockResolvedValue([]),
     }));
   });
 
@@ -1565,6 +1566,50 @@ describe("Sidebar recent conversations", () => {
     const hiddenBtn = Array.from(container.querySelectorAll<HTMLButtonElement>(".sb-head button"))
       .find((b) => b.textContent?.includes("hidden"));
     expect(hiddenBtn?.textContent).toBe("1 hidden");
+  });
+
+  // Archived conversations drop out of the default list but stay reachable
+  // behind See more (dimmed via .archived); the transcript itself is untouched,
+  // so search keeps finding them without any extra wiring.
+  test("archived conversations hide until See more and toggle from the row menu", async () => {
+    getHistory.mockResolvedValue([]);
+    seedLatestView();
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "a1", title: "Finished task", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/repo", sessionId: "a2", title: "Ongoing task", lastActiveAt: "2026-06-10T03:58:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => { useStore.setState({ archivedSessions: ["claude\na1"] }); });
+
+    expect(container.textContent).toContain("Ongoing task");
+    expect(container.textContent).not.toContain("Finished task");
+
+    // See more is the way back on screen, and the row comes back dimmed.
+    const seeMore = container.querySelector<HTMLButtonElement>(".see-more");
+    expect(seeMore).not.toBeNull();
+    await act(async () => { seeMore!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const row = Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"))
+      .find((el) => el.textContent?.includes("Finished task"))!;
+    expect(row.classList.contains("archived")).toBe(true);
+
+    // Its menu offers the way back out…
+    const { toggleArchivedSession } = await import("../lib/api.ts") as unknown as { toggleArchivedSession: ReturnType<typeof vi.fn> };
+    await act(async () => { row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    const unarchive = Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
+      .find((b) => b.textContent?.includes("Unarchive conversation"));
+    expect(unarchive).not.toBeUndefined();
+    await act(async () => { unarchive!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(toggleArchivedSession).toHaveBeenCalledWith("claude", "a1");
+    expect(container.querySelector(".wf-menu")).toBeNull();
+
+    // …and an unarchived row's menu offers Archive.
+    const other = Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"))
+      .find((el) => el.textContent?.includes("Ongoing task"))!;
+    await act(async () => { other.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    const archive = Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
+      .find((b) => b.textContent?.includes("Archive conversation"));
+    expect(archive).not.toBeUndefined();
   });
 
   // Hiding now starts here, at the folder header — the picker only manages

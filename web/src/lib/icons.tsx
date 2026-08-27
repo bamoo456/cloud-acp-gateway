@@ -149,6 +149,18 @@ export function IconPin({ filled = false }: { filled?: boolean } = {}) {
   );
 }
 
+// Archiving a conversation: the classic lidded box, distinct from IconHide's
+// circle-slash (which stays "hide this folder") and IconTrash (destructive).
+export function IconArchive() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="5" rx="1" />
+      <path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9" />
+      <path d="M10 13h4" />
+    </svg>
+  );
+}
+
 export function IconSlash() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
