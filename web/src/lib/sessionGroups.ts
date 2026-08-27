@@ -15,6 +15,8 @@ export interface GroupableRow<T> {
   needsYou: boolean;
   /** a finished turn nobody has opened yet — shown, but never re-orders a list */
   unread: boolean;
+  /** the reader pinned this conversation — see rankThen for what that outranks */
+  pinned: boolean;
   data: T;
 }
 
@@ -29,6 +31,8 @@ export interface FolderGroup<T> {
   running: boolean;
   needsYou: boolean;
   unread: boolean;
+  /** something in this folder is pinned, so the folder itself sorts up */
+  hasPinned: boolean;
   /** the folder the app is currently working in */
   current: boolean;
 }
@@ -36,7 +40,10 @@ export interface FolderGroup<T> {
 const byWhen = <T>(a: GroupableRow<T>, b: GroupableRow<T>) => b.when - a.when;
 
 // Ordering, both views, in one place so the two can't drift:
-//   needs you first, then running, then most recent.
+//   pinned first, then needs you, then running, then most recent.
+// A pin outranks even "needs you" on purpose: it is the one ordering signal the
+// reader set by hand, and a row they deliberately put at the top must not move
+// because some other session started asking for an Allow.
 // In the folder view the folder you are working in is pinned above all of it —
 // you are in it, so its position must be stable while you work.
 export function groupByFolder<T>(
@@ -52,7 +59,7 @@ export function groupByFolder<T>(
     if (!g) {
       g = {
         key, label: folderLabel(row.cwd) || key, cwd: row.cwd,
-        rows: [], running: false, needsYou: false, unread: false, current: key === currentKey,
+        rows: [], running: false, needsYou: false, unread: false, hasPinned: false, current: key === currentKey,
       };
       groups.set(key, g);
     }
@@ -60,12 +67,13 @@ export function groupByFolder<T>(
     g.running ||= row.running;
     g.needsYou ||= row.needsYou;
     g.unread ||= row.unread;
+    g.hasPinned ||= row.pinned;
   }
   // The folder you are in belongs in the list even before it has a session.
   if (currentKey && !groups.has(currentKey)) {
     groups.set(currentKey, {
       key: currentKey, label: folderLabel(currentCwd) || currentKey, cwd: currentCwd,
-      rows: [], running: false, needsYou: false, unread: false, current: true,
+      rows: [], running: false, needsYou: false, unread: false, hasPinned: false, current: true,
     });
   }
   const out = [...groups.values()];
@@ -73,6 +81,7 @@ export function groupByFolder<T>(
   const freshest = (g: FolderGroup<T>) => g.rows.reduce((n, r) => Math.max(n, r.when), 0);
   return out.sort((a, b) =>
     Number(b.current) - Number(a.current) ||
+    Number(b.hasPinned) - Number(a.hasPinned) ||
     Number(b.needsYou) - Number(a.needsYou) ||
     Number(b.running) - Number(a.running) ||
     freshest(b) - freshest(a));
@@ -80,20 +89,24 @@ export function groupByFolder<T>(
 
 function rankThen<T>(tie: (a: GroupableRow<T>, b: GroupableRow<T>) => number) {
   return (a: GroupableRow<T>, b: GroupableRow<T>) =>
+    Number(b.pinned) - Number(a.pinned) ||
     Number(b.needsYou) - Number(a.needsYou) ||
     Number(b.running) - Number(a.running) ||
     tie(a, b);
 }
 
-// Strict recency, EXCEPT that anything running or waiting on you is pinned
-// above the fold. A session that wants an Allow must not sink out of sight just
-// because it has been quiet — that is exactly the case you opened the phone for.
+// Strict recency, EXCEPT that anything the reader pinned, or that is running or
+// waiting on you, is hoisted above the fold. A session that wants an Allow must
+// not sink out of sight just because it has been quiet — that is exactly the case
+// you opened the phone for; a pinned one must not sink for any reason at all.
+// NB "pinned" here is the section, not the row flag: it holds pinned rows AND
+// running/needs-you ones, which is why `rest` has to exclude all three.
 export function latestWithPinned<T>(rows: Array<GroupableRow<T>>): {
   pinned: Array<GroupableRow<T>>;
   rest: Array<GroupableRow<T>>;
 } {
-  const pinned = rows.filter((r) => r.needsYou || r.running).sort(rankThen(byWhen));
-  const rest = rows.filter((r) => !r.needsYou && !r.running).sort(byWhen);
+  const pinned = rows.filter((r) => r.pinned || r.needsYou || r.running).sort(rankThen(byWhen));
+  const rest = rows.filter((r) => !r.pinned && !r.needsYou && !r.running).sort(byWhen);
   return { pinned, rest };
 }
 
@@ -124,6 +137,8 @@ export function splitByAge<T>(
 // above, hiding is something the reader chose on purpose, the durable inbox
 // still surfaces that session's prompts elsewhere, and the "N hidden"
 // affordance the caller renders keeps the cut from being silent.
+// That includes a PINNED row: hiding runs before grouping, so the folder filter
+// wins. Both are explicit choices, and the later one is the one that applies.
 export function hideFolders<T>(
   rows: Array<GroupableRow<T>>,
   hidden: string[],
