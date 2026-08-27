@@ -221,6 +221,62 @@ describe("store configOptions", () => {
     expect(engineOf(useStore.getState()).commands).toEqual([]);
   });
 
+  // The adapter answers session/new with an empty availableCommands and emits the
+  // real list a millisecond later, naming the REAL session id — which a "+"
+  // conversation does not have yet, because it lives under a provisional id until
+  // the round trip returns. The update used to be dropped for naming an unknown
+  // session, and nothing ever re-sent it, so the conversation was left with an
+  // empty slash menu permanently.
+  test("a command list that arrives before its session is adopted still lands", async () => {
+    const { useStore, ws } = await bootCodex();
+    const sentBefore = ws.sent.length;
+    void useStore.getState().newSession();
+    await flush();
+
+    // The "+" conversation is on screen under a provisional id.
+    expect(useStore.getState().activeId).toMatch(/^pending-/);
+    const req = JSON.parse(ws.sent[sentBefore]);
+    expect(req.method).toBe("session/new");
+
+    // The list arrives first, naming a session the store has never seen.
+    ws.recv({
+      jsonrpc: "2.0", method: "session/update",
+      params: { sessionId: "ns-1", update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [{ name: "handoff", description: "Hand off" }, { name: "recall", description: "Recall" }],
+      } },
+    });
+    await flush();
+
+    // Only now does session/new resolve — with the empty list the adapter really sends.
+    ws.recv({ jsonrpc: "2.0", id: req.id, result: { sessionId: "ns-1", availableCommands: [] } });
+    await flush();
+
+    expect(useStore.getState().activeId).toBe("ns-1");
+    expect(engineOf(useStore.getState()).commands.map((c) => c.name)).toEqual(["handoff", "recall"]);
+  });
+
+  test("a command list arriving after adoption still lands (the non-racing order)", async () => {
+    const { useStore, ws } = await bootCodex();
+    const sentBefore = ws.sent.length;
+    void useStore.getState().newSession();
+    await flush();
+    const req = JSON.parse(ws.sent[sentBefore]);
+
+    ws.recv({ jsonrpc: "2.0", id: req.id, result: { sessionId: "ns-2", availableCommands: [] } });
+    await flush();
+    ws.recv({
+      jsonrpc: "2.0", method: "session/update",
+      params: { sessionId: "ns-2", update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [{ name: "handoff", description: "Hand off" }],
+      } },
+    });
+    await flush();
+
+    expect(engineOf(useStore.getState()).commands.map((c) => c.name)).toEqual(["handoff"]);
+  });
+
   test("setConfigOption reverts and tips on rejection", async () => {
     const { useStore, ws } = await bootCodex();
     useStore.getState().setConfigOption("reasoning_effort", "high");
