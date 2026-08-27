@@ -1115,7 +1115,7 @@
   .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface-2);
     border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 6px 6px 10px; }
   .composer:focus-within { border-color: var(--muted); }
-  /* "!" shell escape: the box stops being a message and says so — terminal-green
+  /* "!" shell escape: the box stops being a message and says so — accent
      border, mono text, and a "shell" tag where the composer meets the thread.
      The send button reads "run" (Composer.tsx). */
   .composer.shell, .composer.shell:focus-within { border-color: var(--accent); position: relative; }

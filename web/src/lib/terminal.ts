@@ -109,3 +109,40 @@ export async function stopTerminal(id: string): Promise<void> {
     console.error("stopTerminal failed", e);
   }
 }
+
+// ------------------------------------------------------------------ "!" exec ----
+// One-shot exec for the composer's "!" escape. Unlike the PTY routes above
+// there is no session to key: the gateway runs the command to completion and
+// answers with what it printed. Errors reject — the caller owns what a failed
+// run looks like in the thread.
+export interface ExecResult { code: number; stdout: string; stderr: string }
+
+export async function execCommand(cmd: string, cwd?: string): Promise<ExecResult> {
+  const r = await fetch(base() + "/terminal/exec", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ cmd, cwd }),
+  });
+  if (!r.ok) throw new Error(`exec failed (${r.status})`);
+  return (await r.json()) as ExecResult;
+}
+
+// The transcript block that rides ahead of the NEXT prompt, so the model hears
+// what the user just watched happen. Tag names follow Claude Code's own "!"
+// feature — models already know this shape.
+export function shellContext(cmd: string, res: ExecResult): string {
+  const parts = [`<bash-input>${cmd}</bash-input>`];
+  if (res.stdout) parts.push(`<bash-stdout>${res.stdout}</bash-stdout>`);
+  if (res.stderr) parts.push(`<bash-stderr>${res.stderr}</bash-stderr>`);
+  if (res.code !== 0) parts.push(`<bash-exit-code>${res.code}</bash-exit-code>`);
+  return parts.join("\n");
+}
+
+// What the thread shows for a finished run: the output as printed (stderr after
+// stdout), or a placeholder so a silent command doesn't render as a blank row,
+// with the exit code only when it says something ("exit 0" is noise).
+export function shellNote(res: ExecResult): string {
+  const out = [res.stdout, res.stderr].filter(Boolean).join("").replace(/\n+$/, "");
+  return [out || "(no output)", res.code !== 0 ? `(exit ${res.code})` : ""].filter(Boolean).join("\n");
+}

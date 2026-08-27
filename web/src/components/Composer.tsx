@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect } from "react";
 import { branchGate, hasCodexSkin, useStore, engineOf } from "../store/store.ts";
 import { Menu } from "./Menu.tsx";
-import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconGitBranch, IconClock } from "../lib/icons.tsx";
+import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconGitBranch, IconClock, IconTerminal } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
 import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.ts";
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
@@ -91,8 +91,14 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // the same thing send does: something to say. A branch of a conversation
   // mid-turn is refused by branchGate anyway.
   const branchable = canSend;
+  // "!" at the head of the box is the shell escape (Claude Code's bang):
+  // submit runs the rest as a host command instead of prompting the agent.
+  // Only when the gateway exposes the terminal at all (ACPG_TERMINAL), and only
+  // with a live conversation to show the transcript in — before the first
+  // message there is no thread, so a leading "!" is just a message.
+  const shellMode = !!s.cfg.terminalEnabled && !!targetId && text.startsWith("!");
   // Mid-turn with something ready to send, the stop button becomes interrupt.
-  const cutting = activeBusy && canSend;
+  const cutting = activeBusy && canSend && !shellMode;
   const placeholder = hasCodexSkin(s) ? "Reply to Codex…" : "Reply to Claude…";
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
@@ -296,7 +302,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // copy of what was typed, and the tip explaining the failure is no use to
   // someone whose paragraph just vanished.
   async function branchWith() {
-    if (uploading) return;
+    if (uploading || shellMode) return;
     const t = text; const imgs = images; const refs = files;
     if (!t.trim() && !imgs.length && !refs.length) return;
     if (await s.branchSession({ text: t, images: imgs, files: refs })) {
@@ -309,6 +315,16 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     // guard: sending mid-upload would clear `files` out from under the pending
     // upload, and the file would land as a chip on the *next* message instead.
     if (uploading) return;
+    // "!" runs on the host right now — no queue, no turn, and mid-turn is fine
+    // because the agent is not involved. Attachments stay put for the next real
+    // message; a command doesn't carry them.
+    if (shellMode) {
+      const cmd = text.slice(1).trim();
+      if (!cmd) return;
+      setText("");
+      void s.runShell(targetId!, cmd);
+      return;
+    }
     const t = text; const imgs = images; const refs = files;
     // Enter on an empty box mid-turn keeps its old meaning: stop. With something
     // typed, Enter QUEUES — interrupting is the button beside it, because cutting a
@@ -420,7 +436,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
         </div>
       )}
       <div
-        className={"composer" + (compact ? " compact" : "") + (dragging ? " dragover" : "")}
+        className={"composer" + (compact ? " compact" : "") + (dragging ? " dragover" : "") + (shellMode ? " shell" : "")}
         onDragOver={canAttachImages ? (e) => { e.preventDefault(); setDragging(true); } : undefined}
         onDragLeave={canAttachImages ? () => setDragging(false) : undefined}
         onDrop={canAttachImages ? (e) => { e.preventDefault(); setDragging(false); void addFiles(e.dataTransfer?.files); } : undefined}
@@ -505,7 +521,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
           )}
           <button className="send" title={activeBusy ? "Queue for after this turn" : "Send"}
             disabled={!canSend} onClick={submit}>
-            {activeBusy ? <>queue<IconClock /></> : <>send<IconSend /></>}
+            {shellMode ? <>run<IconTerminal /></> : activeBusy ? <>queue<IconClock /></> : <>send<IconSend /></>}
           </button>
         </div>
       </div>
