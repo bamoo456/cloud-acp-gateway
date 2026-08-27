@@ -24,3 +24,9 @@ if (typeof Range !== "undefined" && !Range.prototype.getClientRects) {
 if (typeof Range !== "undefined" && !Range.prototype.getBoundingClientRect) {
   Object.defineProperty(Range.prototype, "getBoundingClientRect", { value: emptyRect });
 }
+
+// jsdom has no layout, so it ships no scrollIntoView at all (Menu keeps the
+// keyboard-selected row in view with it).
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Object.defineProperty(Element.prototype, "scrollIntoView", { value: () => {} });
+}

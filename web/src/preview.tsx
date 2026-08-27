@@ -245,6 +245,27 @@ if (SCENE.has("queued")) {
     ] },
   });
 }
+// "skills" is the slash menu against a real Claude command list: plugin-prefixed
+// names and descriptions that are whole trigger paragraphs, which is the shape
+// the menu actually has to survive (a bare "/" lists a hundred-plus entries).
+if (SCENE.has("skills")) {
+  useStore.setState((st) => ({
+    sessions: { "s-usage": { ...st.sessions["s-usage"], working: false, engine: { ...ENGINE, commands: [
+      { name: "init", description: "Initialize a new CLAUDE.md file with codebase documentation" },
+      { name: "review", description: "Review a pull request" },
+      { name: "code-review", description: "Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes — Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/spec asked for?). Runs both reviews in parallel sub-agents." },
+      { name: "security-review", description: "Complete a security review of the pending changes on the current branch" },
+      { name: "commit-commands:commit", description: "Create a git commit" },
+      { name: "commit-commands:commit-push-pr", description: "Commit, push, and open a PR" },
+      { name: "pr-review-toolkit:review-pr", description: "Comprehensive PR review using specialized agents" },
+      { name: "diagnosing-bugs", description: "Diagnosis loop for hard bugs and performance regressions. Use when the user says \"diagnose\"/\"debug this\", or reports something broken/throwing/failing/slow." },
+      { name: "simplify", description: "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — it does not hunt for bugs; use /code-review for that." },
+      { name: "recall", description: "Token-efficient memory retrieval — search shared vault memory progressively (index → selected handoffs → wiki)." },
+      { name: "taboola-wiki-capture", description: "Use when you want to persist THIS conversation's durable findings into the Taboola wiki vault — after a debugging session, investigation, root-cause hunt, or a decision worth keeping." },
+      { name: "graphify", description: "any input (code, docs, papers, images) → knowledge graph → clustered communities → HTML + JSON + audit report" },
+    ] } } },
+  }));
+}
 if (SCENE.has("codex")) useStore.setState({ agentName: "codex" });
 if (SCENE.has("opencode")) {
   useStore.setState((st) => ({
