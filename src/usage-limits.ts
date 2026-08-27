@@ -62,6 +62,10 @@ function resetSeconds(isoOrEpoch: unknown): number | undefined {
 
 // Windows the endpoint still reports as flat top-level fields. Model-scoped
 // weekly caps have moved into `limits[]`, but older accounts keep answering here.
+// ponytail: an account populating both a flat `seven_day_opus` and a scoped
+// Opus entry would render two segments for one quota — the strip's dedupe keys
+// on the flat type. Unreachable today (every flat model field comes back null);
+// key scoped entries by model id if that ever changes.
 const FLAT_WINDOWS = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"] as const;
 
 export function normalizeLimits(body: unknown, fetchedAt: number): UsageLimits {
@@ -81,9 +85,16 @@ export function normalizeLimits(body: unknown, fetchedAt: number): UsageLimits {
   // The newer shape: a flat list in which a weekly cap can name the model it
   // scopes to. This is where a promotional per-model window shows up, so it is
   // the only source for that segment on a current account.
+  //
+  // `is_active` is NOT "this cap applies to you" — it marks the one window
+  // currently binding. A live response has `kind: "session"` active at 41%
+  // while the `weekly_all` entry reads false alongside a flat `seven_day` of a
+  // real 15%. Filtering on it hid the Fable cap (27%) completely, so don't.
+  // The `weekly_scoped` guard is what keeps `weekly_all` from double-counting
+  // `seven_day` here.
   const limits = Array.isArray(root.limits) ? root.limits : [];
   for (const entry of limits as Array<Record<string, unknown>>) {
-    if (entry?.kind !== "weekly_scoped" || entry.is_active === false) continue;
+    if (entry?.kind !== "weekly_scoped") continue;
     const util = fraction(entry.percent);
     if (util === null) continue;
     const model = (entry.scope as { model?: { id?: string; display_name?: string } } | undefined)?.model;

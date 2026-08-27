@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, toggleHiddenFolder as apiToggleHiddenFolder, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
@@ -181,6 +181,10 @@ interface State {
   // like pinned folders, this lives on the gateway so it's the same on every
   // device. Paths, not patterns (see lib/sessionGroups.ts's hideFolders).
   hiddenFolders: string[];
+  // Conversations pinned to the top of the sidebar list, as "agent\nsessionId"
+  // keys — the sidebar's own row key. On the gateway like hiddenFolders: a pin is
+  // curation, not a per-device view preference, so it follows the account.
+  pinnedSessions: string[];
   // "agent\nsessionId" -> the title the gateway's own listings report, which is
   // where a rename actually lands (the per-cwd titles sidecar). Filled by the
   // sidebar as it fetches /history and /history/discovered, and read back by
@@ -283,6 +287,9 @@ interface State {
   // folder picker's own pin toggle, so a failed round-trip just leaves the
   // list as it was.
   toggleHiddenFolder: (path: string) => void;
+  // Toggles a conversation's pin via the gateway, best-effort like
+  // toggleHiddenFolder — a failed round-trip leaves the list as it was.
+  togglePinnedSession: (agentName: string, sessionId: string) => void;
   toggleAuto: () => void;
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
@@ -1353,6 +1360,7 @@ export const useStore = create<State>((set, get) => {
     historyNonce: 0,
     recentSessions: readRecentSessions(),
     hiddenFolders: [],
+    pinnedSessions: [],
     historyTitles: {},
     runningTasks: [],
     runningSeen: {},
@@ -1390,6 +1398,7 @@ export const useStore = create<State>((set, get) => {
           textSize,
           recentSessions: readRecentSessions(),
           hiddenFolders: p.hiddenFolders,
+          pinnedSessions: p.pinnedSessions,
           lockEnabled,
         });
         if (lockEnabled) {
@@ -1593,6 +1602,9 @@ export const useStore = create<State>((set, get) => {
     },
     toggleHiddenFolder(path) {
       apiToggleHiddenFolder(path).then((list) => set({ hiddenFolders: list })).catch(() => {});
+    },
+    togglePinnedSession(agentName, sessionId) {
+      apiTogglePinnedSession(agentName, sessionId).then((list) => set({ pinnedSessions: list })).catch(() => {});
     },
     toggleAuto() { set((st) => ({ autoApprove: !st.autoApprove })); },
     setTextSize(size) {
