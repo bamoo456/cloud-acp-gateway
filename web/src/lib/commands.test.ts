@@ -36,6 +36,14 @@ describe("activeCommand", () => {
     expect(activeCommand("/co arg", 5)).toBeNull();  // caret past the command token
     expect(activeCommand("hello", 5)).toBeNull();
   });
+
+  test("skips leading whitespace (stray space, blank first line)", () => {
+    expect(activeCommand(" /co", 4)).toEqual({ start: 1, end: 4, query: "/co" });
+    expect(activeCommand("\n/co", 4)).toEqual({ start: 1, end: 4, query: "/co" });
+    expect(activeCommand(" /commit msg", 4)).toEqual({ start: 1, end: 8, query: "/co" });
+    expect(activeCommand("  ", 2)).toBeNull();       // whitespace only
+    expect(activeCommand(" /co", 1)).toBeNull();     // caret before the token
+  });
 });
 
 describe("filterCommands", () => {
@@ -74,7 +82,30 @@ describe("filterCommands", () => {
   });
 
   test("filters out non-matches", () => {
-    expect(filterCommands(cmds, "/com").map((c) => c.name)).toEqual(["commit"]);
     expect(filterCommands(cmds, "/zzz")).toEqual([]);
+  });
+
+  test("falls back to a fuzzy subsequence, ranked after the exact tiers", () => {
+    const long: SlashCommand[] = [
+      { name: "commit" },
+      { name: "code-review" },
+      { name: "pr-review-toolkit:review-pr" },
+    ];
+    // "cdrv" is nobody's prefix or substring, but is a subsequence of code-review
+    expect(filterCommands(long, "/cdrv").map((c) => c.name)).toEqual(["code-review"]);
+    // "prvw" substring-matches nothing but is a subsequence of both review
+    // entries; "review" is an exact substring of both, so it outranks fuzzy
+    expect(filterCommands(long, "/prvw").map((c) => c.name)).toEqual(["pr-review-toolkit:review-pr"]);
+    expect(filterCommands(long, "/review").map((c) => c.name)).toEqual([
+      "code-review",
+      "pr-review-toolkit:review-pr",
+    ]);
+  });
+
+  test("fuzzy needs 3 characters, so a short query stays exact", () => {
+    const long: SlashCommand[] = [{ name: "commit" }, { name: "taboola-wiki-capture" }];
+    // "ce" is a subsequence of taboola-wiki-capture but far too loose to offer
+    expect(filterCommands(long, "/ce")).toEqual([]);
+    expect(filterCommands(long, "/cte").map((c) => c.name)).toEqual(["taboola-wiki-capture"]);
   });
 });
