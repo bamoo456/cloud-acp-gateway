@@ -18,6 +18,7 @@ import {
 import type {
   Session, SessionEngine, ConfigOption, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
   AgentSkin, MessageImage, MessageFile, QueuedPrompt, PromptCapabilities, ElicitationResponse, RateLimit,
+  SlashCommand,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
 
@@ -411,6 +412,20 @@ let acp: Acp = undefined as unknown as Acp;
 let sessionInit: Promise<unknown> | null = null;
 let creatingSession = false; // a "+" / New chat round-trip is in flight — ignore repeat clicks
 let pendingResyncId: string | null = null;
+// Command lists that named a session before this tab had it, keyed by that
+// session's real id and consumed by the fold that adopts it (adoptEngine).
+//
+// The adapter answers session/new with an EMPTY availableCommands and emits the
+// real list — every skill and slash command, hundreds of them — as an
+// available_commands_update a millisecond or two later. A "+" conversation lives
+// under a provisional id until that round trip returns, so the update routinely
+// names a session the store has not been remapped onto yet, and the handler
+// below dropped it. That drop was permanent: the adapter emits the list exactly
+// once per session (nothing re-requests it) and the gateway, unlike config
+// options, synthesizes no replacement — so the conversation kept an empty slash
+// menu for the rest of its life. session/load is unaffected: the session is
+// already in the store under the id the update names.
+const reportedCommands = new Map<string, SlashCommand[]>();
 // Set by selectSession when the target lives under another agent; consumed by
 // handleStatus once that agent's connection is ready (single activation path).
 let pendingActivateId: string | null = null;
@@ -824,7 +839,21 @@ export const useStore = create<State>((set, get) => {
     // fans out notifications, so late updates from a folder/session we just left
     // can otherwise be appended to the newly active conversation.
     const sid = p.sessionId ? (st.sessions[p.sessionId] ? p.sessionId : "") : (st.activeId || "");
-    if (!st.sessions[sid]) return;
+    if (!st.sessions[sid]) {
+      // Hold a command list for a session we have not adopted yet (see
+      // reportedCommands) instead of losing it. Only this update kind: it is a
+      // wholesale replacement, so applying it late is exactly right, whereas the
+      // transcript updates above are deliberately dropped.
+      if (p.sessionId && p.update.sessionUpdate === "available_commands_update") {
+        reportedCommands.set(p.sessionId, p.update.availableCommands || []);
+        // The gateway fans notifications out to every client, so some of these
+        // name a conversation another device opened and this tab will never
+        // adopt. Keyed by session, so that is one stale entry each — cap it
+        // rather than hold every list the account ever reported.
+        if (reportedCommands.size > 8) reportedCommands.delete(reportedCommands.keys().next().value!);
+      }
+      return;
+    }
     // The engine lists belong to the session the frame names, like every other
     // update here — they used to be assigned before this resolution, straight to a
     // store-global, so whichever session the gateway last re-applied controls for
@@ -1143,9 +1172,22 @@ export const useStore = create<State>((set, get) => {
     return sessionInit;
   }
 
+  // Fold a session/new result the way applyModelsModes does, plus any command
+  // list that arrived while this session was still under its provisional id.
+  // Every path that brings a session/new result into the store goes through
+  // here; session/load cannot race (the session is already keyed by its real
+  // id) and a fork inherits its parent's engine wholesale.
+  function adoptEngine(s: Session, res: NewSessionResult): Session {
+    const session = applyModelsModes(s, res);
+    const commands = reportedCommands.get(res.sessionId);
+    if (!commands) return session;
+    reportedCommands.delete(res.sessionId);
+    return { ...session, engine: { ...session.engine, commands } };
+  }
+
   function adopt(res: NewSessionResult) {
     const baseSession = makeSession(res.sessionId, Date.now(), { agentName: get().agentName, cwd: get().cwd });
-    const session = applyModelsModes(baseSession, res);
+    const session = adoptEngine(baseSession, res);
     set((st) => ({
       sessions: trimSessions({ ...st.sessions, [res.sessionId]: session }, res.sessionId),
       activeId: res.sessionId,
@@ -1668,7 +1710,7 @@ export const useStore = create<State>((set, get) => {
           if (!st.sessions[provId] || st.busySessionIds[provId]) return { tip: "" };
           const remapped = remapSession(st.sessions[provId], ns.sessionId);
           const sessions = { ...st.sessions }; delete sessions[provId];
-          sessions[ns.sessionId] = applyModelsModes(remapped, ns);
+          sessions[ns.sessionId] = adoptEngine(remapped, ns);
           return {
             sessions: trimSessions(sessions, ns.sessionId),
             activeId: st.activeId === provId ? ns.sessionId : st.activeId,
@@ -1898,7 +1940,7 @@ export const useStore = create<State>((set, get) => {
             const old = st.sessions[activeId!];
             const remapped = remapSession(old, ns.sessionId);
             const sessions = { ...st.sessions }; delete sessions[activeId!];
-            sessions[ns.sessionId] = applyModelsModes(remapped, ns);
+            sessions[ns.sessionId] = adoptEngine(remapped, ns);
             const busySessionIds = { ...st.busySessionIds };
             if (busySessionIds[activeId!]) {
               delete busySessionIds[activeId!];
@@ -1939,7 +1981,7 @@ export const useStore = create<State>((set, get) => {
               const remapped = remapSession(old, ns.sessionId);
               const sessions = { ...st.sessions };
               delete sessions[activeId!];
-              sessions[ns.sessionId] = applyModelsModes({ ...remapped, suppressReplay: false, viewOnly: false }, ns);
+              sessions[ns.sessionId] = adoptEngine({ ...remapped, suppressReplay: false, viewOnly: false }, ns);
               const busySessionIds = { ...st.busySessionIds };
               if (busySessionIds[activeId!]) {
                 delete busySessionIds[activeId!];
