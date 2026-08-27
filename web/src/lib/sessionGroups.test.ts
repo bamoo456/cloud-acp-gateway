@@ -5,10 +5,11 @@ const HOME = "/Users/dev";
 const HOUR = 3600_000;
 const NOW = Date.UTC(2026, 7, 14, 12, 0);
 
-function row(key: string, cwd: string, hoursAgo: number, flags: { running?: boolean; needsYou?: boolean; unread?: boolean; pinned?: boolean } = {}): GroupableRow<string> {
+function row(key: string, cwd: string, hoursAgo: number, flags: { running?: boolean; needsYou?: boolean; unread?: boolean; pinned?: boolean; archived?: boolean } = {}): GroupableRow<string> {
   return {
     key, cwd, when: NOW - hoursAgo * HOUR, running: !!flags.running,
-    needsYou: !!flags.needsYou, unread: !!flags.unread, pinned: !!flags.pinned, data: key,
+    needsYou: !!flags.needsYou, unread: !!flags.unread, pinned: !!flags.pinned,
+    archived: !!flags.archived, data: key,
   };
 }
 
@@ -26,6 +27,16 @@ describe("latestWithPinned", () => {
     expect(rest.map((r) => r.key)).toEqual(["idle-1h"]);
   });
 
+
+  test("an archived session sinks below every ordinary one in rest", () => {
+    const { rest } = latestWithPinned([
+      row("arch-fresh", "/a", 0, { archived: true }),
+      row("idle-40h", "/a", 40),
+      row("idle-1h", "/a", 1),
+    ]);
+
+    expect(rest.map((r) => r.key)).toEqual(["idle-1h", "idle-40h", "arch-fresh"]);
+  });
 
   test("a three-hour-old session that needs you outranks a one-hour-old idle one", () => {
     // The plan's own acceptance case (§5): waiting on an Allow must not sink
@@ -96,6 +107,21 @@ describe("groupByFolder", () => {
     ], "/Users/dev/cur", HOME);
 
     expect(groups.map((g) => g.label)).toEqual(["cur", "waits", "runs", "quiet", "stale"]);
+  });
+
+  test("archived rows sink to the bottom of their folder, pin or no pin", () => {
+    // What archiving means in the folder view: out of the way, still reachable.
+    // It outranks the pin because it is the later explicit choice.
+    const [g] = groupByFolder([
+      row("arch-pinned", "/a", 1, { archived: true, pinned: true }),
+      row("old", "/a", 40),
+      row("arch-fresh", "/a", 0, { archived: true }),
+      row("new", "/a", 2),
+    ], "/a", HOME);
+
+    // Ranking still applies INSIDE the archived tail — a pin isn't discarded by
+    // archiving, it just stops hoisting the row over the unarchived ones.
+    expect(g.rows.map((r) => r.key)).toEqual(["new", "old", "arch-pinned", "arch-fresh"]);
   });
 
   test("the current folder appears even with no sessions in it yet", () => {

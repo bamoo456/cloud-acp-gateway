@@ -1568,10 +1568,10 @@ describe("Sidebar recent conversations", () => {
     expect(hiddenBtn?.textContent).toBe("1 hidden");
   });
 
-  // Archived conversations drop out of the default list but stay reachable
-  // behind See more (dimmed via .archived); the transcript itself is untouched,
-  // so search keeps finding them without any extra wiring.
-  test("archived conversations hide until See more and toggle from the row menu", async () => {
+  // Archived conversations stay in the list, dimmed (.archived) and sunk to the
+  // bottom; the transcript itself is untouched, so search keeps finding them
+  // without any extra wiring.
+  test("archived conversations sink to the bottom, dimmed, and toggle from the row menu", async () => {
     getHistory.mockResolvedValue([]);
     seedLatestView();
     await seedRecentSessions([
@@ -1582,13 +1582,10 @@ describe("Sidebar recent conversations", () => {
     const { useStore } = await import("../store/store.ts");
     await act(async () => { useStore.setState({ archivedSessions: ["claude\na1"] }); });
 
-    expect(container.textContent).toContain("Ongoing task");
-    expect(container.textContent).not.toContain("Finished task");
-
-    // See more is the way back on screen, and the row comes back dimmed.
-    const seeMore = container.querySelector<HTMLButtonElement>(".see-more");
-    expect(seeMore).not.toBeNull();
-    await act(async () => { seeMore!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    // Still listed — and last, though it is the more recent of the two.
+    const names = Array.from(container.querySelectorAll<HTMLElement>(".sess-item .name"))
+      .map((el) => el.textContent);
+    expect(names).toEqual(["Ongoing task", "Finished task"]);
     const row = Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"))
       .find((el) => el.textContent?.includes("Finished task"))!;
     expect(row.classList.contains("archived")).toBe(true);
@@ -1610,6 +1607,37 @@ describe("Sidebar recent conversations", () => {
     const archive = Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
       .find((b) => b.textContent?.includes("Archive conversation"));
     expect(archive).not.toBeUndefined();
+  });
+
+  // Where an archived conversation goes once See more brings it back: the bottom
+  // of its own folder, however recently it was touched. Out of the way, still in
+  // the project it belongs to.
+  test("folder view: archived rows sort to the bottom of their folder, and the row's archive button toggles", async () => {
+    getHistory.mockResolvedValue([]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "a1", title: "Archived but newest", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/repo", sessionId: "a2", title: "Ongoing task", lastActiveAt: "2026-06-10T03:58:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => { useStore.setState({ archivedSessions: ["claude\na1"] }); });
+
+    // No "See more" in the way: the archived row is in its folder, at the bottom.
+    const titles = Array.from(container.querySelectorAll<HTMLElement>(".fkids .sess-item .name"))
+      .map((el) => el.textContent);
+    expect(titles).toEqual(["Ongoing task", "Archived but newest"]);
+    expect(container.querySelector(".see-more")).toBeNull();
+
+    // The hover affordance beside the trash is the other way in and out, and it
+    // says which way it goes.
+    const { toggleArchivedSession } = await import("../lib/api.ts") as unknown as { toggleArchivedSession: ReturnType<typeof vi.fn> };
+    const rows = Array.from(container.querySelectorAll<HTMLElement>(".fkids .sess-row"));
+    expect(rows[0].querySelector(".sess-arch")!.getAttribute("aria-label")).toBe("Archive conversation");
+    expect(rows[1].querySelector(".sess-arch")!.getAttribute("aria-label")).toBe("Unarchive conversation");
+    await act(async () => {
+      rows[0].querySelector(".sess-arch")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(toggleArchivedSession).toHaveBeenCalledWith("claude", "a2");
   });
 
   // Hiding now starts here, at the folder header — the picker only manages

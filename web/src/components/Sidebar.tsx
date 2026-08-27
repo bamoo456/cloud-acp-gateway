@@ -74,10 +74,11 @@ const rowLabel = (t: RowTarget) => t.name || t.sessionId.slice(0, 8);
 // without the affordance or the menu gestures. A running row keeps both: the
 // trash is disabled (the gateway refuses a delete mid-turn anyway) but renaming
 // or pairing a conversation is exactly what you want WHILE it works.
-function SessionRow({ className, onOpen, target, running, active, pinned, onAskDelete, onMenu, children }: {
+function SessionRow({ className, onOpen, target, running, active, pinned, archived, onAskDelete, onArchive, onMenu, children }: {
   className: string; onOpen: () => void;
-  target?: RowTarget; running?: boolean; active?: boolean; pinned?: boolean;
+  target?: RowTarget; running?: boolean; active?: boolean; pinned?: boolean; archived?: boolean;
   onAskDelete: (t: RowTarget) => void;
+  onArchive: (t: RowTarget) => void;
   onMenu: (t: RowTarget, x: number, y: number) => void;
   children: React.ReactNode;
 }) {
@@ -92,8 +93,16 @@ function SessionRow({ className, onOpen, target, running, active, pinned, onAskD
         {children}
       </button>
       {target && (
-        <button className="sess-del" title="Delete conversation" aria-label="Delete conversation"
-          disabled={running} onClick={() => onAskDelete(target)}><IconTrash /></button>
+        <>
+          {/* Not disabled while running, unlike the trash: archiving only moves
+              the row to the bottom of its folder, which is safe mid-turn — the
+              same reason the row menu always offers it. */}
+          <button className="sess-arch" title={archived ? "Unarchive conversation" : "Archive conversation"}
+            aria-label={archived ? "Unarchive conversation" : "Archive conversation"}
+            onClick={() => onArchive(target)}><IconArchive /></button>
+          <button className="sess-del" title="Delete conversation" aria-label="Delete conversation"
+            disabled={running} onClick={() => onAskDelete(target)}><IconTrash /></button>
+        </>
       )}
     </div>
   );
@@ -470,6 +479,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   const startRename = (t: RowTarget) => { setDraft(t.name); setRenaming(t); };
   const rowActions = {
     onAskDelete: setConfirmDel,
+    onArchive: (t: RowTarget) => s.toggleArchivedSession(t.agentName, t.sessionId),
     onMenu: (t: RowTarget, x: number, y: number) => setRowMenu({ ...t, x, y }),
   };
   const renderItem = (it: TaggedHistory, variant: "recent" | "all" = "all") => {
@@ -480,7 +490,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         onOpen={() => { s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: s.cwd }); onClose(); }}
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: s.cwd, name: it.title || "" }}
         running={isRunning(it.agentName, it.sessionId)} active={active}
-        pinned={isPinned(it.agentName, it.sessionId)} {...rowActions}>
+        pinned={isPinned(it.agentName, it.sessionId)} archived={isArchived(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="name">{it.title || it.sessionId.slice(0, 8)}</span>
@@ -544,7 +554,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         // prefilled with one.
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: named }}
         running={isRunning(it.agentName, it.sessionId)} active={active}
-        pinned={isPinned(it.agentName, it.sessionId)} {...rowActions}>
+        pinned={isPinned(it.agentName, it.sessionId)} archived={isArchived(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -563,7 +573,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
         onOpen={() => { void s.openHistorySession({ sessionId: it.sessionId, title: it.title, agentName: it.agentName, cwd: it.cwd }); onClose(); }}
         target={{ sessionId: it.sessionId, agentName: it.agentName, cwd: it.cwd, name: it.title || "" }}
         running={isRunning(it.agentName, it.sessionId)} active={active}
-        pinned={isPinned(it.agentName, it.sessionId)} {...rowActions}>
+        pinned={isPinned(it.agentName, it.sessionId)} archived={isArchived(it.agentName, it.sessionId)} {...rowActions}>
         {runDot(it.agentName, it.sessionId)}
         {mark(it.agentName)}
         <span className="sess-main">
@@ -607,6 +617,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
       needsYou: needsYouKeys.has(key) || awaitingKeys.has(key),
       unread: unreadKeys.has(key),
       pinned: pinnedKeys.has(key),
+      archived: archivedSet.has(key),
       data: node,
     });
   };
@@ -639,18 +650,17 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // folder's own header or a row menu), the durable inbox still surfaces those
   // prompts elsewhere,
   // and the "N hidden" affordance in .sb-head keeps the cut non-silent.
-  // Archived rows leave the default list the same way old rows do: "See more"
-  // brings them back (dimmed, via .archived). Filtered before hideFolders so
-  // the "N hidden" count keeps meaning folders only.
-  const archivedRowCount = rows.reduce((n, r) => n + (archivedSet.has(r.key) ? 1 : 0), 0);
-  const listedRows = showMore ? rows : rows.filter((r) => !archivedSet.has(r.key));
+  // Archived rows are NOT cut from the list: they sink to the bottom of their
+  // own folder (sessionGroups' rankThen) and read as archived from the dim
+  // (.archived). Archiving says "out of my way", not "out of this project" —
+  // hiding them behind "See more" put them somewhere the folder they belong to
+  // couldn't show them at all.
+  const listedRows = rows;
   const visibleRows = hideFolders(listedRows, s.hiddenFolders, s.cwd, home);
   const hiddenCount = listedRows.length - visibleRows.length;
   // The cap applies to the flat view only: by folder, hiding rows would leave a
-  // folder header claiming a count its children don't add up to. Archived rows
-  // keep the toggle alive too — it is their only way back on screen.
-  const hasMoreRows = visibleRows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt))
-    || archivedRowCount > 0;
+  // folder header claiming a count its children don't add up to.
+  const hasMoreRows = visibleRows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt));
   const folders = groupByFolder(visibleRows, s.cwd, home);
   const { pinned, rest } = latestWithPinned(visibleRows);
   const latestRest = showMore ? rest : rest.slice(0, RECENT_LIMIT);
