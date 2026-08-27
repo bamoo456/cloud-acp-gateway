@@ -166,9 +166,9 @@ describe("global styles", () => {
     // palette — e.g. slate's cool text on paper's warm page.
     const RAMP = ["--bg", "--surface", "--surface-2", "--text", "--muted", "--faint", "--border", "--border-strong"];
     for (const theme of ["slate", "contrast", "sepia"]) {
-      const blocks = styles.match(new RegExp(`:root\\[data-theme="${theme}"\\]\\s*\\{[^}]*\\}`, "g")) ?? [];
+      const blocks = styles.match(new RegExp(`:root(?:\\[data-mode="dark"\\])?\\[data-theme="${theme}"\\]\\s*\\{[^}]*\\}`, "g")) ?? [];
 
-      expect(blocks).toHaveLength(2); // light, and the prefers-color-scheme one
+      expect(blocks).toHaveLength(2); // light, and the data-mode="dark" one
       for (const block of blocks) for (const token of RAMP) expect(block).toContain(token + ":");
     }
   });
@@ -235,10 +235,19 @@ describe("global styles", () => {
   test("dark mode compensates with a much higher prompt-tint mix", () => {
     // The same % that reads against the light --bg is nearly invisible against
     // the near-black dark --bg, so dark gets its own tint, mix and radius.
-    const darkRoot = styles.match(/@media \(prefers-color-scheme: dark\)\s*\{\s*:root\s*\{([^}]*)\}/)?.[1] ?? "";
+    const darkRoot = cssRule(':root[data-mode="dark"]');
     expect(darkRoot).toMatch(/--prompt-tint:\s*#4a6fa5/);
     expect(darkRoot).toMatch(/--prompt-tint-mix:\s*27%/);
     expect(darkRoot).toMatch(/--prompt-radius:\s*10px/);
+  });
+
+  test("dark is the data-mode attribute, never a media query", () => {
+    // lib/theme.ts resolves the mode setting to data-mode="dark" on <html>; a
+    // prefers-color-scheme block would follow the OS behind the setting's back.
+    expect(styles).not.toMatch(/prefers-color-scheme/);
+    // And the browser's own chrome (scrollbars, form controls) follows too.
+    expect(styles).toMatch(/:root\s*\{\s*color-scheme:\s*light;\s*\}/);
+    expect(cssRule(':root[data-mode="dark"]')).toMatch(/color-scheme:\s*dark/);
   });
 
   test("a hairline separates the prompt from the reply", () => {

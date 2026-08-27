@@ -70,6 +70,7 @@ describe("Sidebar recent conversations", () => {
       renameSession: vi.fn(),
       listDir: vi.fn(),
       toggleHiddenFolder: vi.fn().mockResolvedValue([]),
+      togglePinnedSession: vi.fn().mockResolvedValue([]),
     }));
   });
 
@@ -1687,5 +1688,40 @@ describe("Sidebar recent conversations", () => {
     await act(async () => { curRow.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
     expect(Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
       .find((b) => b.textContent?.includes("Open as side chat"))).toBeUndefined();
+  });
+
+  test("latest view: pinning a row toggles through the gateway and hoists it above a fresher one", async () => {
+    seedLatestView();
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/other-repo", sessionId: "x1", title: "Cross folder work", lastActiveAt: "2026-06-10T00:00:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { togglePinnedSession } = await import("../lib/api.ts") as unknown as { togglePinnedSession: ReturnType<typeof vi.fn> };
+    const { useStore } = await import("../store/store.ts");
+
+    const rows = () => Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"));
+    const stale = rows().find((el) => el.textContent?.includes("Cross folder work"))!;
+    expect(stale.querySelector(".sess-pin")).toBeNull();
+
+    await act(async () => { stale.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    const pinItem = Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
+      .find((b) => b.textContent?.includes("Pin conversation"))!;
+    expect(pinItem).not.toBeUndefined();
+    await act(async () => { pinItem.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(togglePinnedSession).toHaveBeenCalledWith("claude", "x1");
+    expect(container.querySelector(".wf-menu")).toBeNull();
+
+    // The gateway is the source of truth for the list, so mirror what it would
+    // return — that is what the badge and the ordering both read.
+    await act(async () => { useStore.setState({ pinnedSessions: ["claude\nx1"] } as any); });
+    const pinned = rows().find((el) => el.textContent?.includes("Cross folder work"))!;
+    expect(pinned.querySelector(".sess-pin")).not.toBeNull();
+    // Oldest row in the list, yet first on screen: the pin outranks recency.
+    expect(rows()[0].textContent).toContain("Cross folder work");
+
+    // And the menu now offers the way back out.
+    await act(async () => { pinned.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })); });
+    expect(Array.from(container.querySelectorAll<HTMLButtonElement>(".wf-menu .wf-menu-row"))
+      .find((b) => b.textContent?.includes("Unpin conversation"))).not.toBeUndefined();
   });
 });
