@@ -13,6 +13,7 @@
 // after every subscriber has been gone a while, so abandoned tabs don't leak
 // shells forever. When the shell itself exits (ctrl-D), the session is gone
 // immediately — subscribers get an `exit` SSE event so the UI can drop the tab.
+import { execFile } from "node:child_process";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -38,6 +39,11 @@ const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 // is killed. Bounded below so a misconfigured "0" or negative doesn't reap
 // instantly out from under a client that's mid-reconnect.
 const IDLE_TTL_MS = Math.max(60_000, Number(process.env.ACPG_TERMINAL_IDLE_TTL_MS) || 30 * 60_000);
+// The composer's "!" escape (/terminal/exec) runs ONE command to completion and
+// feeds what it printed to the model's next prompt — so the cap is prompt-sized
+// (KB, not a scrollback), and the deadline is "interactive-fast or dead".
+const EXEC_TIMEOUT_MS = 30_000;
+const EXEC_MAX_OUTPUT = 64 * 1024;
 
 // Set once by gateway.ts, which alone knows the FS_ROOT containment policy —
 // mirrors how login.ts's registerLoginAgent lets the gateway inject the
@@ -210,6 +216,45 @@ export function handleTerminal(
     res.end(JSON.stringify({
       sessions: [...sessions.entries()].map(([id, s]) => ({ id, running: s.running(), name: s.label() })),
     }));
+    return true;
+  }
+
+  // One-shot command execution for the composer's "!" escape. Not a PTY and
+  // not a session: run, answer with the output, done. Runs non-interactively —
+  // stdin is closed at spawn so `!cat` fails fast instead of sitting on the
+  // deadline waiting for keystrokes that have no way in.
+  if (pathname === "/terminal/exec") {
+    if (req.method !== "POST") { res.writeHead(405); res.end(); return true; }
+    readJson(req, maxPayload).then((body) => {
+      const cmd = body && typeof body.cmd === "string" ? body.cmd.trim() : "";
+      if (!cmd) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "missing cmd" }));
+        return;
+      }
+      const child = execFile(
+        "bash",
+        ["-c", cmd],
+        {
+          cwd: resolveCwd(body && typeof body.cwd === "string" ? body.cwd : ""),
+          timeout: EXEC_TIMEOUT_MS,
+          maxBuffer: EXEC_MAX_OUTPUT,
+          encoding: "utf8",
+          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        },
+        (err, stdout, stderr) => {
+          // Mirrors git-exec.ts: a non-zero exit is a result, not an error.
+          // A kill (deadline, output cap) or spawn failure reports as -1 with
+          // whatever partial output arrived, plus the reason when the command
+          // itself never got to say anything.
+          const code = err && typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : err ? -1 : 0;
+          const reason = code === -1 && !stderr ? String((err as Error | null)?.message ?? "") : "";
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ code, stdout: stdout ?? "", stderr: (stderr ?? "") || reason }));
+        },
+      );
+      child.stdin?.end();
+    });
     return true;
   }
 

@@ -587,7 +587,7 @@ export function Thread({ session, agentReady, loading, findOpen, focusFind = 0, 
           case "plan": return <Plan entries={it.entries} key={it.id} />;
           case "permission": return <PermissionPrompt item={it} key={it.id} />;
           case "elicitation": return <ElicitationPrompt item={it} key={it.id} />;
-          case "note": return <div className={it.variant === "error" ? "err-line" : "loc"} key={it.id}>{it.text}</div>;
+          case "note": return <div className={it.variant === "error" ? "err-line" : it.variant === "shell" ? "shell-note" : "loc"} key={it.id}>{it.text}</div>;
           // thought / assistant never reach here — groupTurns folds them into a turn.
           default: return null;
         }

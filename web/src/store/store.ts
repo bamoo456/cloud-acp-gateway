@@ -10,6 +10,7 @@ import { basename } from "../lib/format.ts";
 import { lastRanOn } from "../lib/engine.ts";
 import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
+import { execCommand, shellContext, shellNote } from "../lib/terminal.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
   EMPTY_ENGINE,
@@ -174,6 +175,11 @@ interface State {
   // park it in the gateway (Agent.reviveQueue already parks frames per session)
   // if it ever has to survive a reload or show up on the phone.
   queuedPrompts: Record<string, QueuedPrompt[]>;
+  // sessionId -> transcripts of "!" commands run since that session's last
+  // prompt, waiting to ride ahead of the next one (runPrompt spends the entry).
+  // Client-memory only, like the queue above: a reload before the next send
+  // drops it — the output is still in the thread, the model just never hears it.
+  shellStash: Record<string, string>;
   joining: boolean; // resolving a ?session= deep-link (show a loading state, not "Ready to code?")
   historyNonce: number; // bumped to ask the sidebar to refresh its conversation list (e.g. after rename)
   recentSessions: RecentSession[];
@@ -252,6 +258,11 @@ interface State {
   // on queue, so from here on this is the only copy — takeQueuedPrompts hands them
   // back, which is what stop does instead of firing or dropping them.
   queuePrompt: (sessionId: string, prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => void;
+  // The composer's "!" escape: run a host shell command (/terminal/exec), show
+  // the transcript in this conversation, and stash it to preface the next
+  // prompt. No agent turn fires — like Claude Code's own "!", the model learns
+  // about it the next time the user actually says something.
+  runShell: (sessionId: string, cmd: string) => Promise<void>;
   // Cut the running turn short and send this message as the next one — the
   // composer's stop button with something typed in the box. The already-queued
   // messages keep their place behind it (V1): an interrupt says "this one first",
@@ -761,7 +772,7 @@ export const useStore = create<State>((set, get) => {
       // Every session on this connection is gone, so anything queued against one
       // has nowhere left to drain. It is dropped with them (see queuedPrompts'
       // per-tab note) rather than left keyed to an id that never comes back.
-      queuedPrompts: {},
+      queuedPrompts: {}, shellStash: {},
       promptStateRevision: get().promptStateRevision + 1,
     });
     // An agent restart is an involuntary reconnect — lock first when the lock is on.
@@ -1033,9 +1044,15 @@ export const useStore = create<State>((set, get) => {
     // is what keeps them all honest — a per-caller guard is what drifts.
     let stopReason: string | undefined;
     try {
+      // Anything "!" ran since this session's last turn rides ahead of the
+      // message as its own text block. Spent BEFORE the send, not after: a turn
+      // that errors must not replay the same transcript on the retry.
+      const shell = get().shellStash[sid];
+      if (shell) set((cur) => { const shellStash = { ...cur.shellStash }; delete shellStash[sid]; return { shellStash }; });
       // text block first (when non-empty), then one image block per attachment,
       // then a block per file reference.
       const prompt: Array<Record<string, unknown>> = [];
+      if (shell) prompt.push({ type: "text", text: shell });
       if (text.trim()) prompt.push({ type: "text", text });
       for (const im of imgs) {
         prompt.push(im.data
@@ -1232,7 +1249,7 @@ export const useStore = create<State>((set, get) => {
       // rateLimits carries over: it's keyed by provider and polled independent
       // of which agent is active, so a different provider's quota is still valid.
       sessions: {}, activeId: null,
-      promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, joining: true,
+      promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
     openConnection();
@@ -1362,7 +1379,7 @@ export const useStore = create<State>((set, get) => {
     promptCapabilities: {},
     pendingPermissions: [],
     promptStateRevision: 0,
-    autoApprove: false, textSize: initialTextSize, busy: false, busySessionIds: {}, queuedPrompts: {},
+    autoApprove: false, textSize: initialTextSize, busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {},
     joining: !!linkParams().session, // deep-link present → show "Joining…" from first paint
     historyNonce: 0,
     recentSessions: readRecentSessions(),
@@ -1458,7 +1475,7 @@ export const useStore = create<State>((set, get) => {
         // the new connection — reopen from the sidebar under the agent that owns
         // them, which is the same rule the "Open as side chat" row is gated on.
         sideWindows: [],
-        promptCapabilities: {}, busy: false, busySessionIds: {}, queuedPrompts: {}, joining: false,
+        promptCapabilities: {}, busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: false,
         promptStateRevision: get().promptStateRevision + 1,
       });
       openConnection();
@@ -1979,6 +1996,30 @@ export const useStore = create<State>((set, get) => {
       setSessionBusy(sessionId, true);
       await runPrompt(sessionId, text, imgs, refs);
       return true;
+    },
+
+    async runShell(sessionId, cmd) {
+      const sess = get().sessions[sessionId];
+      if (!sess) return;
+      // Two notes, not one: the command lands immediately so a slow run has
+      // visible feedback, the output follows when the gateway answers.
+      const note = (text: string, variant: "shell" | "error") =>
+        patch(sessionId, (s) => ({
+          ...s, seq: s.seq + 1, hasContent: true,
+          items: [...s.items, { id: s.id + ":" + (s.seq + 1), kind: "note" as const, variant, text }],
+        }));
+      note("! " + cmd, "shell");
+      touchSessionActivity(sessionId);
+      try {
+        const res = await execCommand(cmd, sess.cwd || get().cwd);
+        note(shellNote(res), "shell");
+        set((cur) => ({
+          shellStash: { ...cur.shellStash, [sessionId]: [cur.shellStash[sessionId], shellContext(cmd, res)].filter(Boolean).join("\n") },
+        }));
+      } catch (e) {
+        // Nothing ran (terminal withheld, gateway away) — nothing to stash.
+        note("Shell error: " + msg(e), "error");
+      }
     },
 
     queuePrompt(sessionId, prompt) {
