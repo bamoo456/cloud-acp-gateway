@@ -1568,10 +1568,11 @@ describe("Sidebar recent conversations", () => {
     expect(hiddenBtn?.textContent).toBe("1 hidden");
   });
 
-  // Archived conversations stay in the list, dimmed (.archived) and sunk to the
-  // bottom; the transcript itself is untouched, so search keeps finding them
-  // without any extra wiring.
-  test("archived conversations sink to the bottom, dimmed, and toggle from the row menu", async () => {
+  // The latest view has no folders to hang a per-project button on, so there the
+  // whole list gets one toggle in the header. Revealed, archived rows are dimmed
+  // (.archived) and sunk to the bottom. The transcript itself is untouched, so
+  // search keeps finding them without any extra wiring.
+  test("latest view: archived conversations hide behind the header toggle, then sink to the bottom, dimmed", async () => {
     getHistory.mockResolvedValue([]);
     seedLatestView();
     await seedRecentSessions([
@@ -1582,10 +1583,17 @@ describe("Sidebar recent conversations", () => {
     const { useStore } = await import("../store/store.ts");
     await act(async () => { useStore.setState({ archivedSessions: ["claude\na1"] }); });
 
-    // Still listed — and last, though it is the more recent of the two.
-    const names = Array.from(container.querySelectorAll<HTMLElement>(".sess-item .name"))
+    // Cut from the default list, but not silently: the count says so.
+    const listed = () => Array.from(container.querySelectorAll<HTMLElement>(".sess-item .name"))
       .map((el) => el.textContent);
-    expect(names).toEqual(["Ongoing task", "Finished task"]);
+    expect(listed()).toEqual(["Ongoing task"]);
+    const archivedBtn = Array.from(container.querySelectorAll<HTMLButtonElement>(".sb-head button"))
+      .find((b) => b.textContent?.includes("archived"))!;
+    expect(archivedBtn.textContent).toBe("show archived");
+
+    // Expanding brings it back — last, though it is the more recent of the two.
+    await act(async () => { archivedBtn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(listed()).toEqual(["Ongoing task", "Finished task"]);
     const row = Array.from(container.querySelectorAll<HTMLButtonElement>(".sess-item"))
       .find((el) => el.textContent?.includes("Finished task"))!;
     expect(row.classList.contains("archived")).toBe(true);
@@ -1609,10 +1617,46 @@ describe("Sidebar recent conversations", () => {
     expect(archive).not.toBeUndefined();
   });
 
-  // Where an archived conversation goes once See more brings it back: the bottom
-  // of its own folder, however recently it was touched. Out of the way, still in
-  // the project it belongs to.
-  test("folder view: archived rows sort to the bottom of their folder, and the row's archive button toggles", async () => {
+  // Two projects, one archive each: opening one must not open the other, and a
+  // project with nothing BUT archived conversations still has to appear — it is
+  // the only place its own reveal button can live.
+  test("folder view: each project's archive opens on its own, including an all-archived one", async () => {
+    getHistory.mockResolvedValue([]);
+    await seedRecentSessions([
+      { agentName: "claude", cwd: "/repo", sessionId: "r1", title: "Current repo work", lastActiveAt: "2026-06-10T03:59:00.000Z" },
+      { agentName: "claude", cwd: "/repo", sessionId: "r2", title: "Repo archive", lastActiveAt: "2026-06-10T03:58:00.000Z" },
+      { agentName: "claude", cwd: "/other-repo", sessionId: "o1", title: "Other repo archive", lastActiveAt: "2026-06-10T03:57:00.000Z" },
+    ]);
+    await renderSidebar();
+    const { useStore } = await import("../store/store.ts");
+    await act(async () => { useStore.setState({ archivedSessions: ["claude\nr2", "claude\no1"] }); });
+
+    const buttons = () => Array.from(container.querySelectorAll<HTMLButtonElement>(".see-more.in-folder"));
+    expect(buttons().map((b) => b.textContent)).toEqual(["Show archived"]);
+    expect(container.textContent).not.toContain("Repo archive");
+    expect(container.textContent).not.toContain("Other repo archive");
+
+    // Opening one project's archive leaves the other project's shut.
+    await act(async () => { buttons()[0].dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(container.textContent).toContain("Repo archive");
+    expect(container.textContent).not.toContain("Other repo archive");
+
+    // The folder with nothing BUT an archive is still listed (a folder that
+    // vanished would take its own way back with it) — expanding it finds the
+    // button, and that button its one conversation.
+    const otherHead = Array.from(container.querySelectorAll<HTMLButtonElement>(".fgroup"))
+      .find((b) => b.textContent?.includes("other-repo"))!;
+    await act(async () => { otherHead.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const otherBtn = buttons().find((b) => b.closest(".folder-group")!.textContent!.includes("other-repo"))!;
+    expect(otherBtn.textContent).toBe("Show archived");
+    await act(async () => { otherBtn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(container.textContent).toContain("Other repo archive");
+  });
+
+  // By folder, the reveal is per project: the folder's own "N archived" button
+  // brings back that folder's archive and nobody else's, to the bottom of the
+  // folder however recently the conversation was touched.
+  test("folder view: a folder's own archived button reveals its archive, sorted to the bottom", async () => {
     getHistory.mockResolvedValue([]);
     await seedRecentSessions([
       { agentName: "claude", cwd: "/repo", sessionId: "a1", title: "Archived but newest", lastActiveAt: "2026-06-10T03:59:00.000Z" },
@@ -1622,11 +1666,22 @@ describe("Sidebar recent conversations", () => {
     const { useStore } = await import("../store/store.ts");
     await act(async () => { useStore.setState({ archivedSessions: ["claude\na1"] }); });
 
-    // No "See more" in the way: the archived row is in its folder, at the bottom.
-    const titles = Array.from(container.querySelectorAll<HTMLElement>(".fkids .sess-item .name"))
+    // Hidden until this folder is asked, then back in it, at the bottom. The
+    // header carries no toggle here — the reveal belongs to the project.
+    const titles = () => Array.from(container.querySelectorAll<HTMLElement>(".fkids .sess-item .name"))
       .map((el) => el.textContent);
-    expect(titles).toEqual(["Ongoing task", "Archived but newest"]);
-    expect(container.querySelector(".see-more")).toBeNull();
+    expect(titles()).toEqual(["Ongoing task"]);
+    expect(Array.from(container.querySelectorAll<HTMLButtonElement>(".sb-head button"))
+      .find((b) => b.textContent?.includes("archived"))).toBeUndefined();
+    // The button sits under that folder's own children; the folder count is what
+    // says how many rows are on screen, so the button doesn't repeat a number.
+    const archivedBtn = container.querySelector<HTMLButtonElement>(".fkids .see-more.in-folder")!;
+    expect(archivedBtn.textContent).toBe("Show archived");
+    expect(container.querySelector(".fgroup .fcount")!.textContent).toBe("1");
+    await act(async () => { archivedBtn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(titles()).toEqual(["Ongoing task", "Archived but newest"]);
+    expect(container.querySelector<HTMLElement>(".fkids .see-more.in-folder")!.textContent).toBe("Hide archived");
+    expect(container.querySelector(".fgroup .fcount")!.textContent).toBe("2");
 
     // The hover affordance beside the trash is the other way in and out, and it
     // says which way it goes.
