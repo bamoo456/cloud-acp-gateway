@@ -197,6 +197,16 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // per-device storage rationale as the view itself.
   const [folderSort, setFolderSort] = useState<FolderSort>(readFolderSort);
   const [viewMenu, setViewMenu] = useState(false);
+  // Which folders have been asked to show their archived conversations, by
+  // folder key. In-memory like showMore and deliberately not persisted: a sticky
+  // reveal would undo the archiving on the next visit. In the latest view, which
+  // has no folders to hang a button on, the "" key stands for the whole list.
+  const [archivedOpen, setArchivedOpen] = useState<Set<string>>(new Set());
+  const toggleArchived = (key: string) => setArchivedOpen((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
   // Folders the reader has explicitly opened or shut (see sessionsView.ts) —
   // the chosen state itself, so a folder becoming current can't invert it.
   const [folderStates, setFolderStates] = useState<Record<string, FolderState>>(readFolderStates);
@@ -294,7 +304,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // search. The filters reset with it: they're deliberately unpersisted, and the
   // panel stays mounted while closed (desktop keeps it as a column), so nothing
   // else would ever drop them. The VIEW is not reset — it is a saved preference.
-  useEffect(() => { if (open) { setShowMore(false); setQ(""); setFilters(DEFAULT_FILTERS); } }, [open]);
+  useEffect(() => { if (open) { setShowMore(false); setArchivedOpen(new Set()); setQ(""); setFilters(DEFAULT_FILTERS); } }, [open]);
   const pickView = (next: SessionsView) => { setView(next); saveSessionsView(next); setViewMenu(false); };
   const pickSort = (next: FolderSort) => { setFolderSort(next); saveFolderSort(next); setViewMenu(false); };
   const setFolderShut = (key: string, shut: boolean) => setFolderStates((prev) => {
@@ -426,8 +436,8 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   const isCurrent = (agentName: string, sessionId: string) =>
     s.agentName === agentName && s.activeId === sessionId;
   // Archived conversations, keyed the same way rows are. They leave the default
-  // list (See more brings them back, dimmed) but the transcript stays put, so
-  // both search tiers still surface them untouched.
+  // list (their folder's "Show archived" brings them back, dimmed) but the transcript
+  // stays put, so both search tiers still surface them untouched.
   const archivedSet = new Set(s.archivedSessions);
   const isArchived = (agentName: string, sessionId: string) => archivedSet.has(agentName + "\n" + sessionId);
   const archivedCls = (agentName: string, sessionId: string) => (isArchived(agentName, sessionId) ? " archived" : "");
@@ -653,24 +663,45 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // folder's own header or a row menu), the durable inbox still surfaces those
   // prompts elsewhere,
   // and the "N hidden" affordance in .sb-head keeps the cut non-silent.
-  // Archived rows are NOT cut from the list: they sink to the bottom of their
-  // own folder (sessionGroups' rankThen) and read as archived from the dim
-  // (.archived). Archiving says "out of my way", not "out of this project" —
-  // hiding them behind "See more" put them somewhere the folder they belong to
-  // couldn't show them at all.
+  // Archived rows leave the default list, one project at a time: each folder
+  // carries its own "Show archived" button at the foot of its children, and only
+  // that folder's archived rows come back when it is clicked. Revealed, they sit
+  // at the bottom of the folder they belong to (sessionGroups' rankThen), dimmed
+  // (.archived) — that is what "See more" got wrong before, it pulled them out of
+  // their folder to show them. The latest view has no folders, so there the whole
+  // list is one group under the "" key, toggled from .sb-head.
+  // Like hideFolders below, this cut wins over sessionGroups' "must not sink out
+  // of sight" rule: an archived row disappears even while running or needing you.
+  // Same three grounds — archiving is explicit, the durable inbox still surfaces
+  // that prompt, and the folder's own button keeps the cut from being silent.
   const listedRows = rows;
-  const visibleRows = hideFolders(listedRows, s.hiddenFolders, s.cwd, home);
-  const hiddenCount = listedRows.length - visibleRows.length;
+  const unhiddenRows = hideFolders(listedRows, s.hiddenFolders, s.cwd, home);
+  const hiddenCount = listedRows.length - unhiddenRows.length;
+  const archivedShown = (cwd: string) => archivedOpen.has(view === "folder" ? folderKey(cwd, home) : "");
+  const visibleRows = unhiddenRows.filter((r) => !r.archived || archivedShown(r.cwd));
+  const hasArchived = unhiddenRows.some((r) => r.archived);
   // The cap applies to the flat view only: by folder, hiding rows would leave a
   // folder header claiming a count its children don't add up to.
   const hasMoreRows = visibleRows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt));
-  const folders = groupByFolder(visibleRows, s.cwd, home, folderSort);
+  // Grouped from the unfiltered list on purpose: a folder whose conversations are
+  // ALL archived still has to appear, or the button that reveals them would have
+  // nowhere to live. Each group drops its own archived rows at render instead.
+  const folders = groupByFolder(unhiddenRows, s.cwd, home, folderSort);
   const { pinned, rest } = latestWithPinned(visibleRows);
-  const latestRest = showMore ? rest : rest.slice(0, RECENT_LIMIT);
+  const capped = showMore ? rest : rest.slice(0, RECENT_LIMIT);
+  // Archived rows sort last in `rest`, so the cap alone can swallow every row the
+  // toggle just revealed — the button would read as broken. Append the ones it cut.
+  const cappedKeys = new Set(capped.map((r) => r.key));
+  const latestRest = archivedOpen.has("")
+    ? [...capped, ...rest.filter((r) => r.archived && !cappedKeys.has(r.key))]
+    : capped;
   // Split the flat recency list into "just happened" and "sometime since" so a
   // long tail of quiet sessions doesn't read as one undifferentiated wall.
   const { fresh, older } = splitByAge(latestRest, now);
-  const listEmpty = visibleRows.length === 0;
+  // By folder, "empty" is the unfiltered list: a folder holding nothing but
+  // archived conversations still has a button to render, so the empty state
+  // must not take the panel over before it gets there.
+  const listEmpty = (view === "folder" ? unhiddenRows : visibleRows).length === 0;
 
   return (
     <>
@@ -723,6 +754,14 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                       {hiddenCount} hidden
                     </button>
                   )}
+                  {/* The folder view puts this on each folder instead — one
+                      project's archive at a time, which is the whole point. */}
+                  {view === "latest" && hasArchived && (
+                    <button type="button" className="view-btn" aria-pressed={archivedOpen.has("")}
+                      onClick={() => toggleArchived("")}>
+                      {archivedOpen.has("") ? "hide archived" : "show archived"}
+                    </button>
+                  )}
                   <span className="sp" />
                   <div className="view-wrap">
                     <button className="view-btn" aria-haspopup="menu" aria-expanded={viewMenu}
@@ -769,6 +808,12 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                     const shut = folderStates[g.key]
                       ? folderStates[g.key] === "shut"
                       : !(g.current || g.running || g.needsYou);
+                    // This folder's archive, revealed only from this folder's own
+                    // button. How many there are is deliberately not on the button:
+                    // it is a number nobody acts on, and the row it labels is one
+                    // more thing to read in a list already dense with them.
+                    const folderArchived = g.rows.some((r) => r.archived);
+                    const shownRows = archivedOpen.has(g.key) ? g.rows : g.rows.filter((r) => !r.archived);
                     return (
                       <div className="folder-group" key={g.key}>
                         <button className={"fgroup" + (shut ? " closed" : "")} title={g.cwd}
@@ -776,7 +821,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                           <span className="tw"><IconChevronDown /></span>
                           <span className="fi"><IconFolder /></span>
                           <span className="fname">{g.label}</span>
-                          <span className="fcount">{g.rows.length}</span>
+                          <span className="fcount">{shownRows.length}</span>
                           {/* One dot for the whole folder, in the row dots' own
                               precedence: blocked on you beats working beats
                               something-to-read. A collapsed folder is the only
@@ -803,7 +848,21 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                             </span>
                           )}
                         </button>
-                        {!shut && <div className="fkids recent-list">{g.rows.map((r) => r.data)}</div>}
+                        {!shut && (
+                          <div className="fkids recent-list">
+                            {shownRows.map((r) => r.data)}
+                            {/* Only this folder's archive, opened from this folder.
+                                `.see-more` is the same "one way out of a bounded
+                                list" affordance the flat view ends with. */}
+                            {folderArchived && (
+                              <button type="button" className="see-more in-folder"
+                                aria-expanded={archivedOpen.has(g.key)}
+                                onClick={() => toggleArchived(g.key)}>
+                                {archivedOpen.has(g.key) ? "Hide archived" : "Show archived"}
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}

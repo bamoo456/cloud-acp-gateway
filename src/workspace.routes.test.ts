@@ -66,6 +66,12 @@ fs.writeFileSync(path.join(TREE, "src", "deep", "nested.ts"), "export const b = 
 fs.writeFileSync(path.join(TREE, "build", "bundle.js"), "// generated\n");
 runTree("add", "-A");
 runTree("commit", "-q", "-m", "initial");
+// A checkout of its own inside the project — a vendored repo or a sibling under
+// a monorepo root. Created after the commit so the outer repo doesn't record it
+// as a gitlink; the tree marks it, the way the folder picker does.
+const NESTED = path.join(TREE, "nested");
+fs.mkdirSync(NESTED, { recursive: true });
+execFileSync("git", ["init", "-q", "-b", "main"], { cwd: NESTED, stdio: "pipe" });
 
 const authHeader = "Basic " + Buffer.from(
   `${process.env.ACPG_AUTH_USER ?? ""}:${process.env.ACPG_AUTH_TOKEN ?? ""}`, "utf8",
@@ -190,7 +196,7 @@ test("anything else is served as an opaque download, never as active content", a
   }
 });
 
-interface TreeBody { path: string; truncated: boolean; entries: Array<{ name: string; dir: boolean; ignored?: boolean; size?: number }> }
+interface TreeBody { path: string; truncated: boolean; entries: Array<{ name: string; dir: boolean; ignored?: boolean; size?: number; git?: boolean }> }
 
 test("/workspace/tree lists one level, folders first, with git's ignored files dimmed rather than hidden", async () => {
   const { get, close } = await startHttpServer();
@@ -203,9 +209,14 @@ test("/workspace/tree lists one level, folders first, with git's ignored files d
     // Folders first, then files, each alphabetical — and dotfiles are present,
     // because a .env you can see in the tree is the point of showing them.
     // `.git` is the one exclusion: plumbing, not project content.
-    assert.deepEqual(names, ["build", "src", ".env", ".gitignore", "ignored.log", "README.md"]);
+    assert.deepEqual(names, ["build", "nested", "src", ".env", ".gitignore", "ignored.log", "README.md"]);
     const by = (n: string) => body.entries.find((e) => e.name === n)!;
     assert.equal(by("src").dir, true);
+    // A folder that is a checkout of its own says so; an ordinary folder and a
+    // file say nothing.
+    assert.equal(by("nested").git, true);
+    assert.equal(by("src").git, undefined);
+    assert.equal(by("README.md").git, undefined);
     assert.equal(by("README.md").dir, false);
     assert.ok((by("README.md").size ?? 0) > 0, "files carry their size");
     // .gitignore names both of these; nothing else is ignored.

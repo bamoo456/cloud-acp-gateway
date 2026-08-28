@@ -286,6 +286,7 @@ export interface TreeEntry {
   size?: number;
   ignored?: boolean;  // git wouldn't track it — dimmed, still listed
   symlink?: boolean;
+  git?: boolean;      // folders only: a checkout of its own
 }
 export interface TreeResult { abs: string; path: string; entries: TreeEntry[]; truncated: boolean }
 export interface FoundFile { path: string; abs: string }
