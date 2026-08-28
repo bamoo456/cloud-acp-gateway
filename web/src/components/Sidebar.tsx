@@ -433,7 +433,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   const isCurrent = (agentName: string, sessionId: string) =>
     s.agentName === agentName && s.activeId === sessionId;
   // Archived conversations, keyed the same way rows are. They leave the default
-  // list (the "N archived" toggle brings them back, dimmed) but the transcript
+  // list (their folder's "Show archived" brings them back, dimmed) but the transcript
   // stays put, so both search tiers still surface them untouched.
   const archivedSet = new Set(s.archivedSessions);
   const isArchived = (agentName: string, sessionId: string) => archivedSet.has(agentName + "\n" + sessionId);
@@ -661,7 +661,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // prompts elsewhere,
   // and the "N hidden" affordance in .sb-head keeps the cut non-silent.
   // Archived rows leave the default list, one project at a time: each folder
-  // carries its own "N archived" button at the foot of its children, and only
+  // carries its own "Show archived" button at the foot of its children, and only
   // that folder's archived rows come back when it is clicked. Revealed, they sit
   // at the bottom of the folder they belong to (sessionGroups' rankThen), dimmed
   // (.archived) — that is what "See more" got wrong before, it pulled them out of
@@ -670,13 +670,13 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // Like hideFolders below, this cut wins over sessionGroups' "must not sink out
   // of sight" rule: an archived row disappears even while running or needing you.
   // Same three grounds — archiving is explicit, the durable inbox still surfaces
-  // that prompt, and the per-folder count keeps the cut from being silent.
+  // that prompt, and the folder's own button keeps the cut from being silent.
   const listedRows = rows;
   const unhiddenRows = hideFolders(listedRows, s.hiddenFolders, s.cwd, home);
   const hiddenCount = listedRows.length - unhiddenRows.length;
   const archivedShown = (cwd: string) => archivedOpen.has(view === "folder" ? folderKey(cwd, home) : "");
   const visibleRows = unhiddenRows.filter((r) => !r.archived || archivedShown(r.cwd));
-  const archivedCount = unhiddenRows.filter((r) => r.archived).length;
+  const hasArchived = unhiddenRows.some((r) => r.archived);
   // The cap applies to the flat view only: by folder, hiding rows would leave a
   // folder header claiming a count its children don't add up to.
   const hasMoreRows = visibleRows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt));
@@ -753,10 +753,10 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                   )}
                   {/* The folder view puts this on each folder instead — one
                       project's archive at a time, which is the whole point. */}
-                  {view === "latest" && archivedCount > 0 && (
+                  {view === "latest" && hasArchived && (
                     <button type="button" className="view-btn" aria-pressed={archivedOpen.has("")}
                       onClick={() => toggleArchived("")}>
-                      {archivedOpen.has("") ? "hide archived" : archivedCount + " archived"}
+                      {archivedOpen.has("") ? "hide archived" : "show archived"}
                     </button>
                   )}
                   <span className="sp" />
@@ -789,9 +789,10 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                     // its own and one you deliberately shut stays shut.
                     const shut = (g.current || g.running || g.needsYou) === folderFlips.has(g.key);
                     // This folder's archive, revealed only from this folder's own
-                    // button. The count is off g.rows, so it says the same number
-                    // whether or not the rows are currently on screen.
-                    const nArchived = g.rows.filter((r) => r.archived).length;
+                    // button. How many there are is deliberately not on the button:
+                    // it is a number nobody acts on, and the row it labels is one
+                    // more thing to read in a list already dense with them.
+                    const folderArchived = g.rows.some((r) => r.archived);
                     const shownRows = archivedOpen.has(g.key) ? g.rows : g.rows.filter((r) => !r.archived);
                     return (
                       <div className="folder-group" key={g.key}>
@@ -833,11 +834,11 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                             {/* Only this folder's archive, opened from this folder.
                                 `.see-more` is the same "one way out of a bounded
                                 list" affordance the flat view ends with. */}
-                            {nArchived > 0 && (
+                            {folderArchived && (
                               <button type="button" className="see-more in-folder"
                                 aria-expanded={archivedOpen.has(g.key)}
                                 onClick={() => toggleArchived(g.key)}>
-                                {archivedOpen.has(g.key) ? "Hide archived" : nArchived + " archived"}
+                                {archivedOpen.has(g.key) ? "Hide archived" : "Show archived"}
                               </button>
                             )}
                           </div>
