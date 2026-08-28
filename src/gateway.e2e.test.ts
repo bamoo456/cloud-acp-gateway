@@ -876,6 +876,31 @@ test("running() reports the session's cwd, captured from session/new and session
   await close();
 });
 
+test("a re-open from another folder does not migrate the session's cwd", async () => {
+  const { port, agent, running, close } = await makeTestServer();
+  const a = sse(port);
+  const conn = await a.conn;
+
+  // Born in /proj/home (session/new pairing, as above).
+  await post(port, conn, { jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd: "/proj/home", mcpServers: [] } });
+  const newReq = agent().sent.map((s) => JSON.parse(s) as Msg).find((o) => o.method === "session/new");
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: newReq!.id, result: { sessionId: "S-home" } })));
+  await new Promise((r) => setTimeout(r, 20));
+
+  // A viewer browsing /proj/elsewhere re-opens the chat: the load must neither
+  // re-tag the session's folder nor reach the agent wearing the viewer's folder
+  // — that cwd decides where the adapter resumes the CLI.
+  await post(port, conn, { jsonrpc: "2.0", id: 2, method: "session/load", params: { sessionId: "S-home", cwd: "/proj/elsewhere", mcpServers: [] } });
+  const fwd = agent().sent.map((s) => JSON.parse(s) as Msg).find((o) => o.method === "session/load");
+  assert.equal((fwd!.params as { cwd?: string }).cwd, "/proj/home", "the forwarded load wears the session's own folder");
+
+  await post(port, conn, { jsonrpc: "2.0", id: 3, method: "session/prompt", params: { sessionId: "S-home", prompt: [{ type: "text", text: "go" }] } });
+  assert.equal(running().find((t) => t.sessionId === "S-home")?.cwd, "/proj/home", "running() still reports the birth folder");
+
+  a.close();
+  await close();
+});
+
 test("a session/load replay does not register as a running task", async () => {
   const { port, agent, running, close } = await makeTestServer();
   const a = sse(port);

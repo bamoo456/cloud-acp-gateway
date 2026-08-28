@@ -41,6 +41,12 @@ export interface FolderGroup<T> {
 
 const byWhen = <T>(a: GroupableRow<T>, b: GroupableRow<T>) => b.when - a.when;
 
+// How the folder view orders its groups. "activity" is the hoisting sort below;
+// "name" is plain alphabetical — no hoists at all, not even the current folder,
+// because the whole point of choosing it is that NOTHING moves when you switch
+// chats or projects. Rows inside a folder keep the activity order either way.
+export type FolderSort = "activity" | "name";
+
 // Ordering, both views, in one place so the two can't drift:
 //   pinned first, then needs you, then running, then most recent.
 // A pin outranks even "needs you" on purpose: it is the one ordering signal the
@@ -52,6 +58,7 @@ export function groupByFolder<T>(
   rows: Array<GroupableRow<T>>,
   currentCwd: string,
   home = "",
+  sort: FolderSort = "activity",
 ): Array<FolderGroup<T>> {
   const currentKey = folderKey(currentCwd, home);
   const groups = new Map<string, FolderGroup<T>>();
@@ -80,6 +87,9 @@ export function groupByFolder<T>(
   }
   const out = [...groups.values()];
   for (const g of out) g.rows.sort(rankThen(byWhen));
+  if (sort === "name") {
+    return out.sort((a, b) => a.label.localeCompare(b.label) || a.key.localeCompare(b.key));
+  }
   const freshest = (g: FolderGroup<T>) => g.rows.reduce((n, r) => Math.max(n, r.when), 0);
   return out.sort((a, b) =>
     Number(b.current) - Number(a.current) ||
