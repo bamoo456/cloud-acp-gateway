@@ -1589,7 +1589,7 @@ describe("Sidebar recent conversations", () => {
     expect(listed()).toEqual(["Ongoing task"]);
     const archivedBtn = Array.from(container.querySelectorAll<HTMLButtonElement>(".sb-head button"))
       .find((b) => b.textContent?.includes("archived"))!;
-    expect(archivedBtn.textContent).toBe("1 archived");
+    expect(archivedBtn.textContent).toBe("show archived");
 
     // Expanding brings it back — last, though it is the more recent of the two.
     await act(async () => { archivedBtn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
@@ -1632,7 +1632,7 @@ describe("Sidebar recent conversations", () => {
     await act(async () => { useStore.setState({ archivedSessions: ["claude\nr2", "claude\no1"] }); });
 
     const buttons = () => Array.from(container.querySelectorAll<HTMLButtonElement>(".see-more.in-folder"));
-    expect(buttons().map((b) => b.textContent)).toEqual(["1 archived"]);
+    expect(buttons().map((b) => b.textContent)).toEqual(["Show archived"]);
     expect(container.textContent).not.toContain("Repo archive");
     expect(container.textContent).not.toContain("Other repo archive");
 
@@ -1648,7 +1648,7 @@ describe("Sidebar recent conversations", () => {
       .find((b) => b.textContent?.includes("other-repo"))!;
     await act(async () => { otherHead.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     const otherBtn = buttons().find((b) => b.closest(".folder-group")!.textContent!.includes("other-repo"))!;
-    expect(otherBtn.textContent).toBe("1 archived");
+    expect(otherBtn.textContent).toBe("Show archived");
     await act(async () => { otherBtn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     expect(container.textContent).toContain("Other repo archive");
   });
@@ -1673,9 +1673,10 @@ describe("Sidebar recent conversations", () => {
     expect(titles()).toEqual(["Ongoing task"]);
     expect(Array.from(container.querySelectorAll<HTMLButtonElement>(".sb-head button"))
       .find((b) => b.textContent?.includes("archived"))).toBeUndefined();
-    // The count is the folder's own, and it sits under that folder's children.
+    // The button sits under that folder's own children; the folder count is what
+    // says how many rows are on screen, so the button doesn't repeat a number.
     const archivedBtn = container.querySelector<HTMLButtonElement>(".fkids .see-more.in-folder")!;
-    expect(archivedBtn.textContent).toBe("1 archived");
+    expect(archivedBtn.textContent).toBe("Show archived");
     expect(container.querySelector(".fgroup .fcount")!.textContent).toBe("1");
     await act(async () => { archivedBtn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     expect(titles()).toEqual(["Ongoing task", "Archived but newest"]);
