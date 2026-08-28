@@ -15,9 +15,9 @@ import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPen
   Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { folderKey, homeFrom } from "../lib/folderKey.ts";
-import { groupByFolder, latestWithPinned, splitByAge, hideFolders, type GroupableRow } from "../lib/sessionGroups.ts";
+import { groupByFolder, latestWithPinned, splitByAge, hideFolders, type FolderSort, type GroupableRow } from "../lib/sessionGroups.ts";
 import {
-  readSessionsView, saveSessionsView, readFolderOverrides, saveFolderOverrides, type SessionsView,
+  readSessionsView, saveSessionsView, readFolderSort, saveFolderSort, readFolderStates, saveFolderStates, type FolderState, type SessionsView,
 } from "../lib/sessionsView.ts";
 import type { AgentRef } from "../types.ts";
 
@@ -193,6 +193,9 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // local, not the cross-device prefs KV, because a phone and a desktop want
   // different views of the same sessions (§4.3).
   const [view, setView] = useState<SessionsView>(readSessionsView);
+  // How the folder view orders its groups — the reader's choice, same
+  // per-device storage rationale as the view itself.
+  const [folderSort, setFolderSort] = useState<FolderSort>(readFolderSort);
   const [viewMenu, setViewMenu] = useState(false);
   // Which folders have been asked to show their archived conversations, by
   // folder key. In-memory like showMore and deliberately not persisted: a sticky
@@ -204,9 +207,9 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
-  // Folders the reader has toggled away from their default state (see
-  // sessionsView.ts) — NOT a list of collapsed folders.
-  const [folderFlips, setFolderFlips] = useState<Set<string>>(readFolderOverrides);
+  // Folders the reader has explicitly opened or shut (see sessionsView.ts) —
+  // the chosen state itself, so a folder becoming current can't invert it.
+  const [folderStates, setFolderStates] = useState<Record<string, FolderState>>(readFolderStates);
   // In-memory only, by design: neither localStorage nor the cross-device `meta` KV
   // that holds text_size/screen_lock. A sticky custom range that silently applies
   // to the next search is worse than re-picking it.
@@ -303,10 +306,10 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // else would ever drop them. The VIEW is not reset — it is a saved preference.
   useEffect(() => { if (open) { setShowMore(false); setArchivedOpen(new Set()); setQ(""); setFilters(DEFAULT_FILTERS); } }, [open]);
   const pickView = (next: SessionsView) => { setView(next); saveSessionsView(next); setViewMenu(false); };
-  const toggleFolder = (key: string) => setFolderFlips((prev) => {
-    const next = new Set(prev);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    saveFolderOverrides(next);
+  const pickSort = (next: FolderSort) => { setFolderSort(next); saveFolderSort(next); setViewMenu(false); };
+  const setFolderShut = (key: string, shut: boolean) => setFolderStates((prev) => {
+    const next: Record<string, FolderState> = { ...prev, [key]: shut ? "shut" : "open" };
+    saveFolderStates(next);
     return next;
   });
   // refresh the list in place (no loading flash) when something renames a session
@@ -683,7 +686,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // Grouped from the unfiltered list on purpose: a folder whose conversations are
   // ALL archived still has to appear, or the button that reveals them would have
   // nowhere to live. Each group drops its own archived rows at render instead.
-  const folders = groupByFolder(unhiddenRows, s.cwd, home);
+  const folders = groupByFolder(unhiddenRows, s.cwd, home, folderSort);
   const { pinned, rest } = latestWithPinned(visibleRows);
   const capped = showMore ? rest : rest.slice(0, RECENT_LIMIT);
   // Archived rows sort last in `rest`, so the cap alone can swallow every row the
@@ -775,6 +778,19 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                           <button className="view-item" role="menuitem" onClick={() => pickView("latest")}>
                             <span className="tick">{view === "latest" && <IconCheck />}</span>Latest updated
                           </button>
+                          {/* Folder ordering, folder view only: "by name" holds
+                              every group still no matter which chat is active. */}
+                          {view === "folder" && (
+                            <>
+                              <div className="view-div" />
+                              <button className="view-item" role="menuitem" onClick={() => pickSort("activity")}>
+                                <span className="tick">{folderSort === "activity" && <IconCheck />}</span>Sort by activity
+                              </button>
+                              <button className="view-item" role="menuitem" onClick={() => pickSort("name")}>
+                                <span className="tick">{folderSort === "name" && <IconCheck />}</span>Sort by name
+                              </button>
+                            </>
+                          )}
                         </div>
                       </>
                     )}
@@ -784,10 +800,14 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                   {listEmpty && <div className="panel-empty">No recent conversations yet.</div>}
                   {!listEmpty && view === "folder" && folders.map((g) => {
                     // Open by default when you are in it or something in it is
-                    // running / waiting on you; collapsed otherwise. The stored
-                    // set flips that, so a folder that starts running opens on
-                    // its own and one you deliberately shut stays shut.
-                    const shut = (g.current || g.running || g.needsYou) === folderFlips.has(g.key);
+                    // running / waiting on you; collapsed otherwise. A folder
+                    // the reader toggled keeps the state they chose — an
+                    // absolute state, not a flip of the default, or opening a
+                    // chat in a hand-opened folder would slam it shut the
+                    // moment that folder became the current one.
+                    const shut = folderStates[g.key]
+                      ? folderStates[g.key] === "shut"
+                      : !(g.current || g.running || g.needsYou);
                     // This folder's archive, revealed only from this folder's own
                     // button. How many there are is deliberately not on the button:
                     // it is a number nobody acts on, and the row it labels is one
@@ -797,7 +817,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                     return (
                       <div className="folder-group" key={g.key}>
                         <button className={"fgroup" + (shut ? " closed" : "")} title={g.cwd}
-                          aria-expanded={!shut} onClick={() => toggleFolder(g.key)}>
+                          aria-expanded={!shut} onClick={() => setFolderShut(g.key, !shut)}>
                           <span className="tw"><IconChevronDown /></span>
                           <span className="fi"><IconFolder /></span>
                           <span className="fname">{g.label}</span>

@@ -3367,13 +3367,45 @@ class Channel {
   private forwardClientRequest(conn: Conn, f: Frame, _line: Buffer): void {
     const method = typeof f.method === "string" ? f.method : "";
     const sid = sessionIdOf(f);
-    const cwd = cwdOf(f);
+    let cwd = cwdOf(f);
+    // The folder a session was created in is authoritative for its lifetime.
+    // A client re-opening a chat sends ITS current folder on session/load, and
+    // letting that overwrite the known cwd made conversations migrate between
+    // projects in every sidebar — and, forwarded as-is, made the adapter resume
+    // the CLI in whatever folder the viewer happened to be browsing. Trust what
+    // is already known, rewriting the load frame so the agent sees the real
+    // folder too; a client cwd only seeds a session this gateway doesn't know
+    // yet (its own session/new is paired on the response, below).
+    // session/load ONLY: a session/fork also carries the SOURCE session's id,
+    // but its cwd belongs to the session the fork is about to create — the
+    // response pairing below owns that, and "correcting" it here would clobber
+    // the fork's own folder with the source's.
+    const known = sid ? this.sessionCwd.get(sid) : undefined;
+    if (known && cwd && cwd !== known && method === "session/load") {
+      (f.params as { cwd?: string }).cwd = known;
+      cwd = known;
+    }
     if (sid) this.subs.subscribe(conn.id, sid); // session/load, session/prompt
     if (sid) this.touchSession(sid, cwd ?? undefined); // client activity keeps it alive
     // Capture the folder for sessions whose id is already known (session/load,
     // and any prompt that carries a cwd). session/new has no id yet — its cwd
     // is paired on the response instead, so it rides along in the idmux Origin.
-    if (sid && cwd) this.sessionCwd.set(sid, cwd);
+    if (sid && cwd) {
+      // A load that SEEDS the folder (first sighting, e.g. after a restart) is
+      // trusting the viewer's folder, which is wherever they happened to be
+      // browsing. The transcript on disk records the real one — correct the
+      // seed as soon as it can be read. Fire-and-forget: this is attribution
+      // data, and the claude-only helper is the one that exists.
+      if (!known && method === "session/load" && !this.isCodex) {
+        void findClaudeSessionFileById(sid)
+          .then(async (file) => {
+            const real = file ? (await claudeTranscriptSummary(file)).cwd : null;
+            if (real) this.sessionCwd.set(sid, real);
+          })
+          .catch(() => { /* attribution is best-effort */ });
+      }
+      this.sessionCwd.set(sid, cwd);
+    }
     // Mirror this client's prompt to the OTHER devices viewing the same session,
     // as a synthesized user_message_chunk. Notifications (the agent's reply)
     // broadcast to everyone, but the prompt text itself never leaves the sending
@@ -3441,7 +3473,11 @@ class Channel {
   // history rendered, so re-broadcasting it would duplicate. Concurrent frames for
   // the same session queue behind the single in-flight load.
   private reviveThenForward(conn: Conn, sid: string, cwd: string | null, line: Buffer): void {
-    const loadCwd = cwd ?? this.reaped.get(sid)?.cwd ?? "";
+    // The gateway's own record of the session's folder outranks the touching
+    // client's — same reason forwardClientRequest prefers the known cwd: the
+    // toucher may be browsing another project entirely, and this cwd decides
+    // where the adapter resumes the CLI.
+    const loadCwd = this.reaped.get(sid)?.cwd ?? cwd ?? "";
     const q = this.parkFrame(conn, sid, line);
     if (q.length > 1) return; // a re-load is already in flight for this session
     this.touchSession(sid, loadCwd || undefined); // re-tracks it (and clears `reaped`)
