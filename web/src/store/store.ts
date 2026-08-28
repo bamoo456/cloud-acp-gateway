@@ -1185,6 +1185,20 @@ export const useStore = create<State>((set, get) => {
     return { ...session, engine: { ...session.engine, commands } };
   }
 
+  // A session rebuilt from scratch — joinSession, openSideChat — starts from
+  // makeSession's EMPTY_ENGINE and then folds the session/load result. That
+  // result carries models, modes and configOptions but NOT the command list:
+  // the adapter sends that as its own available_commands_update, a few
+  // milliseconds after the load answers. The rebuild happens after a SECOND
+  // round trip (the history fetch), so the list has usually already landed on
+  // the session about to be replaced — and replacing it dropped the list while
+  // repopulating everything else, which is why the dock read out a model and
+  // effort while the slash menu stayed empty. Carry it across the rebuild.
+  function carryCommands(base: Session, prev: Session | undefined): Session {
+    const commands = prev?.engine.commands;
+    return commands?.length ? { ...base, engine: { ...base.engine, commands } } : base;
+  }
+
   function adopt(res: NewSessionResult) {
     const baseSession = makeSession(res.sessionId, Date.now(), { agentName: get().agentName, cwd: get().cwd });
     const session = adoptEngine(baseSession, res);
@@ -1234,7 +1248,9 @@ export const useStore = create<State>((set, get) => {
       const lr = (await acp.request("session/load", { sessionId: id, cwd: get().cwd || "", mcpServers: [] })) as NewSessionResult;
       const r = await getMessages(get().agentName, get().cwd, id, historyPageFor(atMessage));
       set((st) => {
-        const base = makeSession(id, st.sessions[id]?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd });
+        const prev = st.sessions[id];
+        const base = carryCommands(
+          makeSession(id, prev?.createdAt ?? Date.now(), { agentName: get().agentName, cwd: get().cwd }), prev);
         const cur = applyHistoryMessages({ ...base, historyStart: r.start }, r.messages);
         const ready = appendPendingPermissions(
           { ...applyModelsModes(cur, lr), suppressReplay: false, viewOnly: false }, st.pendingPermissions);
@@ -2288,7 +2304,8 @@ export const useStore = create<State>((set, get) => {
           // window the reader just dismissed.
           const shell = st.sessions[id];
           if (!shell) return {};
-          const base = makeSession(id, shell.createdAt, { agentName: target.agentName, cwd: target.cwd });
+          const base = carryCommands(
+            makeSession(id, shell.createdAt, { agentName: target.agentName, cwd: target.cwd }), shell);
           const cur = applyHistoryMessages({ ...base, title: shell.title, historyStart: r.start }, r.messages);
           // The load result lands on THIS session — its model/mode and the lists
           // its dock offers alike (Session.engine). That is the whole reason the
