@@ -294,4 +294,58 @@ describe("FileTree", () => {
     await act(async () => { await flush(); });
     expect(getWorkspaceTree).toHaveBeenCalledTimes(2);
   });
+
+  test("an absolute path is opened as itself, not searched for", async () => {
+    await render();
+    const input = container.querySelector<HTMLInputElement>(".wf-find input")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "/tmp/eli5/what-we-fixed.html");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await settle(); });
+
+    // The index is rooted at /repo, so searching for a /tmp path can only ever
+    // come back empty — asking at all is the bug.
+    expect(findWorkspaceFiles).not.toHaveBeenCalled();
+    expect(rowNamed("what-we-fixed.html")).toBeDefined();
+
+    await click(rowNamed("what-we-fixed.html"));
+    expect(onOpenFile).toHaveBeenCalledWith({
+      abs: "/tmp/eli5/what-we-fixed.html", name: "what-we-fixed.html",
+    });
+  });
+
+  test("Contents still greps a term that looks like a path", async () => {
+    await render();
+    const input = container.querySelector<HTMLInputElement>(".wf-find input")!;
+    await act(async () => {
+      [...container.querySelectorAll<HTMLElement>(".wf-find-scope button")]
+        .find((b) => b.textContent === "Contents")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "/workspace/raw");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await settleGrep(); });
+
+    // A route string is an ordinary thing to grep for. The scope the reader
+    // picked decides, not the shape of what they typed.
+    expect(grepWorkspace).toHaveBeenCalledWith("/repo", "/workspace/raw");
+    expect(container.textContent).not.toContain("Opens this exact path");
+  });
+
+  test("a path typed with a trailing slash still names something", async () => {
+    await render();
+    const input = container.querySelector<HTMLInputElement>(".wf-find input")!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "/tmp/eli5/");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { await settle(); });
+
+    await click(rowNamed("eli5"));
+    expect(onOpenFile).toHaveBeenCalledWith({ abs: "/tmp/eli5", name: "eli5" });
+  });
 });
