@@ -3366,9 +3366,13 @@ class Channel {
     // is already known, rewriting the load frame so the agent sees the real
     // folder too; a client cwd only seeds a session this gateway doesn't know
     // yet (its own session/new is paired on the response, below).
+    // session/load ONLY: a session/fork also carries the SOURCE session's id,
+    // but its cwd belongs to the session the fork is about to create — the
+    // response pairing below owns that, and "correcting" it here would clobber
+    // the fork's own folder with the source's.
     const known = sid ? this.sessionCwd.get(sid) : undefined;
-    if (known && cwd && cwd !== known) {
-      if (method === "session/load") (f.params as { cwd?: string }).cwd = known;
+    if (known && cwd && cwd !== known && method === "session/load") {
+      (f.params as { cwd?: string }).cwd = known;
       cwd = known;
     }
     if (sid) this.subs.subscribe(conn.id, sid); // session/load, session/prompt
