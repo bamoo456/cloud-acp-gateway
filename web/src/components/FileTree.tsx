@@ -196,6 +196,35 @@ function Results({ cwd, query, onOpenFile, onMenu }: {
   );
 }
 
+// An absolute path typed into the box, opened as itself.
+//
+// The name index is rooted at the folder being browsed, so it can never match a
+// path outside it — and a path outside it is exactly what gets typed here: the
+// artifact an agent wrote through a shell, which `Bash` reports as a command and
+// never as a path, so no list in this panel knows it exists (see touchedFiles.ts).
+// The gateway will resolve any path its preview roots allow, which is what makes
+// this reachable at all.
+//
+// Nothing is fetched to check the file is there. A wrong path is reported by the
+// viewer, which has to handle a file that vanished anyway.
+function PathRow({ path, onOpenFile, onMenu }: {
+  path: string; onOpenFile: (e: { abs: string; name: string }) => void;
+  onMenu: (e: { abs: string; name: string }, x: number, y: number) => void;
+}) {
+  // A trailing slash is how a folder is typed, and it would otherwise leave the
+  // row with an empty name.
+  const abs = path.replace(/\/+$/, "") || "/";
+  const found = { abs, name: abs.slice(abs.lastIndexOf("/") + 1) };
+  return (
+    <>
+      <ResultRow file={{ abs, path: abs }}
+        onOpen={() => onOpenFile(found)}
+        onMenu={(x, y) => onMenu(found, x, y)} />
+      <div className="wf-note">Opens this exact path, wherever it is on the host.</div>
+    </>
+  );
+}
+
 // One file's matching lines. The whole block is the button — a header row plus
 // its hits — so a match is as easy to hit with a thumb as a file row is, and so
 // the long-press menu covers the lines too. Opening lands at the top of the
@@ -316,10 +345,10 @@ export function FileTree({ cwd, reloadKey, onOpenFile, onMenu }: {
       <div className="wf-find">
         <input
           type="search"
-          placeholder={scope === "text" ? "Search in files" : "Find files"}
+          placeholder={scope === "text" ? "Search in files" : "Find files, or paste a path"}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          aria-label={scope === "text" ? "Search file contents" : "Find files by name"}
+          aria-label={scope === "text" ? "Search file contents" : "Find files by name, or open an absolute path"}
         />
         {/* Two searches, one box: the same words are how you look for a file
             and how you look for what is written in one, and which of those you
@@ -337,7 +366,12 @@ export function FileTree({ cwd, reloadKey, onOpenFile, onMenu }: {
               onOpenFile={(e) => onOpenFile({ abs: e.abs, name: e.name })}
               onMenu={(e, x, y) => onMenu({ abs: e.abs, name: e.name, isDir: e.dir }, x, y)} />
           : scope === "name"
-            ? <Results cwd={cwd} query={q} onOpenFile={onOpenFile} onMenu={onMenu} />
+            // Only under Names, and only there: "/api/" is an ordinary thing to
+            // grep for, and the scope is the reader's choice to make — the same
+            // reason the two searches are a switch rather than a guess.
+            ? q.startsWith("/")
+              ? <PathRow path={q} onOpenFile={onOpenFile} onMenu={onMenu} />
+              : <Results cwd={cwd} query={q} onOpenFile={onOpenFile} onMenu={onMenu} />
             : q.length < MIN_GREP_LEN
               ? <div className="wf-empty">Type at least {MIN_GREP_LEN} characters to search file contents.</div>
               : <TextResults cwd={cwd} query={q} onOpenFile={onOpenFile} onMenu={onMenu} />}
