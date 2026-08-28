@@ -41,13 +41,20 @@ function Row({ entry, depth, open, onClick, onMenu }: {
       style={{ paddingLeft: 10 + depth * INDENT_PX }}
       onClick={onClick}
       {...menu}
-      title={entry.ignored ? entry.abs + " — git ignores this" : entry.abs}
+      title={
+        entry.ignored ? entry.abs + " — git ignores this"
+          : entry.git ? entry.abs + " — a git checkout of its own"
+            : entry.abs
+      }
     >
       <span className="wf-twist">
         {entry.dir ? (open ? <IconChevronDown /> : <IconChevronRight />) : null}
       </span>
       <span className={"wf-mark wf-kind"}>{entry.dir ? <IconFolder /> : fileIcon(kind.icon)}</span>
       <span className="wf-name"><span className="wf-nm">{entry.name}</span></span>
+      {/* Same badge the folder picker puts on a checkout, in the same column the
+          file rows use for their size — a folder row had nothing to say there. */}
+      {entry.dir && entry.git && <span className="wf-repo">git</span>}
       {!entry.dir && entry.size !== undefined && (
         <span className="wf-size">{formatBytes(entry.size)}</span>
       )}
