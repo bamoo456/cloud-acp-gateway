@@ -177,6 +177,7 @@ export interface TreeEntry {
   size?: number;      // files only
   ignored?: boolean;  // git would not track it — dimmed, not hidden
   symlink?: boolean;  // shown, but never descended into by find()
+  git?: boolean;      // folders only: a checkout of its own, as the folder picker marks them
 }
 
 export interface TreeResult {
@@ -858,11 +859,16 @@ export async function tree(cwd: string, abs: string, displayPath: string): Promi
     if (symlink) { try { dir = fs.statSync(child).isDirectory(); } catch { dir = false; } }
     let size: number | undefined;
     if (!dir) { try { size = fs.statSync(child).size; } catch { /* unreadable, or a dead link */ } }
+    // A nested checkout — a submodule, a vendored repo, a sibling project under
+    // a monorepo root. The folder picker marks these already; the tree is the
+    // other place you go looking for "is that its own repo?".
+    const isRepo = dir && fs.existsSync(path.join(child, ".git"));
     return {
       name: e.name, abs: child, dir,
       ...(size === undefined ? {} : { size }),
       ...(ignored.has(e.name) ? { ignored: true } : {}),
       ...(symlink ? { symlink: true } : {}),
+      ...(isRepo ? { git: true } : {}),
     };
   });
   return { abs, path: displayPath, entries: sortTreeEntries(entries), truncated };
