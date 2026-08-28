@@ -1,6 +1,6 @@
 {
   "name": "acp-gateway",
-  "version": "2.7.0-node20",
+  "version": "2.8.0-node20",
   "private": true,
   "description": "SSE+POST gateway fronting one or more ACP agents for remote mobile control over a VPN",
   "engines": {
