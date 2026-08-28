@@ -15,9 +15,9 @@ import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPen
   Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { folderKey, homeFrom } from "../lib/folderKey.ts";
-import { groupByFolder, latestWithPinned, splitByAge, hideFolders, type GroupableRow } from "../lib/sessionGroups.ts";
+import { groupByFolder, latestWithPinned, splitByAge, hideFolders, type FolderSort, type GroupableRow } from "../lib/sessionGroups.ts";
 import {
-  readSessionsView, saveSessionsView, readFolderOverrides, saveFolderOverrides, type SessionsView,
+  readSessionsView, saveSessionsView, readFolderSort, saveFolderSort, readFolderOverrides, saveFolderOverrides, type SessionsView,
 } from "../lib/sessionsView.ts";
 import type { AgentRef } from "../types.ts";
 
@@ -193,6 +193,9 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // local, not the cross-device prefs KV, because a phone and a desktop want
   // different views of the same sessions (§4.3).
   const [view, setView] = useState<SessionsView>(readSessionsView);
+  // How the folder view orders its groups — the reader's choice, same
+  // per-device storage rationale as the view itself.
+  const [folderSort, setFolderSort] = useState<FolderSort>(readFolderSort);
   const [viewMenu, setViewMenu] = useState(false);
   // Folders the reader has toggled away from their default state (see
   // sessionsView.ts) — NOT a list of collapsed folders.
@@ -293,6 +296,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // else would ever drop them. The VIEW is not reset — it is a saved preference.
   useEffect(() => { if (open) { setShowMore(false); setQ(""); setFilters(DEFAULT_FILTERS); } }, [open]);
   const pickView = (next: SessionsView) => { setView(next); saveSessionsView(next); setViewMenu(false); };
+  const pickSort = (next: FolderSort) => { setFolderSort(next); saveFolderSort(next); setViewMenu(false); };
   const toggleFolder = (key: string) => setFolderFlips((prev) => {
     const next = new Set(prev);
     if (next.has(key)) next.delete(key); else next.add(key);
@@ -661,7 +665,7 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // The cap applies to the flat view only: by folder, hiding rows would leave a
   // folder header claiming a count its children don't add up to.
   const hasMoreRows = visibleRows.length > RECENT_LIMIT || allItems.some((it) => !withinRecentWindow(it.updatedAt));
-  const folders = groupByFolder(visibleRows, s.cwd, home);
+  const folders = groupByFolder(visibleRows, s.cwd, home, folderSort);
   const { pinned, rest } = latestWithPinned(visibleRows);
   const latestRest = showMore ? rest : rest.slice(0, RECENT_LIMIT);
   // Split the flat recency list into "just happened" and "sometime since" so a
@@ -736,6 +740,19 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
                           <button className="view-item" role="menuitem" onClick={() => pickView("latest")}>
                             <span className="tick">{view === "latest" && <IconCheck />}</span>Latest updated
                           </button>
+                          {/* Folder ordering, folder view only: "by name" holds
+                              every group still no matter which chat is active. */}
+                          {view === "folder" && (
+                            <>
+                              <div className="view-div" />
+                              <button className="view-item" role="menuitem" onClick={() => pickSort("activity")}>
+                                <span className="tick">{folderSort === "activity" && <IconCheck />}</span>Sort by activity
+                              </button>
+                              <button className="view-item" role="menuitem" onClick={() => pickSort("name")}>
+                                <span className="tick">{folderSort === "name" && <IconCheck />}</span>Sort by name
+                              </button>
+                            </>
+                          )}
                         </div>
                       </>
                     )}

@@ -211,6 +211,28 @@ describe("hideFolders", () => {
   });
 });
 
+describe("sort by name", () => {
+  test("groups sort alphabetically, ignoring every hoist — activity, pins, even the current folder", () => {
+    const groups = groupByFolder([
+      row("z-busy", "/Users/dev/zeta", 0, { running: true, needsYou: true }),
+      row("m-pin", "/Users/dev/mid", 40, { pinned: true }),
+      row("a-stale", "/Users/dev/alpha", 90),
+    ], "/Users/dev/zeta", HOME, "name");
+
+    expect(groups.map((g) => g.label)).toEqual(["alpha", "mid", "zeta"]);
+  });
+
+  test("rows inside a folder keep the activity order", () => {
+    const groups = groupByFolder([
+      row("old", "/Users/dev/repo", 40),
+      row("pin", "/Users/dev/repo", 50, { pinned: true }),
+      row("new", "/Users/dev/repo", 1),
+    ], "", HOME, "name");
+
+    expect(groups[0].rows.map((r) => r.key)).toEqual(["pin", "new", "old"]);
+  });
+});
+
 describe("pins in the folder view", () => {
   test("a pinned row sorts to the top of its folder, and its folder above quieter ones", () => {
     const groups = groupByFolder([

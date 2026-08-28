@@ -4,9 +4,12 @@
 // that holds text_size / screen_lock: a phone and a desktop usually want
 // different views of the same list, and a folder you collapsed on one has no
 // bearing on the other (docs/ui-refactor-plan.md §4.3 / P4.3).
+import type { FolderSort } from "./sessionGroups.ts";
+
 export type SessionsView = "folder" | "latest";
 
 const VIEW_KEY = "acpg.sessionsView";
+const SORT_KEY = "acpg.folderSort";
 const OVERRIDES_KEY = "acpg.folderOverrides";
 
 function read(key: string): string | null {
@@ -22,6 +25,16 @@ export function readSessionsView(): SessionsView {
 
 export function saveSessionsView(view: SessionsView): void {
   write(VIEW_KEY, view);
+}
+
+// How the folder view orders its groups (see sessionGroups.FolderSort).
+// Same storage choice as the view itself: local, per-device.
+export function readFolderSort(): FolderSort {
+  return read(SORT_KEY) === "name" ? "name" : "activity";
+}
+
+export function saveFolderSort(sort: FolderSort): void {
+  write(SORT_KEY, sort);
 }
 
 // A folder's default is open when it is the one you are working in or has
