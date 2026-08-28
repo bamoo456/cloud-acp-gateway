@@ -1899,7 +1899,16 @@
   /* git wouldn't track it. Dimmed rather than hidden: "why is dist grey" is a
      better question to leave a reader with than "where is dist". */
   .wf-tree-row.ignored .wf-nm,
+  .wf-tree-row.ignored .wf-repo,
   .wf-tree-row.ignored .wf-mark { opacity: .45; font-style: italic; }
+  /* Same badge as the folder picker's `.dir .git`, in the tree's own row.
+     Unlike the size column it does not hide until hover: it marks the handful
+     of folders that are repos of their own, and a mark you have to hunt for
+     with the pointer is not a mark. */
+  .wf-repo {
+    flex: 0 0 auto; font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px;
+  }
   .wf-size {
     flex: 0 0 auto; font-size: 11.5px; color: var(--muted);
     font-family: var(--mono);

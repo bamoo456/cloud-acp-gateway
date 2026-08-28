@@ -16,6 +16,7 @@ const settleGrep = () => new Promise((r) => setTimeout(r, 360));
 const ROOT: TreeEntry[] = [
   { name: "src", abs: "/repo/src", dir: true },
   { name: "dist", abs: "/repo/dist", dir: true, ignored: true },
+  { name: "vendor", abs: "/repo/vendor", dir: true, git: true },
   { name: ".env", abs: "/repo/.env", dir: false, size: 40 },
   { name: "README.md", abs: "/repo/README.md", dir: false, size: 1024 },
 ];
@@ -84,12 +85,20 @@ describe("FileTree", () => {
     await render();
     expect(getWorkspaceTree).toHaveBeenCalledWith("/repo", undefined);
     expect(rows().map((r) => r.querySelector(".wf-nm")?.textContent))
-      .toEqual(["src", "dist", ".env", "README.md"]);
+      .toEqual(["src", "dist", "vendor", ".env", "README.md"]);
     // Hidden would leave "where is dist" unanswerable; dimmed says why.
     expect(rowNamed("dist")?.className).toContain("ignored");
     expect(rowNamed("src")?.className).not.toContain("ignored");
     // A dotfile is an ordinary row — the whole point of showing them.
     expect(rowNamed(".env")).toBeDefined();
+  });
+
+  test("a folder that is its own checkout is badged, as the folder picker badges it", async () => {
+    await render();
+    expect(rowNamed("vendor")?.querySelector(".wf-repo")?.textContent).toBe("git");
+    // The badge is the folder's, not every folder's, and never a file's.
+    expect(rowNamed("src")?.querySelector(".wf-repo")).toBeNull();
+    expect(rowNamed("README.md")?.querySelector(".wf-repo")).toBeNull();
   });
 
   test("a folder lists its children only once it is opened", async () => {
