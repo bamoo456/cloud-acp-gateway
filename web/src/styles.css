@@ -443,6 +443,7 @@
   .view-item:hover { background: var(--surface-2); }
   .view-item .tick { flex: 0 0 auto; display: grid; place-items: center; width: 13px; color: var(--text); }
   .view-item .tick svg { width: 13px; height: 13px; }
+  .view-div { height: 1px; margin: 4px 3px; background: var(--border-strong); }
   #panel .recent-tab { flex: 1 1 auto; min-height: 0; overflow: auto; }
   /* ---- by folder ----
      The folder is the header, so its rows stop repeating the folder name and
