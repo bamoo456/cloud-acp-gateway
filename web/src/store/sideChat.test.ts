@@ -114,6 +114,43 @@ describe("side chat", () => {
     expect(st.sessions["side-session"].title).toBe("The other thread");
   });
 
+  // The command list is the one engine list session/load does NOT answer with:
+  // the adapter sends it as its own available_commands_update a few milliseconds
+  // later, which lands while the history fetch is still in flight. Rebuilding the
+  // session from makeSession after that fetch used to drop it — repopulating
+  // models and configOptions from the load result while leaving the slash menu
+  // empty, which is exactly how it looked on screen: a dock reading out a model
+  // and effort above a "/" that said "No matching commands."
+  test("a command list that lands during the history fetch survives the rebuild", async () => {
+    const { useStore, ws } = await bootstrap();
+
+    const opening = useStore.getState().openSideChat(ROW);
+    await flush();
+    const load = lastSent(ws, "session/load");
+    ws.recv({
+      jsonrpc: "2.0", id: load.id,
+      result: { models: { availableModels: [{ modelId: "haiku", name: "Haiku" }], currentModelId: "haiku" } },
+    });
+
+    // The adapter's own notification, in the window before the rebuild.
+    ws.recv({
+      jsonrpc: "2.0", method: "session/update",
+      params: { sessionId: "side-session", update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [{ name: "handoff", description: "Hand off" }, { name: "recall", description: "Recall" }],
+      } },
+    });
+
+    await opening;
+    await flushHistory();
+
+    const st = useStore.getState();
+    expect(engineOf(st, "side-session").commands.map((c) => c.name)).toEqual(["handoff", "recall"]);
+    // and the rest of the load result still landed
+    expect(st.sessions["side-session"].engine.models.map((m) => m.modelId)).toEqual(["haiku"]);
+    expect(st.sessions["side-session"].items[0]).toMatchObject({ kind: "user" });
+  });
+
   test("the side chat's models and modes do not repaint the open conversation's pickers", async () => {
     const { useStore, ws } = await bootstrap();
     seedEngine(useStore, "open-session", {
