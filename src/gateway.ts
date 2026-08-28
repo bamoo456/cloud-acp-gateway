@@ -3386,7 +3386,22 @@ class Channel {
     // Capture the folder for sessions whose id is already known (session/load,
     // and any prompt that carries a cwd). session/new has no id yet — its cwd
     // is paired on the response instead, so it rides along in the idmux Origin.
-    if (sid && cwd) this.sessionCwd.set(sid, cwd);
+    if (sid && cwd) {
+      // A load that SEEDS the folder (first sighting, e.g. after a restart) is
+      // trusting the viewer's folder, which is wherever they happened to be
+      // browsing. The transcript on disk records the real one — correct the
+      // seed as soon as it can be read. Fire-and-forget: this is attribution
+      // data, and the claude-only helper is the one that exists.
+      if (!known && method === "session/load" && !this.isCodex) {
+        void findClaudeSessionFileById(sid)
+          .then(async (file) => {
+            const real = file ? (await claudeTranscriptSummary(file)).cwd : null;
+            if (real) this.sessionCwd.set(sid, real);
+          })
+          .catch(() => { /* attribution is best-effort */ });
+      }
+      this.sessionCwd.set(sid, cwd);
+    }
     // Mirror this client's prompt to the OTHER devices viewing the same session,
     // as a synthesized user_message_chunk. Notifications (the agent's reply)
     // broadcast to everyone, but the prompt text itself never leaves the sending
