@@ -637,6 +637,13 @@
     color: var(--accent); font-size: 14px; font-weight: 700;
   }
   .see-more:hover, .search-more:hover { background: var(--surface-2); }
+  /* The per-folder archive reveal wears the same affordance one level in: on the
+     tree spine, quieter, so it reads as part of the folder rather than as the
+     list-wide way out of it. */
+  .see-more.in-folder {
+    min-height: 32px; margin-top: 0; padding-left: 26px; text-align: left;
+    color: var(--muted); font-size: 13px; font-weight: 600;
+  }
   .panel-empty { padding: 18px 16px 22px; color: var(--muted); font-size: 14px; text-align: center; }
   /* Advanced search filters — collapsed to a single "進階" row until asked for, so
      the search box reads exactly as plainly as it did before. */
