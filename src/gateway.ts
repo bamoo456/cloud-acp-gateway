@@ -3889,11 +3889,17 @@ export class Gateway {
     sink: ClientSink,
     agentName: string,
     cursor: number,
-    opts?: { session?: string; greet?: (conn: Conn) => void },
+    opts?: { session?: string; greet?: (conn: Conn, head: number) => void },
   ): Conn {
     const ch = this.channel(agentName);
     const conn: Conn = { id: crypto.randomUUID(), sink };
-    opts?.greet?.(conn);
+    // The head is handed over with the conn id, before a byte of replay: it is
+    // the boundary a client needs to tell catch-up frames (seq at or below it,
+    // produced before this connection existed) from frames its own later
+    // requests cause (seq above it). Without it a client that opens a replay
+    // window — iOS suppresses `session/load`'s re-delivery — cannot tell a
+    // catch-up frame from the replay it means to drop, and silently loses it.
+    opts?.greet?.(conn, ch.ledger.headSeq());
     const afterSeq = Math.min(cursor, ch.ledger.headSeq());
     if (afterSeq < ch.ledger.floorSeq() - 1) {
       sink.send(ch.ledger.headSeq(), RELOAD_FRAME);
@@ -4276,7 +4282,10 @@ export function handleSseRpc(
         // Hand the client its connection id so it can address upstream POSTs to
         // rpcPath — BEFORE the replay, so a client on a slow link learns the
         // connect succeeded without waiting for the backlog to drain.
-        greet: (c) => res.write(`event: ready\ndata:${JSON.stringify({ conn: c.id })}\n\n`),
+        greet: (c, head) =>
+          res.write(
+            `event: ready\ndata:${JSON.stringify({ conn: c.id, head })}\n\n`,
+          ),
       });
     } catch (e) {
       console.warn(`rejecting SSE connection: ${String(e)}`);
