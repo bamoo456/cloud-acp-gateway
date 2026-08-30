@@ -475,6 +475,31 @@ test("a closed SSE stream does not break broadcast to the survivors", async () =
   await close();
 });
 
+test("ready carries the ledger head, separating catch-up from later frames", async () => {
+  const { port, agent, close } = await makeTestServer();
+  for (let n = 1; n <= 3; n++) {
+    agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", n } })));
+  }
+
+  // A client resuming from the start is told the head as it stood when it
+  // attached. Everything replayed to it is at or below that; anything its own
+  // later requests cause is above it. That boundary is the only thing that
+  // tells the two apart on the wire.
+  const c = sse(port, { lastEventId: "0" });
+  const head = await c.head;
+  assert.equal(head, 3);
+
+  const replayed = await c.next((e) => !!e.data && parse(e.data).method === "session/update");
+  assert.ok(replayed.id !== null && replayed.id <= head);
+
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "S", n: 4 } })));
+  const later = await c.next((e) => (parse(e.data).params as { n?: number })?.n === 4);
+  assert.ok(later.id !== null && later.id > head);
+
+  c.close();
+  await close();
+});
+
 test("ready is written before the replay, not after it", async () => {
   const { port, agent, close } = await makeTestServer();
   for (let n = 1; n <= 3; n++) {

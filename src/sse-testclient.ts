@@ -17,6 +17,8 @@ export function sse(port: number, opts: { agent?: string; lastEventId?: string; 
   const waiters: Array<{ pred: (e: Evt) => boolean; resolve: (e: Evt) => void }> = [];
   let resolveConn!: (id: string) => void;
   const conn = new Promise<string>((r) => { resolveConn = r; });
+  let resolveHead!: (seq: number) => void;
+  const head = new Promise<number>((r) => { resolveHead = r; });
 
   const headers: Record<string, string> = { accept: "text/event-stream" };
   if (opts.lastEventId !== undefined) headers["last-event-id"] = opts.lastEventId;
@@ -48,7 +50,14 @@ export function sse(port: number, opts: { agent?: string; lastEventId?: string; 
       else if (line.startsWith("event:")) event = line.slice(6).trim();
       else if (line.startsWith("data:")) data += line.slice(5);
     }
-    if (event === "ready") { try { resolveConn(JSON.parse(data).conn as string); } catch { /* ignore */ } return; }
+    if (event === "ready") {
+      try {
+        const greeting = JSON.parse(data) as { conn: string; head: number };
+        resolveConn(greeting.conn);
+        resolveHead(greeting.head);
+      } catch { /* ignore */ }
+      return;
+    }
     if (event === "message" && data === "") return; // a bare keepalive block
     const e: Evt = { id, event, data };
     frames.push(e);
@@ -59,6 +68,7 @@ export function sse(port: number, opts: { agent?: string; lastEventId?: string; 
 
   return {
     conn,
+    head,
     frames,
     next(pred: (e: Evt) => boolean): Promise<Evt> {
       const hit = frames.find(pred);
