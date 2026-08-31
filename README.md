@@ -20,13 +20,20 @@ available on the same host or inside the same container as the gateway.
   checkout, so shell-generated files aren't invisible), what it only read,
   per-file diffs, image previews, and live HTML previews with their assets
   inlined.
-- Branch a conversation: type the message you want to ask somewhere else, hit
-  `branch` instead of `send`, and it opens in a fork of the thread (the whole
-  history, copied agent-side via ACP `session/fork`) inside a floating window —
-  with its own composer, so two lines of attack run side by side. Branching
-  always carries a message, which is what gives the fork a transcript and a place
-  in the sidebar. Offered only for agents that advertise
-  `sessionCapabilities.fork` (Claude today).
+- Branch a conversation, or hand it to another agent: type the message you want
+  to ask somewhere else, hit `branch` instead of `send`, and pick where it goes.
+  `branch here` forks the thread (the whole history, copied agent-side via ACP
+  `session/fork`) into a floating window with its own composer, so two lines of
+  attack run side by side — offered only for agents that advertise
+  `sessionCapabilities.fork` (Claude today). `hand off to <agent>` instead retells
+  the conversation as text and opens it as a new conversation under a different
+  agent in the same folder: plan it in Claude, build it in Codex, or hand a stuck
+  debug back the other way. Sessions live inside the agent process that made them,
+  so nothing crosses between them — the handoff carries what was said (plus the
+  plan) and drops thoughts and tool calls, which the receiving agent re-derives
+  from the checkout it is standing in. Either way the message you typed is what
+  the new conversation opens with, which is what gives it a transcript and a place
+  in the sidebar.
 - Open a conversation as a side chat: right-click (or long-press) any sidebar row
   and pick `Open as side chat` to resume that conversation live in a floating
   window, beside the one that stays in the main column. The folder on screen and
