@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { renderMarkdown } from "../lib/markdown.ts";
+import { copyText } from "../lib/clipboard.ts";
 import { renderMermaid } from "../lib/mermaid.ts";
 import { workspaceImageSrc, type ImageBase } from "../lib/mdImages.ts";
 import { Lightbox } from "./Lightbox.tsx";
@@ -29,6 +30,16 @@ export function Markdown({ text, diagrams, images }: {
   // attach one to.
   const [zoom, setZoom] = useState<{ src: string; alt: string } | null>(null);
   const clicked = (e: React.MouseEvent) => {
+    // The per-code-block copy button (markdown.ts injects it into the HTML, so
+    // it is delegated here for the same reason the images are).
+    // ponytail: the ✓ is toggled imperatively, so a chunk arriving mid-stream
+    // wipes it — only matters if you copy a block while it is still being
+    // written. Lift it into state if that ever bites.
+    const btn = (e.target as Element).closest?.(".md-copy");
+    if (btn) {
+      void copyCode(btn as HTMLButtonElement);
+      return;
+    }
     const img = e.target as HTMLElement;
     if (!(img instanceof HTMLImageElement)) return;
     // A linked image is a link first: [![build](badge.svg)](https://ci/…) must
@@ -44,4 +55,15 @@ export function Markdown({ text, diagrams, images }: {
       {zoom && <Lightbox src={zoom.src} alt={zoom.alt} onClose={() => setZoom(null)} />}
     </>
   );
+}
+
+async function copyCode(btn: HTMLButtonElement) {
+  const code = btn.parentElement?.querySelector("code")?.textContent ?? "";
+  if (!code || !(await copyText(code))) return;
+  btn.classList.add("copied");
+  btn.title = btn.ariaLabel = "Copied";
+  setTimeout(() => {
+    btn.classList.remove("copied");
+    btn.title = btn.ariaLabel = "Copy code";
+  }, 1500);
 }
