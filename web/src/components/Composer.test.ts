@@ -661,59 +661,68 @@ describe("Composer session busy state", () => {
     expect(cancel).toHaveBeenCalledWith("branch-1");
   });
 
-  // The branch button is one click from send and spends a few seconds spawning a
-  // CLI, so it arms before it fires.
+  // The branch button spends a few seconds spawning a CLI, and it can now end in
+  // two different places (a fork that leaves you here, a handoff that moves the
+  // whole screen), so it opens a labelled destination list instead of firing.
   type BranchPrompt = { text: string; images?: unknown[]; files?: unknown[] };
   async function mountWithFork(
     props: ComposerProps = {},
     fork: (p: BranchPrompt) => Promise<boolean> = async () => true,
+    extraAgents: Array<Record<string, unknown>> = [],
   ) {
     const { Composer } = await import("./Composer.tsx");
     const { useStore } = await import("../store/store.ts");
     const { makeSession } = await import("../store/reducers.ts");
     const branchSession = vi.fn(fork);
+    const handoffSession = vi.fn(async () => true);
     useStore.setState({
       agentReady: true,
       agentName: "claude",
-      cfg: { ...useStore.getState().cfg, agents: [{ name: "claude", cwd: "/p", sessionFork: true }] },
+      cfg: { ...useStore.getState().cfg, agents: [{ name: "claude", cwd: "/p", sessionFork: true }, ...extraAgents] },
       activeId: "s1",
-      sessions: { s1: makeSession("s1"), b1: makeSession("b1") },
+      sessions: { s1: { ...makeSession("s1"), hasContent: true }, b1: makeSession("b1") },
       sideWindows: [],
       runningTasks: [],
       busySessionIds: {},
       branchSession,
+      handoffSession,
     } as any);
     await act(async () => {
       root = createRoot(container);
       root.render(React.createElement<ComposerProps>(Composer, props));
     });
-    return { branchSession };
+    return { branchSession, handoffSession };
   }
 
-  test("the branch button arms on the first click and only forks on the second", async () => {
+  const destRows = () => [...container.querySelectorAll<HTMLButtonElement>(".dest-menu .cmds.open button")];
+  const destRow = (name: string) =>
+    destRows().find((b) => b.querySelector(".cn")!.textContent!.includes(name))!;
+
+  test("the branch button opens a destination list, and the pick is what forks", async () => {
     const { branchSession } = await mountWithFork();
 
     // Branching sends: with nothing typed there is nothing to open a branch with,
-    // so the control is refused until there is.
+    // and with only one agent configured there is nowhere else to go either — so
+    // every destination is refused and the control is refused with them.
     expect(container.querySelector<HTMLButtonElement>(".branch-btn")!).toBeDisabled();
     await act(async () => { cmSet(cmView(container), "try it the other way"); });
 
     const btn = container.querySelector<HTMLButtonElement>(".branch-btn")!;
     expect(btn).not.toBeDisabled();
-    expect(btn.textContent).toContain("branch");
-    expect(container.querySelector(".branch-hint")).toBeNull();
+    expect(destRows()).toHaveLength(0);
 
     await act(async () => { btn.click(); });
     expect(branchSession).not.toHaveBeenCalled();
-    expect(container.querySelector(".branch-hint")).not.toBeNull();
-    expect(container.querySelector(".branch-btn")!.textContent).toContain("confirm");
+    // The row says where this ends up — that is the whole reason the list replaced
+    // an unlabelled "click again".
+    expect(destRow("branch here").querySelector(".cd")!.textContent).toContain("you stay here");
 
-    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    await act(async () => { destRow("branch here").click(); });
     // The typed message is what the branch opens with — and the box is cleared
     // only because the fork reported success.
     expect(branchSession).toHaveBeenCalledTimes(1);
     expect(branchSession.mock.calls[0][0]).toMatchObject({ text: "try it the other way" });
-    expect(container.querySelector(".branch-hint")).toBeNull();
+    expect(destRows()).toHaveLength(0);
     expect(cmView(container).state.doc.toString()).toBe("");
   });
 
@@ -721,21 +730,77 @@ describe("Composer session busy state", () => {
     const { branchSession } = await mountWithFork({}, async () => false);
     await act(async () => { cmSet(cmView(container), "would have been lost"); });
     await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
-    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+    await act(async () => { destRow("branch here").click(); });
     expect(branchSession).toHaveBeenCalledTimes(1);
     expect(cmView(container).state.doc.toString()).toBe("would have been lost");
   });
 
-  test("an armed branch button gives up on Escape", async () => {
+  test("the destination list gives up on Escape", async () => {
     const { branchSession } = await mountWithFork();
 
     await act(async () => { cmSet(cmView(container), "never mind"); });
     await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
-    expect(container.querySelector(".branch-hint")).not.toBeNull();
+    expect(destRows().length).toBeGreaterThan(0);
 
     await act(async () => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
-    expect(container.querySelector(".branch-hint")).toBeNull();
+    expect(destRows()).toHaveLength(0);
     expect(branchSession).not.toHaveBeenCalled();
+  });
+
+  test("a second agent adds a hand-off row, and it says the screen will move", async () => {
+    const { handoffSession, branchSession } = await mountWithFork({}, async () => true,
+      [{ name: "codex", cwd: "/p" }]);
+    await act(async () => { cmSet(cmView(container), "implement the last item"); });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+
+    // Two endings, and the list has to tell them apart: one keeps you here, the
+    // other replaces the screen. A row that only named the agent would read as
+    // "same thing, different destination", which is exactly what it is not.
+    expect(destRow("branch here").querySelector(".cd")!.textContent).toContain("you stay here");
+    expect(destRow("hand off to codex").querySelector(".cd")!.textContent).toContain("switches to codex");
+
+    await act(async () => { destRow("hand off to codex").click(); });
+    expect(branchSession).not.toHaveBeenCalled();
+    expect(handoffSession).toHaveBeenCalledWith("codex", "implement the last item");
+    expect(cmView(container).state.doc.toString()).toBe("");
+  });
+
+  test("an attachment refuses the hand-off row and says why, without touching branch", async () => {
+    // A handoff is one text message; the target agent has not reported what it
+    // accepts because it is not connected yet. Branching carries the attachment
+    // fine, so only one of the two rows goes.
+    const { handoffSession } = await mountWithFork({}, async () => true, [{ name: "codex", cwd: "/p" }]);
+    await act(async () => { cmSet(cmView(container), "take this over"); });
+    await act(async () => {
+      const { useStore } = await import("../store/store.ts");
+      useStore.setState({ attachedFiles: [{ name: "plan.md", uri: "file:///p/plan.md" }] } as any);
+    });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+
+    expect(destRow("hand off to codex")).toBeDisabled();
+    expect(destRow("hand off to codex").querySelector(".cd")!.textContent).toContain("carries text only");
+    expect(destRow("branch here")).not.toBeDisabled();
+    expect(handoffSession).not.toHaveBeenCalled();
+  });
+
+  test("an agent with no fork still offers the hand-off rows", async () => {
+    // branchGate hides the fork row when the agent never advertised
+    // sessionCapabilities.fork — which used to take the whole control with it, so
+    // sitting in Codex left no way to hand a stuck conversation back to Claude.
+    const { useStore } = await import("../store/store.ts");
+    const { handoffSession } = await mountWithFork({}, async () => true, [{ name: "codex", cwd: "/p" }]);
+    await act(async () => {
+      useStore.setState({
+        agentName: "codex",
+        cfg: { ...useStore.getState().cfg, agents: [{ name: "claude", cwd: "/p", sessionFork: true }, { name: "codex", cwd: "/p" }] },
+      } as any);
+      cmSet(cmView(container), "you take it from here");
+    });
+    await act(async () => { container.querySelector<HTMLButtonElement>(".branch-btn")!.click(); });
+
+    expect(destRows().map((b) => b.querySelector(".cn")!.textContent)).toEqual(["hand off to claude"]);
+    await act(async () => { destRow("hand off to claude").click(); });
+    expect(handoffSession).toHaveBeenCalledWith("claude", "you take it from here");
   });
 
   test("a bound instance never offers to branch the conversation behind it", async () => {

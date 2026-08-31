@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from "react";
-import { branchGate, hasCodexSkin, useStore, engineOf } from "../store/store.ts";
-import { Menu } from "./Menu.tsx";
+import { branchGate, handoffGate, hasCodexSkin, useStore, engineOf } from "../store/store.ts";
+import { Menu, type MenuItem } from "./Menu.tsx";
 import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconGitBranch, IconClock, IconTerminal } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
 import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.ts";
@@ -36,6 +36,8 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   const fileRef = useRef<HTMLInputElement>(null);
   const fileMenuRef = useRef<HTMLDivElement>(null);
   const atRef = useRef<HTMLButtonElement>(null);
+  const destRef = useRef<HTMLDivElement>(null);
+  const destBtnRef = useRef<HTMLButtonElement>(null);
   const [text, setText] = useState("");
   const [images, setImages] = useState<MessageImage[]>([]);
   const [uploading, setUploading] = useState(0); // in-flight /uploads count
@@ -49,11 +51,12 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   const [fileQuery, setFileQuery] = useState<string | null>(null);
   const [fileItems, setFileItems] = useState<string[]>([]);
   const [fileActive, setFileActive] = useState(0);
-  // Branching is one click from a control that sits next to send, and it spends a
-  // few seconds spawning a CLI — cheap to undo, but not free to trigger by
-  // accident. So the first click only arms it: the button says what will happen
-  // and waits for a second one. `armed` holds the timer that gives up on its own.
-  const [armed, setArmed] = useState(false);
+  // The branch button opens a destination list rather than firing: the same
+  // gesture now has two different endings (a fork that leaves you here, a handoff
+  // that moves the whole screen), and a control that can do both has to say which
+  // one it is about to do. Picking a row IS the confirmation — a labelled second
+  // click, where the old two-step "click again" was an unlabelled one.
+  const [destOpen, setDestOpen] = useState(false);
   const s = useStore();
   // A bound instance (the branch window) targets a conversation that isn't the
   // store's active one, so its file references can't live in the store's
@@ -80,6 +83,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // that turn to end (store.ts's queuedPrompts).
   const queued = (targetId && s.queuedPrompts[targetId]) || [];
   const branch = branchGate(s);
+  const handoff = handoffGate(s);
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
@@ -91,6 +95,38 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // the same thing send does: something to say. A branch of a conversation
   // mid-turn is refused by branchGate anyway.
   const branchable = canSend;
+  // A handoff is ONE text message — the retelling plus what to do about it. Images
+  // and file chips ride on prompt capabilities the target agent has not reported
+  // yet (it is not connected), so a message carrying them is refused rather than
+  // silently stripped of the half that wouldn't survive.
+  const attached = images.length > 0 || files.length > 0;
+  const handoffable = !!text.trim() && !attached && s.agentReady && !uploading && !handoff.disabled;
+  // One control, two different endings, so every row names its own: "you stay
+  // here" against "the screen switches". Disabled rows keep their place and carry
+  // the reason — the alternative is a list that silently gets shorter.
+  const destItems: MenuItem[] = [
+    ...(branch.show ? [{
+      key: "branch",
+      name: "branch here · " + s.agentName,
+      description: branch.disabled ? branch.why
+        : !branchable ? "Type the message to open the branch with"
+        : "forks it agent-side into a floating window — you stay here",
+      disabled: branch.disabled || !branchable,
+    }] : []),
+    ...handoff.targets.map((a) => ({
+      key: "handoff:" + a.name,
+      name: "hand off to " + a.name,
+      description: attached ? "Remove the attachments — a handoff carries text only"
+        : handoff.disabled ? handoff.why
+        : !text.trim() ? "Type what " + a.name + " should do with it"
+        : "retells it as text — the screen switches to " + a.name,
+      disabled: !handoffable,
+    })),
+  ];
+  // Never in a bound instance: the branch window's own composer would be offering
+  // to branch (or hand over) the conversation BEHIND it.
+  const destShow = !sessionId && destItems.length > 0;
+  const destDisabled = destItems.every((it) => it.disabled);
   // "!" at the head of the box is the shell escape (Claude Code's bang):
   // submit runs the rest as a host command instead of prompting the agent.
   // Only when the gateway exposes the terminal at all (ACPG_TERMINAL), and only
@@ -180,19 +216,24 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     setText(value);
     syncMention(value, caret);
     syncCommand(value, caret);
-    setArmed(false); // going back to typing is an answer: not now
+    setDestOpen(false); // going back to typing is an answer: not now
   }
 
-  // An armed branch button gives up by itself, and on Escape. Both because the
-  // arming is a question nobody has to answer: leaving a primed control sitting
-  // there is how a stray later click becomes a fork nobody asked for.
+  // Dismiss the destination list on Escape or a pointer down outside it — same
+  // rules as the other two menus, minus their editor exemption: nothing in the
+  // box filters this list, so typing means the answer is "not now".
   useEffect(() => {
-    if (!armed) return;
-    const timer = setTimeout(() => setArmed(false), 3000);
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setArmed(false); };
+    if (!destOpen) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (destRef.current?.contains(t) || destBtnRef.current?.contains(t)) return;
+      setDestOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setDestOpen(false); };
+    document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
-    return () => { clearTimeout(timer); document.removeEventListener("keydown", onKey); };
-  }, [armed]);
+    return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [destOpen]);
 
   // Pick a command: replace the leading "/command" (or "$skill") token the user
   // is editing with the picked token (or insert it when the menu was opened with
@@ -310,6 +351,17 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     }
   }
 
+  // Both endings of the one control. The box is cleared only on success, for the
+  // same reason branchWith clears it there: until the conversation exists, this is
+  // the only copy of what was typed.
+  async function pickDest(key: string) {
+    setDestOpen(false);
+    if (key === "branch") { await branchWith(); return; }
+    if (await s.handoffSession(key.slice("handoff:".length), text)) {
+      setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
+    }
+  }
+
   function submit() {
     // Enter bypasses the Send button's `disabled={!canSend}`, so it needs its own
     // guard: sending mid-upload would clear `files` out from under the pending
@@ -408,6 +460,9 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
           items={fileItems.map((f, i) => ({ key: f, name: f, selected: i === fileActive }))}
           onPick={pickFile} />
       </div>
+      <div ref={destRef} className="dest-menu">
+        <Menu open={destOpen} empty="Nowhere to send this conversation." items={destItems} onPick={pickDest} />
+      </div>
       {s.tip && (
         <div className="tipbar" style={{ display: "flex" }}>
           <span id="tip-text">{s.tip}</span>
@@ -488,25 +543,20 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
           )}
           <input ref={fileRef} type="file" multiple hidden
             onChange={(e) => { void addAttachments(e.target.files); e.target.value = ""; }} />
-          {armed && !branch.disabled && (
-            <span className="branch-hint">branch this conversation? click again · Esc cancels</span>
-          )}
           <span className="spacer" />
           {/* Beside send, wearing send's shape in outline — the same trick
-              `.send.stop` uses to say "same control, not the primary one". Never
-              rendered in a bound instance: the branch window's own composer would
-              be offering to branch the conversation BEHIND it. */}
-          {!sessionId && branch.show && (
-            <button className={"send branch-btn" + (armed ? " armed" : " ghost")}
-              title={armed ? "Click again to branch" : branchable ? branch.why : "Type the message to open the branch with"}
-              aria-label={armed ? "Confirm branching this conversation" : "Branch conversation"}
-              disabled={branch.disabled || !branchable}
-              onClick={() => {
-                if (!armed) { setArmed(true); return; }
-                setArmed(false);
-                void branchWith();
-              }}>
-              <IconGitBranch />{armed ? "confirm" : "branch"}
+              `.send.stop` uses to say "same control, not the primary one". It
+              opens the destination list; the pick is what commits. Disabled only
+              when every destination is, and then it carries the first row's
+              reason, because a menu you cannot open explains nothing. */}
+          {destShow && (
+            <button ref={destBtnRef} className={"send branch-btn" + (destOpen ? " armed" : " ghost")}
+              title={destDisabled ? (destItems[0]?.description ?? "") : "Branch this conversation, or hand it to another agent"}
+              aria-label="Branch or hand over this conversation"
+              aria-expanded={destOpen}
+              disabled={destDisabled}
+              onClick={() => setDestOpen(!destOpen)}>
+              <IconGitBranch />branch
             </button>
           )}
           {/* Mid-turn there are two buttons, not one wearing two hats — a phone has
