@@ -142,6 +142,33 @@ describe("hand a conversation to another agent", () => {
     expect(ws.closed).not.toBe(true);
   });
 
+  test("navigating away mid-switch drops the handoff instead of delivering it there", async () => {
+    // The switch takes as long as spawning a CLI, and the sidebar is live for all
+    // of it. A tap during that window is a second teardown — if the handoff rode
+    // through it, it would swallow the tap AND deliver claude's transcript into
+    // whatever the user actually asked for.
+    const { useStore } = await bootstrap();
+    await useStore.getState().handoffSession("codex", "take it from here");
+    await flush();
+
+    useStore.getState().setAgent("claude");
+    await flush();
+    const back = FakeSse.instances.at(-1)!;
+    back.open();
+    await flush();
+    const init = JSON.parse(back.sent[0]);
+    back.recv({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: 1, authMethods: [], agentCapabilities: {} } });
+    await flush();
+
+    // Nothing was handed anywhere, and the tap did what it said: back on the
+    // conversation this agent was left on, with no session built to receive a
+    // transcript nobody asked for here.
+    expect(useStore.getState().activeId).toBe("claude-session");
+    expect(countSent(back, "session/new")).toBe(0);
+    const prompts = back.sent.map((f) => JSON.parse(f)).filter((f) => f.method === "session/prompt");
+    expect(prompts.some((p) => JSON.stringify(p.params).includes("Handoff from"))).toBe(false);
+  });
+
   test("a target that can't open a session says so, and names where the original still is", async () => {
     const { useStore } = await bootstrap();
     await useStore.getState().handoffSession("codex", "go");
