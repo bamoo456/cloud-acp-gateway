@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
 
-export interface MenuItem { key: string; name: string; description?: string; selected?: boolean; }
+// `disabled` keeps a row in the list and greys it out instead of hiding it: the
+// description is where the reason lives, and a row that vanishes takes its
+// explanation with it.
+export interface MenuItem { key: string; name: string; description?: string; selected?: boolean; disabled?: boolean; }
 export function Menu({ open, items, empty, onPick }: { open: boolean; items: MenuItem[]; empty: string; onPick: (k: string) => void }) {
   const selRef = useRef<HTMLButtonElement>(null);
   const selected = items.find((it) => it.selected)?.key;
@@ -15,7 +18,8 @@ export function Menu({ open, items, empty, onPick }: { open: boolean; items: Men
     <div className={"cmds" + (open ? " open" : "")}>
       {items.length === 0 && <div className="panel-empty">{empty}</div>}
       {items.map((it) => (
-        <button key={it.key} ref={it.selected ? selRef : undefined} className={it.selected ? "sel" : ""} onClick={() => onPick(it.key)}>
+        <button key={it.key} ref={it.selected ? selRef : undefined} className={it.selected ? "sel" : ""}
+          disabled={it.disabled} onClick={() => onPick(it.key)}>
           <span className="col"><span className="cn">{it.name}</span>{it.description && <span className="cd">{it.description}</span>}</span>
           {it.selected && <span className="ck">✓</span>}
         </button>

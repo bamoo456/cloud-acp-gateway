@@ -1195,9 +1195,9 @@
   .send:disabled { background: transparent; color: var(--faint); cursor: default; }
   .send svg { width: 14px; height: 14px; }
   /* Branch sits next to send and borrows its shape, in the same outline form
-     stop uses: a sibling action, not a second primary one. `armed` is the middle
-     of its two-step confirm — main colour, still an outline, because it is a
-     question rather than a done deal. */
+     stop uses: a sibling action, not a second primary one. `armed` is now the
+     open state of its destination list — main colour, still an outline, because
+     it is a question rather than a done deal. */
   .send.ghost { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
   .send.ghost:hover { background: var(--surface-2); }
   /* With nothing to send there is nothing to branch either, and the two controls
@@ -1209,8 +1209,6 @@
   .send.armed { background: transparent; color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .send.armed:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .crow .branch-btn { margin-right: 6px; }
-  .crow .branch-hint { font-family: var(--mono); font-size: 11px; color: var(--muted);
-    padding-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Stop is not a failure and not a fifth colour — it is the same control
      wearing an outline instead of a fill, so it can't be mistaken for send. */
   .send.stop { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
@@ -1284,7 +1282,11 @@
   .cmds.open { display: block; }
   .cmds button { display: flex; gap: 10px; width: 100%; text-align: left; padding: 10px 13px;
     align-items: baseline; }
-  .cmds button:hover { background: var(--surface-2); }
+  .cmds button:hover:not(:disabled) { background: var(--surface-2); }
+  /* A refused destination keeps its row and greys out: the description beside it
+     is the reason, and hiding the row would hide that. */
+  .cmds button:disabled { cursor: default; }
+  .cmds button:disabled .cn { color: var(--muted); }
   .cmds .cn { font-weight: 600; color: var(--accent); flex: 0 0 auto; }
   .cmds .cd { color: var(--muted); font-size: 13.5px;
     flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1296,6 +1298,12 @@
      Ellipsised, it still tells two similar commands apart at a third of the height. */
   .cmds .col { display: flex; flex-direction: row; align-items: baseline; gap: 8px;
     min-width: 0; flex: 1; }
+  /* The destination list is read, not scanned. Each row's description is the
+     difference between "you stay here" and "the whole screen moves", so it wraps
+     under the name instead of ellipsising beside it the way a command hint does. */
+  .dest-menu .cmds button { align-items: flex-start; }
+  .dest-menu .cmds .col { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .dest-menu .cmds .cd { white-space: normal; overflow: visible; font-size: 12.5px; line-height: 1.4; }
   /* Phones tighten the row and get a taller box: 240px is ~6 rows, which is all
      scrolling and no overview. Capped in dvh so it can't eat the transcript. */
   @media (max-width: 640px) {

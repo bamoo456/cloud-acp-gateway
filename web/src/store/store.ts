@@ -11,6 +11,7 @@ import { lastRanOn } from "../lib/engine.ts";
 import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { execCommand, shellContext, shellNote } from "../lib/terminal.ts";
+import { buildHandoffMessage } from "../lib/handoffPrompt.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
   EMPTY_ENGINE,
@@ -18,7 +19,7 @@ import {
 import type {
   Session, SessionEngine, ConfigOption, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
   AgentSkin, MessageImage, MessageFile, QueuedPrompt, PromptCapabilities, ElicitationResponse, RateLimit,
-  SlashCommand,
+  SlashCommand, AgentRef,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
 
@@ -278,6 +279,14 @@ interface State {
   // conversation that fails to open. Resolves true when the fork landed — on
   // false the caller still holds the only copy of that message.
   branchSession: (prompt: { text: string; images?: MessageImage[]; files?: MessageFile[] }) => Promise<boolean>;
+  // Hand the open conversation to a DIFFERENT agent: render its transcript as
+  // text, switch this client to that agent, open a session in the same folder and
+  // send the rendering plus `instruction` as its first turn. Not a fork — the two
+  // agents are separate processes and no session crosses between them, so this is
+  // a retelling and the receiving conversation is a new one that merely knows what
+  // was said. Resolves true once the switch has been started (the session itself
+  // lands after the reconnect, in handleStatus).
+  handoffSession: (agentName: string, instruction: string) => Promise<boolean>;
   // Open an EXISTING conversation in a floating window, beside the one that stays
   // in the main column — the sidebar row's "Open as side chat". Not a fork and not
   // a navigation: the open conversation is untouched (`activeId` and the global
@@ -386,6 +395,29 @@ export function branchGate(state: State): BranchGate {
   return { show, disabled: !ready || running || open || full, why };
 }
 
+// The other side of the same control: which agents this conversation could be
+// handed to, and why it can't be handed to any of them.
+//
+// Shares branchGate's first two refusals, because they are about the transcript
+// rather than about forking — a conversation the agent has never seen has
+// nothing to retell, and a turn in flight is not in it yet, so a handoff
+// mid-turn would hand over a half-finished answer. It does NOT share the
+// side-window ones: a handoff switches the whole screen, so the floating-window
+// budget has nothing to say about it.
+export interface HandoffGate { targets: AgentRef[]; disabled: boolean; why: string }
+export function handoffGate(state: State): HandoffGate {
+  const targets = state.cfg.agents.filter((a) => a.name !== state.agentName);
+  const ready = !!state.activeId && !state.activeId.startsWith("pending-")
+    && !!state.sessions[state.activeId!]?.hasContent;
+  const running = state.runningTasks.some((t) => t.agentName === state.agentName && t.sessionId === state.activeId)
+    || (!!state.activeId && !!state.busySessionIds[state.activeId]);
+  const why = !targets.length ? "No other agent is configured"
+    : !ready ? "Send a message first"
+    : running ? "Wait for this turn to finish"
+    : "Hand this conversation to another agent";
+  return { targets, disabled: !targets.length || !ready || running, why };
+}
+
 export function hasCodexSkin(state: SkinState): boolean {
   return activeAgentSkin(state) === "codex";
 }
@@ -429,6 +461,11 @@ const reportedCommands = new Map<string, SlashCommand[]>();
 // Set by selectSession when the target lives under another agent; consumed by
 // handleStatus once that agent's connection is ready (single activation path).
 let pendingActivateId: string | null = null;
+// Set by handoffSession before it tears the connection down; consumed by
+// handleStatus once the TARGET agent is ready. Checked BEFORE every other
+// activation path there — a handoff that let `lastSessionByAgent` go first would
+// deliver a whole conversation into whatever was last read under that agent.
+let pendingHandoff: { text: string; sourceTitle: string } | null = null;
 // Handle for the auto-reconnect backoff timer, so a foreground/pageshow resume can
 // cancel it and reconnect immediately instead of racing a second socket against it.
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1301,6 +1338,7 @@ export const useStore = create<State>((set, get) => {
     clearReconnectTimer();
     sessionInit = null;
     pendingResyncId = null;
+    pendingHandoff = null;
     set({
       agentName, cwd: cwd || get().cwd,
       conn: "connecting", agentReady: false, tip,
@@ -1320,6 +1358,37 @@ export const useStore = create<State>((set, get) => {
   function reconnectOrLock(reconnect: () => void) {
     if (get().lockEnabled) { if (!get().locked) get().lock(); return; }
     reconnect();
+  }
+
+  // The handed-over conversation, as the target agent's first turn. A fresh
+  // session/new every time: the transcript being replayed belongs to another
+  // agent, so there is nothing here to resume and dropping it into a session that
+  // already has a subject would be worse than a new one. Called from
+  // handleStatus, which is why it can assume the connection is up.
+  async function startHandoff(h: { text: string; sourceTitle: string }) {
+    try {
+      const ns = (await initSession()) as NewSessionResult;
+      if (!ns?.sessionId) throw new Error("no session id");
+      adopt(ns);
+      // Where the retelling ends and this conversation's own turns begin — the
+      // same note a branch gets, for the same reason: without it the thread reads
+      // as a conversation that always knew this, and the one thing the reader
+      // needs to know about a handoff is that it came from somewhere else.
+      patch(ns.sessionId, (cur) => ({
+        ...cur, seq: cur.seq + 1,
+        items: [...cur.items, {
+          id: ns.sessionId + ":" + (cur.seq + 1), kind: "note",
+          text: "\u00b7 handed over from \u201c" + h.sourceTitle + "\u201d",
+        }],
+      }));
+      set({ tip: "" });
+      await get().sendPromptTo(ns.sessionId, h.text);
+    } catch (e) {
+      // The switch itself already happened, so there is no rolling back to the
+      // source conversation — it is still live under its own agent, one tap away
+      // in the sidebar, and saying so is more use than a silent empty session.
+      set({ tip: "Couldn't hand over: " + msg(e) + " — the original is still under its own agent." });
+    }
   }
 
   function handleStatus(s: ConnState, code?: number) {
@@ -1365,7 +1434,10 @@ export const useStore = create<State>((set, get) => {
             },
           }));
           const link = linkParams();
-          if (pendingResyncId) {
+          if (pendingHandoff) {
+            const h = pendingHandoff; pendingHandoff = null;
+            await startHandoff(h);
+          } else if (pendingResyncId) {
             const rid = pendingResyncId; pendingResyncId = null;
             set({ tip: "Reconnected — syncing conversation…" });
             await resync(rid);
@@ -1500,6 +1572,14 @@ export const useStore = create<State>((set, get) => {
       clearReconnectTimer();
       sessionInit = null;
       pendingResyncId = null;
+      // A handoff still waiting to be delivered belongs to the switch that armed
+      // it, and this is a different one. Dropped rather than carried, because
+      // carrying it would deliver one agent's transcript into a conversation the
+      // user navigated to themselves — and swallow that navigation on the way.
+      // handoffSession arms it AFTER calling this, which is what lets it survive
+      // its own switch; an involuntary drop doesn't come through here at all, so
+      // a reconnect mid-handoff still delivers, which is the point of it.
+      pendingHandoff = null;
       // Remember where we were under the agent we're leaving, so switching back
       // restores that conversation instead of opening a blank new session.
       const leavingId = get().activeId;
@@ -2237,6 +2317,39 @@ export const useStore = create<State>((set, get) => {
         });
         return false;
       }
+    },
+
+    async handoffSession(agentName, instruction) {
+      const st = get();
+      const id = st.activeId;
+      const source = id ? st.sessions[id] : null;
+      // Same three refusals handoffGate disables the row on, checked again here
+      // for the same reason branchSession re-checks its own: this tears down the
+      // connection, and a caller that got the gate wrong would do it for nothing.
+      if (!id || !source || id.startsWith("pending-") || !source.hasContent) return false;
+      if (st.busySessionIds[id]) { set({ tip: "Wait for this turn to finish before handing over." }); return false; }
+      if (!instruction.trim()) return false;
+      if (agentName === st.agentName || !st.cfg.agents.some((a) => a.name === agentName)) return false;
+
+      // Built from the items already in memory rather than re-fetched, which is
+      // what branchSession does with the same thread and for the same reason:
+      // this IS the conversation on screen, and a round trip could only return
+      // what is already here — or fail, after the point of no return below.
+      const text = buildHandoffMessage({
+        items: source.items,
+        fromAgent: st.agentName,
+        title: source.title,
+        cwd: source.cwd || st.cwd,
+      }, instruction);
+      // Armed after the switch, read after the reconnect: setAgent clears any
+      // handoff it finds (see there), so arming first would arm and immediately
+      // disarm. It keeps `cwd` and stashes the conversation being left in
+      // `lastSessionByAgent`, so switching back lands on the source rather than
+      // on a blank session.
+      get().setAgent(agentName);
+      pendingHandoff = { text, sourceTitle: source.title };
+      set({ tip: "Handing over to " + agentName + "\u2026" });
+      return true;
     },
 
     async openSideChat(target) {
