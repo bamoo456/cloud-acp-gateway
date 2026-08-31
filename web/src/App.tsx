@@ -123,6 +123,10 @@ export function App() {
         }
       });
       if (hidden) return; // nothing renders the Running section right now
+      // Piggybacks on this tick rather than owning a timer: the beat is throttled
+      // in the store, so the only thing it needs from here is a regular pulse that
+      // already stops while the tab is hidden.
+      useStore.getState().beatAttention();
       void getRunning().then((tasks) => { if (alive) useStore.getState().ingestRunningTasks(tasks); });
     };
     tick();

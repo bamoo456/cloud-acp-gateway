@@ -627,3 +627,91 @@ test("a fork of a source with nothing recorded is left at its own values", async
   assert.deepEqual(controlsIn(agent().sent), [], "nothing to inherit means nothing is pushed — the defaults are not a fallback");
   await shutdown(streams, close);
 });
+
+// ---- attention ------------------------------------------------------------
+// The reaper's "idle" is measured in protocol frames, so a conversation somebody
+// has open but has not typed into looks abandoned. /attention is how a client says
+// otherwise; see Channel.attend.
+const attend = (port: number, sid: string) =>
+  fetch(`http://127.0.0.1:${port}/attention?agent=claude&session=${sid}`, { method: "POST" });
+
+const loadSidsIn = (sent: string[]): string[] =>
+  sent.map(parse).filter((o) => o.method === "session/load").map((o) => (o.params as { sessionId?: string }).sessionId!).filter(Boolean);
+
+test("an attended session is not reaped", async () => {
+  const { port, agent, reap, attend: beat, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  await openSession(port, agent, "S1", streams);
+  await openSession(port, agent, "S2", streams);
+  agent().sent.length = 0;
+
+  // S1 has a reader; S2 does not. Both are equally silent in protocol terms —
+  // which is exactly the case the frame-based idle window cannot tell apart. The
+  // beat lands one TTL in, the sweep just after it: the window a real client's
+  // 60s beat sits inside.
+  const late = Date.now() + SESSION_IDLE_TTL_MS;
+  beat("S1", late);
+  reap(late + 1_000);
+
+  assert.deepEqual(closeSidsIn(agent().sent), ["S2"], "the attended session keeps its CLI");
+  await shutdown(streams, close);
+});
+
+test("attending an already-reaped session re-loads it there and then", async () => {
+  const { port, agent, reap, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  await openSession(port, agent, "S1", streams);
+  reap(FAR_FUTURE);
+  assert.deepEqual(closeSidsIn(agent().sent), ["S1"], "reaped first");
+  agent().sent.length = 0;
+
+  await attend(port, "S1");
+  assert.deepEqual(loadSidsIn(agent().sent), ["S1"], "the resume starts on attention, not on the next prompt");
+
+  // A second beat while that load is still in flight must not start another.
+  await attend(port, "S1");
+  assert.deepEqual(loadSidsIn(agent().sent), ["S1"], "one load per revive");
+  await shutdown(streams, close);
+});
+
+test("attention never registers a session the gateway does not track", async () => {
+  const { port, agent, reap, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  await openSession(port, agent, "S1", streams);
+  agent().sent.length = 0;
+
+  // A conversation opened out of history has no CLI behind it. Attending one must
+  // not conjure a live-session entry — that would spend an LRU slot (and, past the
+  // cap, evict a real session) for a reader who only wanted to read.
+  await attend(port, "NEVER-SEEN");
+  reap(FAR_FUTURE);
+
+  assert.deepEqual(closeSidsIn(agent().sent), ["S1"], "only the real session is torn down");
+  assert.deepEqual(loadSidsIn(agent().sent), [], "and nothing was resumed for it");
+  await shutdown(streams, close);
+});
+
+test("a prompt typed during an attend-triggered revive waits for the load", async () => {
+  const { port, agent, reap, close } = await makeTestServer();
+  const streams: Stream[] = [];
+  const { conn } = await openSession(port, agent, "S1", streams);
+  reap(FAR_FUTURE);
+  agent().sent.length = 0;
+
+  // The reader came back, so the resume is already running when they hit Enter —
+  // the one ordering the lazy path could never produce (there, the prompt WAS the
+  // frame that started the load). Forwarding it now would reach an adapter that
+  // has not got the session back yet.
+  await attend(port, "S1");
+  const load = agent().sent.map(parse).filter((o) => o.method === "session/load").at(-1)!;
+  await post(port, conn, { jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId: "S1", prompt: [{ type: "text", text: "go" }] } });
+  assert.deepEqual(agent().sent.map(parse).filter((o) => o.method === "session/prompt"), [], "parked, not forwarded mid-load");
+
+  agent().emit(Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: load.id, result: {} })));
+  await new Promise((r) => setTimeout(r, 20));
+
+  const prompts = agent().sent.map(parse).filter((o) => o.method === "session/prompt");
+  assert.equal(prompts.length, 1, "and forwarded once the session is back");
+  assert.equal((prompts[0].params as { sessionId?: string }).sessionId, "S1");
+  await shutdown(streams, close);
+});

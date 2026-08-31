@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, postAttention, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
@@ -322,6 +322,10 @@ interface State {
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
   readActiveSession: () => void;
+  // Tell the gateway the open conversation still has a reader, so its backing CLI
+  // is not reaped out from under the next prompt. Self-throttling — call it as
+  // often as convenient (App's poll tick does).
+  beatAttention: () => void;
   // No target = the active conversation (the ActionMenu path); a target = any
   // conversation, active or not (the sidebar's per-row rename). A sidebar row
   // carries its OWN agent and folder — a discovered row names a conversation in
@@ -480,6 +484,16 @@ const lastSessionByAgent = new Map<string, { id: string; cwd: string }>();
 // an agent resumes its stream after that seq and the ledger replays the frames
 // produced while we were away. Survives Acp recreation (per-agent channels).
 const agentCursors = new Map<string, number>();
+// How often to re-assert that the open conversation still has a reader. Must stay
+// comfortably under the gateway's ACPG_SESSION_IDLE_TTL_MS (default 180s) — a beat
+// slower than the TTL would let the session be reaped between two beats, which is
+// the whole thing this exists to prevent.
+const ATTENTION_BEAT_MS = 60_000;
+// The session the last beat was sent for, and when. Per-session rather than a bare
+// timestamp so switching conversations beats immediately instead of waiting out the
+// previous one's interval.
+let attendedId: string | null = null;
+let attendedAt = 0;
 const PROVISIONAL = () => "pending-" + Math.random().toString(36).slice(2);
 const MAX_LIVE_SESSIONS = 8;
 // How many floating windows can be up at once. Not a layout limit — a cascade of
@@ -1647,6 +1661,25 @@ export const useStore = create<State>((set, get) => {
       if (!st.inboxItems.some(isRead)) return;
       set({ inboxItems: st.inboxItems.filter((it) => !isRead(it)) });
       void markInboxRead(id);
+    },
+
+    beatAttention() {
+      const st = get();
+      const id = st.activeId;
+      if (!id || id.startsWith("pending-")) return;
+      const sess = st.sessions[id];
+      // A conversation opened out of history has no CLI behind it, and attending
+      // one would spawn a resume for a reader who only wanted to read it — the
+      // whole point of the view-only path. Replying to it resumes it deliberately,
+      // with its own "Resuming agent…" tip; only from then on is it attendable.
+      if (!sess || sess.viewOnly) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      const now = Date.now();
+      if (attendedId === id && now - attendedAt < ATTENTION_BEAT_MS) return;
+      attendedId = id; attendedAt = now;
+      // The session's own agent, not the store's: a conversation kept active
+      // across an agent switch belongs to the channel that owns its CLI.
+      void postAttention(sess.agentName || st.agentName, id);
     },
     renameSession(title, target) {
       const sid = target?.sessionId ?? get().activeId;
