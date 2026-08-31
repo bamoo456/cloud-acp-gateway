@@ -1338,6 +1338,7 @@ export const useStore = create<State>((set, get) => {
     clearReconnectTimer();
     sessionInit = null;
     pendingResyncId = null;
+    pendingHandoff = null;
     set({
       agentName, cwd: cwd || get().cwd,
       conn: "connecting", agentReady: false, tip,
@@ -1571,6 +1572,14 @@ export const useStore = create<State>((set, get) => {
       clearReconnectTimer();
       sessionInit = null;
       pendingResyncId = null;
+      // A handoff still waiting to be delivered belongs to the switch that armed
+      // it, and this is a different one. Dropped rather than carried, because
+      // carrying it would deliver one agent's transcript into a conversation the
+      // user navigated to themselves — and swallow that navigation on the way.
+      // handoffSession arms it AFTER calling this, which is what lets it survive
+      // its own switch; an involuntary drop doesn't come through here at all, so
+      // a reconnect mid-handoff still delivers, which is the point of it.
+      pendingHandoff = null;
       // Remember where we were under the agent we're leaving, so switching back
       // restores that conversation instead of opening a blank new session.
       const leavingId = get().activeId;
@@ -2332,11 +2341,13 @@ export const useStore = create<State>((set, get) => {
         title: source.title,
         cwd: source.cwd || st.cwd,
       }, instruction);
-      // Set before the teardown, read after the reconnect. setAgent keeps `cwd`
-      // and stashes the conversation being left in `lastSessionByAgent`, so
-      // switching back lands on the source rather than on a blank session.
-      pendingHandoff = { text, sourceTitle: source.title };
+      // Armed after the switch, read after the reconnect: setAgent clears any
+      // handoff it finds (see there), so arming first would arm and immediately
+      // disarm. It keeps `cwd` and stashes the conversation being left in
+      // `lastSessionByAgent`, so switching back lands on the source rather than
+      // on a blank session.
       get().setAgent(agentName);
+      pendingHandoff = { text, sourceTitle: source.title };
       set({ tip: "Handing over to " + agentName + "\u2026" });
       return true;
     },
