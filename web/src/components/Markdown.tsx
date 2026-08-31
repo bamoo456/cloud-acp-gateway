@@ -61,9 +61,14 @@ async function copyCode(btn: HTMLButtonElement) {
   const code = btn.parentElement?.querySelector("code")?.textContent ?? "";
   if (!code || !(await copyText(code))) return;
   btn.classList.add("copied");
-  btn.title = btn.ariaLabel = "Copied";
+  setLabel(btn, "Copied");
   setTimeout(() => {
     btn.classList.remove("copied");
-    btn.title = btn.ariaLabel = "Copy code";
+    setLabel(btn, "Copy code");
   }, 1500);
+}
+
+function setLabel(btn: HTMLButtonElement, label: string) {
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
 }

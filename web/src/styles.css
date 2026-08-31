@@ -933,8 +933,10 @@
      touch it is always visible and would otherwise sit on the first line. */
   .md-pre { position: relative; margin: 10px 0; }
   .md-pre > pre { margin: 0; padding-right: 46px; }
+  /* opacity would fade the fill along with the icon and let the code show
+     through, so it stays 1 and the ink carries the quietness instead. */
   .md-copy { position: absolute; top: 6px; right: 6px; margin-top: 0;
-    background: var(--surface); border-radius: 8px; }
+    opacity: 1; color: var(--faint); background: var(--surface); border-radius: 8px; }
   .md-copy .i-check, .md-copy.copied .i-copy { display: none; }
   .md-copy.copied .i-check { display: block; }
   .md code { font-family: var(--mono); font-size: var(--chat-code-size); }
