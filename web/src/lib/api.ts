@@ -739,6 +739,21 @@ export async function markInboxRead(sessionId: string): Promise<void> {
   }
 }
 
+// Tell the gateway a reader has this conversation open and on screen, so its
+// idle reaper stops treating "not typed into yet" as "abandoned" (and re-loads it
+// straight away if it was already reaped). Best-effort: a failure only means the
+// next beat, or the prompt itself, pays the resume instead.
+export async function postAttention(agent: string, sessionId: string): Promise<void> {
+  try {
+    const u = new URL(base() + "/attention");
+    u.searchParams.set("agent", agent);
+    u.searchParams.set("session", sessionId);
+    await fetch(u.toString(), { method: "POST" });
+  } catch {
+    // ignore
+  }
+}
+
 // Answer a pending permission server-side: the gateway routes the chosen option
 // to the live agent, so any device can answer a prompt for any agent without
 // holding that agent's SSE connection. Returns whether the answer was accepted

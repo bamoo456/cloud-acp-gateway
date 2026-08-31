@@ -3311,6 +3311,18 @@ class Channel {
         this.parkFrame(conn, sid, line);
         return;
       }
+      // A revive's own session/load is still in flight, so the adapter does not
+      // have this session back yet — park rather than forward into the same
+      // "Session not found" the revive exists to prevent. `reaped` cannot carry
+      // this: startRevive clears it the moment the load goes out, which is what
+      // leaves every frame after the first one (and every prompt typed during an
+      // attend-triggered revive, where the load starts BEFORE the prompt exists)
+      // falling through. Scoped to REVIVE_SENTINEL: a client's own session/load
+      // keeps its existing behaviour.
+      if (sid && this.loadGate.get(sid) === REVIVE_SENTINEL && method !== "session/load") {
+        this.parkFrame(conn, sid, line);
+        return;
+      }
       // A client touched a session we reaped to reclaim its CLI: transparently
       // re-load it in the adapter before forwarding, so the client never sees the
       // adapter's "Session not found". A session/load already re-establishes it
@@ -3463,13 +3475,21 @@ class Channel {
   // history rendered, so re-broadcasting it would duplicate. Concurrent frames for
   // the same session queue behind the single in-flight load.
   private reviveThenForward(conn: Conn, sid: string, cwd: string | null, line: Buffer): void {
+    const q = this.parkFrame(conn, sid, line);
+    if (q.length > 1) return; // a re-load is already in flight for this session
+    this.startRevive(sid, cwd);
+  }
+
+  // Issue the session/load that re-establishes a reaped session. Split out of
+  // reviveThenForward so `attend` can start the same load with no frame to park:
+  // a reader who came back to a reaped conversation should pay the resume while
+  // they read, not on the Enter key.
+  private startRevive(sid: string, cwd: string | null): void {
     // The gateway's own record of the session's folder outranks the touching
     // client's — same reason forwardClientRequest prefers the known cwd: the
     // toucher may be browsing another project entirely, and this cwd decides
     // where the adapter resumes the CLI.
     const loadCwd = this.reaped.get(sid)?.cwd ?? cwd ?? "";
-    const q = this.parkFrame(conn, sid, line);
-    if (q.length > 1) return; // a re-load is already in flight for this session
     this.touchSession(sid, loadCwd || undefined); // re-tracks it (and clears `reaped`)
     const gid = this.idmux.outbound(REVIVE_SENTINEL, `revive:${sid}`, "session/load", sid, loadCwd || undefined);
     this.loadGate.set(sid, REVIVE_SENTINEL);
@@ -3477,6 +3497,29 @@ class Channel {
     const out = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: gid, method: "session/load", params: { sessionId: sid, cwd: loadCwd, mcpServers: [] } }));
     if (this.isCodex) { void this.loadCodexWithRepair(sid, out); return; }
     this.agent.send(out);
+  }
+
+  // A reader has this conversation open and on screen. Two jobs, both about the
+  // reaper's blind spot: "idle" is measured in protocol frames (touchSession is
+  // called only from fromClient/fromAgent), which makes a conversation somebody is
+  // reading indistinguishable from one they abandoned — so the session they are
+  // most likely to prompt next is exactly the one that gets its CLI killed.
+  // Refresh its idle window (and its LRU position), and when it was already reaped,
+  // start the re-load NOW so the next prompt finds nothing to park behind.
+  // `now` is injectable for the same reason reapIdle's is: a test has to place a
+  // beat and a sweep on either side of the TTL without waiting out a real timer.
+  attend(sid: string, now: number = Date.now()): void {
+    if (!this.reapable || !sid) return;
+    if (this.reaped.has(sid)) {
+      if (this.loadGate.has(sid)) return; // a load is already in flight
+      this.startRevive(sid, null);
+      return;
+    }
+    // Only a session the gateway already tracks. Attending an unknown id (a
+    // conversation being read out of history, with no CLI behind it) would spend
+    // an LRU slot on it — and past the cap, evict a live session for a reader who
+    // never asked to resume anything.
+    if (this.liveSessions.has(sid)) this.touchSession(sid, undefined, now);
   }
 
   // Hold a client frame until this session is ready for it (an in-flight re-load,
@@ -3816,6 +3859,11 @@ export class Gateway {
   // unread — on every device, since the inbox is the shared source of truth.
   markSessionRead(sessionId: string): void {
     this.store().markSessionRead(sessionId, new Date().toISOString());
+  }
+
+  // A reader is looking at this conversation right now — see Channel.attend.
+  attendSession(agentName: string, sessionId: string, now?: number): void {
+    this.channels.get(agentName)?.attend(sessionId, now);
   }
 
   // Answer a pending permission for any agent from the server side. Returns false
@@ -4320,6 +4368,29 @@ export function handleSseRpc(
   req.on("close", () => {
     if (!req.complete) console.warn(`client: dropped an incomplete frame agent="${agentName}" conn=${conn.id} (${size}B received)`);
   });
+  return true;
+}
+
+// A client says a reader has this conversation open and on screen. Beaten
+// periodically while that stays true, so the reaper stops mistaking "open but not
+// typed into yet" for "abandoned" — see Channel.attend. Its own endpoint rather
+// than an ACP frame: this is gateway state, and an unknown method on the rpc path
+// would be forwarded to the agent.
+function handleAttentionRequest(
+  gateway: Gateway,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  defaultAgent: string,
+): boolean {
+  const pathname = (req.url ?? "/").split("?")[0];
+  if (pathname !== "/attention") return false;
+  if (req.method !== "POST") { res.writeHead(405); res.end(); return true; }
+  const q = new URL(req.url ?? "/", "http://x").searchParams;
+  const sid = q.get("session") ?? "";
+  if (!sid) { res.writeHead(400); res.end(); return true; }
+  gateway.attendSession(q.get("agent") ?? defaultAgent, sid);
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ ok: true }));
   return true;
 }
 
@@ -5094,6 +5165,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // holding that agent's SSE connection.
   if (consoleEnabled && handleInboxAnswerRequest(gateway, req, res)) return;
   if (consoleEnabled && handleInboxReadRequest(gateway, req, res)) return;
+  if (consoleEnabled && handleAttentionRequest(gateway, req, res, cfg.defaultAgent)) return;
   // Rename a conversation (persist a custom title to the per-cwd sidecar).
   if (consoleEnabled && pathname === "/history/rename") {
     if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
@@ -5342,6 +5414,9 @@ export async function makeTestServer(opts?: {
   // Force an idle-session sweep at the given wall-clock (tests pass a future `now`
   // to make the TTL elapse without waiting).
   reap: (now?: number) => void;
+  // Beat a reader's attention on a session, at an injectable wall-clock so a test
+  // can put the beat and the sweep on either side of the idle TTL.
+  attend: (sessionId: string, now?: number) => void;
   close: () => Promise<void>;
 }> {
   const agents = { claude: { cmd: "x", args: [], cwd: process.cwd(), defaults: opts?.defaults } };
@@ -5384,6 +5459,7 @@ export async function makeTestServer(opts?: {
     })) return;
     if (handleInboxAnswerRequest(b, req, res)) return;
     if (handleInboxReadRequest(b, req, res)) return;
+    if (handleAttentionRequest(b, req, res, "claude")) return;
     res.writeHead(404);
     res.end();
   });
@@ -5407,6 +5483,7 @@ export async function makeTestServer(opts?: {
       }) as Ledger["append"];
     },
     reap: (now?: number) => b.reapIdleSessions(now),
+    attend: (sessionId: string, now?: number) => b.attendSession("claude", sessionId, now),
     close: () => new Promise<void>((r) => srv.close(() => r())),
   };
 }
