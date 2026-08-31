@@ -87,6 +87,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   const canAttachImages = !!s.promptCapabilities.image;
   // "@ file" references ride on embeddedContext (the agent accepts resource blocks).
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
+  const canAttach = canAttachImages || canReferenceFiles;
   const hasContent = !!text.trim() || images.length > 0 || files.length > 0;
   // Mid-turn the button queues instead of sending, but it wants exactly the same
   // things: something to say, an agent to say it to, no upload still landing.
@@ -492,9 +493,9 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
       )}
       <div
         className={"composer" + (compact ? " compact" : "") + (dragging ? " dragover" : "") + (shellMode ? " shell" : "")}
-        onDragOver={canAttachImages ? (e) => { e.preventDefault(); setDragging(true); } : undefined}
-        onDragLeave={canAttachImages ? () => setDragging(false) : undefined}
-        onDrop={canAttachImages ? (e) => { e.preventDefault(); setDragging(false); void addFiles(e.dataTransfer?.files); } : undefined}
+        onDragOver={canAttach ? (e) => { e.preventDefault(); setDragging(true); } : undefined}
+        onDragLeave={canAttach ? () => setDragging(false) : undefined}
+        onDrop={canAttach ? (e) => { e.preventDefault(); setDragging(false); void addAttachments(e.dataTransfer?.files); } : undefined}
       >
         {images.length > 0 && (
           <div className="attachments">
@@ -523,6 +524,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
           <MarkdownInput ref={mi} className="cm-input" value={text} placeholder={placeholder}
             onChange={onEditorChange}
             onPasteFiles={canAttachImages ? (fs) => void addFiles(fs) : undefined}
+            onDropFiles={(fs) => { setDragging(false); void addAttachments(fs); }}
             callbacksRef={callbacksRef} />
         </div>
         <div className="crow">
