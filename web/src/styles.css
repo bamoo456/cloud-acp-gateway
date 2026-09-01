@@ -927,6 +927,18 @@
   .md a img { cursor: pointer; }
   .md pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     max-width: 100%; padding: 12px 14px; overflow: auto; margin: 10px 0; }
+  /* Copy button per code block (markdown.ts wraps every <pre> in .md-pre). It
+     sits on the wrapper, not inside the <pre>, so it stays put while the code
+     scrolls under it — and it carries the <pre>'s own background, because on
+     touch it is always visible and would otherwise sit on the first line. */
+  .md-pre { position: relative; margin: 10px 0; }
+  .md-pre > pre { margin: 0; padding-right: 46px; }
+  /* opacity would fade the fill along with the icon and let the code show
+     through, so it stays 1 and the ink carries the quietness instead. */
+  .md-copy { position: absolute; top: 6px; right: 6px; margin-top: 0;
+    opacity: 1; color: var(--faint); background: var(--surface); border-radius: 8px; }
+  .md-copy .i-check, .md-copy.copied .i-copy { display: none; }
+  .md-copy.copied .i-check { display: block; }
   .md code { font-family: var(--mono); font-size: var(--chat-code-size); }
   /* A 390px column fits about 30 monospace characters, so a code block that
      scrolls sideways shows a third of every line and no hint that the rest
