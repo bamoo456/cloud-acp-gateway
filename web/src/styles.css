@@ -1174,7 +1174,11 @@
     font-size: var(--chat-code-size); background: var(--surface-2); border-radius: 4px; padding: 0 3px; }
   .composer .cm-md-codeblock { background: var(--codeblock-bg); color: var(--codeblock-fg);
     font-family: var(--mono); font-size: var(--chat-code-size);
-    padding: 2px 10px; }
+    padding: 2px 10px;
+    /* The block is inverted, so .cm-content's caret-color (--text) is the block's
+       own background — an invisible caret inside code, in both themes. The native
+       caret takes its color from the element it sits in, so re-point it here. */
+    caret-color: var(--codeblock-fg); }
   /* The ``` fence markers and `lang` identifier also get the `t.monospace` tag,
      so they pick up .cm-md-code's chip background — which looks like a stray
      pill on top of the code block. Suppress the chip here; the inherited fg
