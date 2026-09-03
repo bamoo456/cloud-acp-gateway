@@ -26,5 +26,8 @@
     "markdown-it": "^14.2.0",
     "tsx": "^4.22.4",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "@openai/codex": "0.150.1"
   }
 }
