@@ -1169,6 +1169,8 @@
   .composer .cm-selectionBackground,
   .composer .cm-content::selection,
   .composer .cm-content ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  .composer .cm-md-codeblock::selection,
+  .composer .cm-md-codeblock ::selection { background: color-mix(in srgb, var(--codeblock-fg) 28%, transparent); }
   /* markdown rendering: inline code, fenced blocks, links, markers */
   .composer .cm-md-code { font-family: var(--mono);
     font-size: var(--chat-code-size); background: var(--surface-2); border-radius: 4px; padding: 0 3px; }
