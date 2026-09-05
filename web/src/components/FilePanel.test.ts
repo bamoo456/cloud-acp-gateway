@@ -3,6 +3,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ChangesResult, FileDiffResult, FilePreviewResult } from "../lib/api.ts";
 
+// A file row, not a folder row: every list in the panel is a folder tree now,
+// so ".wf-row" also matches the folder headers the tree draws.
+const FILE_ROW = "button.wf-row:not(.wf-dir-row)";
+
 const flush = async () => {
   await Promise.resolve();
   await Promise.resolve();
@@ -110,6 +114,12 @@ describe("FilePanel", () => {
     await act(async () => { await flush(); });
   }
 
+  // Rows are in folder order now, so a test that wants a particular file asks
+  // for it by name rather than by the position git happened to list it in.
+  const fileRow = (name: string) =>
+    [...container.querySelectorAll<HTMLButtonElement>(FILE_ROW)]
+      .find((r) => r.querySelector(".wf-nm")?.textContent === name);
+
   const section = (name: string) =>
     [...container.querySelectorAll<HTMLElement>(".wf-sec")]
       .find((el) => el.querySelector(".wf-sec-head")?.getAttribute("data-section") === name);
@@ -161,12 +171,16 @@ describe("FilePanel", () => {
     await render();
 
     expect(getWorkspaceChanges).toHaveBeenCalledWith("/repo");
-    const rows = [...container.querySelectorAll("button.wf-row")];
+    const rows = [...container.querySelectorAll(FILE_ROW)];
     expect(rows).toHaveLength(2);
-    expect(rows[0].textContent).toContain("gateway.ts");
-    expect(rows[0].textContent).toContain("+12");
-    expect(rows[0].textContent).toContain("−3");
-    expect(rows[1].textContent).toContain("shot.png");
+    // Grouped under the folders they live in, alphabetically — docs/ before
+    // src/, which is not the order git reported them in.
+    expect([...container.querySelectorAll("button.wf-dir-row .wf-nm")].map((d) => d.textContent))
+      .toEqual(["docs", "src"]);
+    expect(rows[0].textContent).toContain("shot.png");
+    expect(rows[1].textContent).toContain("gateway.ts");
+    expect(rows[1].textContent).toContain("+12");
+    expect(rows[1].textContent).toContain("−3");
   });
 
   test("inspects the conversation's folder, not whatever the picker last showed", async () => {
@@ -189,7 +203,7 @@ describe("FilePanel", () => {
     useStore.setState({ filesOpen: true, cwd: "/repo" });
     await render();
 
-    const row = container.querySelector<HTMLButtonElement>("button.wf-row");
+    const row = fileRow("gateway.ts");
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
 
@@ -205,7 +219,7 @@ describe("FilePanel", () => {
     await render();
 
     // src/gateway.ts (from the default DIFF fixture) is not HTML.
-    const row = container.querySelector<HTMLButtonElement>("button.wf-row");
+    const row = fileRow("gateway.ts");
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
     const modeLabels = () =>
@@ -525,7 +539,7 @@ describe("FilePanel", () => {
 
     const groups = [...section("outputs")!.querySelectorAll(".wf-group")].map((g) => g.textContent);
     expect(groups).toEqual(["Written in this conversation", "Other changes in this folder"]);
-    const rows = [...section("outputs")!.querySelectorAll("button.wf-row")].map((r) => r.textContent);
+    const rows = [...section("outputs")!.querySelectorAll(FILE_ROW)].map((r) => r.textContent);
     expect(rows[0]).toContain("raven.sql");
     expect(rows.slice(1).join(" ")).toContain("gateway.ts");
   });
@@ -558,7 +572,7 @@ describe("FilePanel", () => {
 
     // Only the folder of a file the conversation WROTE is asked about.
     expect(getWorkspaceOutputs).toHaveBeenCalledWith("/repo", ["/tmp/icons"]);
-    const rows = [...section("outputs")!.querySelectorAll("button.wf-row")].map((r) => r.textContent);
+    const rows = [...section("outputs")!.querySelectorAll(FILE_ROW)].map((r) => r.textContent);
     expect(rows.join(" ")).toContain("generated.html");
     const groups = [...section("outputs")!.querySelectorAll(".wf-group")].map((g) => g.textContent);
     expect(groups).toContain("Also in folders this conversation wrote to");
@@ -570,7 +584,7 @@ describe("FilePanel", () => {
     getWorkspaceOutputs.mockRejectedValue(new Error("no such route"));
     await withTouchedSession();
 
-    const rows = [...section("outputs")!.querySelectorAll("button.wf-row")].map((r) => r.textContent);
+    const rows = [...section("outputs")!.querySelectorAll(FILE_ROW)].map((r) => r.textContent);
     expect(rows.join(" ")).toContain("raven.sql");
     expect(rows.join(" ")).toContain("gateway.ts");
   });
@@ -611,7 +625,7 @@ describe("FilePanel", () => {
     });
     await render();
 
-    const rows = [...section("outputs")!.querySelectorAll("button.wf-row")];
+    const rows = [...section("outputs")!.querySelectorAll(FILE_ROW)];
     expect(rows.filter((r) => r.textContent?.includes("gateway.ts"))).toHaveLength(1);
     expect(rows[0].textContent).toContain("+12");
     expect(rows[0].querySelector(".wf-mark")?.className).toContain("wf-git modified");
@@ -717,7 +731,7 @@ describe("FilePanel", () => {
     const panel = container.querySelector<HTMLElement>("#files")!;
     const listWidth = parseInt(panel.style.width, 10);
 
-    const rows = () => [...container.querySelectorAll<HTMLButtonElement>("button.wf-row")];
+    const rows = () => [...container.querySelectorAll<HTMLButtonElement>(FILE_ROW)];
     await act(async () => { rows()[0].dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
 
@@ -735,7 +749,7 @@ describe("FilePanel", () => {
     // The next file is one click away, from the same list.
     await act(async () => { rows()[1].dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
-    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/docs/shot.png");
+    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/gateway.ts");
     expect(rows()[1].classList.contains("on")).toBe(true);
     expect(rows()[0].classList.contains("on")).toBe(false);
 
@@ -778,7 +792,7 @@ describe("FilePanel", () => {
     await render();
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>("button.wf-row")!
+      container.querySelector<HTMLButtonElement>(FILE_ROW)!
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await act(async () => { await flush(); });
@@ -803,7 +817,7 @@ describe("FilePanel", () => {
     const listWidth = parseInt(panel.style.width, 10);
     await switchTo("Review");
 
-    const row = [...container.querySelectorAll<HTMLButtonElement>("button.wf-row")]
+    const row = [...container.querySelectorAll<HTMLButtonElement>(FILE_ROW)]
       .find((b) => b.textContent?.includes("gateway.ts"))!;
     await act(async () => { row.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
@@ -832,7 +846,7 @@ describe("FilePanel", () => {
     await render();
     await switchTo("Review");
 
-    const row = [...container.querySelectorAll<HTMLButtonElement>("button.wf-row")]
+    const row = [...container.querySelectorAll<HTMLButtonElement>(FILE_ROW)]
       .find((b) => b.textContent?.includes("gateway.ts"))!;
     await act(async () => { row.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
@@ -911,7 +925,7 @@ describe("FilePanel", () => {
 
   test("an output row opens on its diff", async () => {
     await withTouchedSession();
-    const row = container.querySelector<HTMLButtonElement>("button.wf-row");
+    const row = container.querySelector<HTMLButtonElement>(FILE_ROW);
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
     expect(getFileDiff).toHaveBeenCalledWith("/repo", "/repo/reports/raven.sql");
@@ -946,7 +960,7 @@ describe("FilePanel", () => {
     });
     await render();
 
-    const row = container.querySelector<HTMLButtonElement>("button.wf-row");
+    const row = container.querySelector<HTMLButtonElement>(FILE_ROW);
     expect(row?.textContent).toContain("shot.png");
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
@@ -1078,7 +1092,7 @@ describe("FilePanel", () => {
     });
     await render();
 
-    const row = [...container.querySelectorAll<HTMLElement>("button.wf-row")]
+    const row = [...container.querySelectorAll<HTMLElement>(FILE_ROW)]
       .find((r) => r.querySelector(".wf-nm")?.textContent === "gateway.ts")!;
     await act(async () => {
       row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
@@ -1101,7 +1115,7 @@ describe("FilePanel", () => {
     useStore.setState({ filesOpen: true, cwd: "/repo", promptCapabilities: {} });
     await render();
 
-    const row = container.querySelector<HTMLElement>("button.wf-row")!;
+    const row = container.querySelector<HTMLElement>(FILE_ROW)!;
     await act(async () => {
       row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     });
@@ -1175,7 +1189,7 @@ describe("FilePanel", () => {
     });
     await render();
 
-    const row = container.querySelector<HTMLElement>("button.wf-row")!;
+    const row = container.querySelector<HTMLElement>(FILE_ROW)!;
     await act(async () => {
       row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     });
