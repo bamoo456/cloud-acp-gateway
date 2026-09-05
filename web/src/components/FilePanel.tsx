@@ -31,6 +31,7 @@ import {
   DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
 } from "../lib/panelWidth.ts";
 import { FolderBrowser } from "./FolderBrowser.tsx";
+import { PathTree } from "./PathTree.tsx";
 import { IconBack, IconX, IconRefresh, IconExpand, IconPanel, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, IconFolder, IconCopy, IconPencil, IconCheck, fileIcon } from "../lib/icons.tsx";
 import { findRanges, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/findInFile.ts";
 
@@ -83,9 +84,12 @@ type Mode = "session" | "project" | "review";
 const LIST_WIDTH = 300;
 const MIN_VIEW_WIDTH = 340;
 
-function FileRow({ abs, lead, leadClass, leadTitle, name, dir, right, onClick, onMenu }: {
+// `indent` is where the row sits in its folder tree (see PathTree). The folder
+// itself is a row of its own now, so the name is all this one carries — the
+// path stays on the title, which is what a truncated deep name is hovered for.
+function FileRow({ abs, lead, leadClass, leadTitle, name, dir, indent, right, onClick, onMenu }: {
   abs: string; lead: React.ReactNode; leadClass: string; leadTitle: string;
-  name: string; dir: string; right?: React.ReactNode; onClick: () => void;
+  name: string; dir: string; indent: number; right?: React.ReactNode; onClick: () => void;
   onMenu: (x: number, y: number) => void;
 }) {
   const menu = useRowMenu(onMenu);
@@ -93,12 +97,13 @@ function FileRow({ abs, lead, leadClass, leadTitle, name, dir, right, onClick, o
   // in the takeover layout the list is behind the file it would be marking.
   const open = useIsOpenFile(abs);
   return (
-    <button className={"wf-row" + (open ? " on" : "")} onClick={onClick} {...menu}
-      title={dir ? dir + "/" + name : name}>
+    <button className={"wf-row wf-tree-row" + (open ? " on" : "")} onClick={onClick} {...menu}
+      style={{ paddingLeft: indent }} title={dir ? dir + "/" + name : name}>
+      {/* Where a folder row's twisty is, so names line up down the tree. */}
+      <span className="wf-twist" />
       <span className={"wf-mark " + leadClass} title={leadTitle}>{lead}</span>
       <span className="wf-name">
         <span className="wf-nm">{name}</span>
-        {dir && <span className="wf-dir">{dir}</span>}
       </span>
       {right}
     </button>
@@ -144,8 +149,9 @@ function diffstat(r: ChangesResult) {
 // Tool calls report absolute paths, and in a column this narrow the folder
 // prefix every row shares would push the part that distinguishes them off the
 // end. Show the path as it reads from the conversation's own folder.
-function PanelRow({ file, cwd, onOpen, onMenu }: {
-  file: PanelFile; cwd: string; onOpen: () => void; onMenu: (x: number, y: number) => void;
+function PanelRow({ file, cwd, indent, onOpen, onMenu }: {
+  file: PanelFile; cwd: string; indent: number;
+  onOpen: () => void; onMenu: (x: number, y: number) => void;
 }) {
   const kind = fileKind(file.label);
   const git = file.git;
@@ -158,6 +164,7 @@ function PanelRow({ file, cwd, onOpen, onMenu }: {
       leadTitle={git ? STATUS_LABEL[git.status] + (git.staged ? " (staged)" : "") : kind.category}
       name={file.label}
       dir={dirname(relativeTo(file.abs, cwd))}
+      indent={indent}
       onClick={onOpen}
       onMenu={onMenu}
       right={counts ? (
@@ -177,14 +184,15 @@ function PanelRow({ file, cwd, onOpen, onMenu }: {
 // Context rows never carry git status — the question there is "what did the
 // agent read", and whether that file also happens to be dirty is someone else's
 // business.
-function ContextRow({ path, label, cwd, onOpen, onMenu }: {
-  path: string; label: string; cwd: string; onOpen: () => void;
+function ContextRow({ path, label, cwd, indent, onOpen, onMenu }: {
+  path: string; label: string; cwd: string; indent: number; onOpen: () => void;
   onMenu: (x: number, y: number) => void;
 }) {
   const kind = fileKind(label);
   return (
     <FileRow abs={path} lead={fileIcon(kind.icon)} leadClass="wf-kind" leadTitle={kind.category}
-      name={label} dir={dirname(relativeTo(path, cwd))} onClick={onOpen} onMenu={onMenu} />
+      name={label} dir={dirname(relativeTo(path, cwd))} indent={indent}
+      onClick={onOpen} onMenu={onMenu} />
   );
 }
 
@@ -558,30 +566,37 @@ export function FilePanel() {
                     {labelWritten && (
                       <div className="wf-group">Written in this conversation</div>
                     )}
-                    {written.map((f) => (
-                      <PanelRow key={f.abs} file={f} cwd={cwd}
-                        onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
-                        onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
-                    ))}
+                    {/* Each half of Outputs is its own tree: the group headings
+                        are the split that matters here, and one tree across
+                        them would fold a written file in beside a stranger's
+                        change. */}
+                    <PathTree items={written} pathOf={(f) => relativeTo(f.abs, cwd)} resetKey={cwd}
+                      renderFile={(f, indent) => (
+                        <PanelRow file={f} cwd={cwd} indent={indent}
+                          onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
+                          onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
+                      )} />
                     {alsoChanged.length > 0 && (
                       <div className="wf-group">Other changes in this folder</div>
                     )}
-                    {alsoChanged.map((f) => (
-                      <PanelRow key={f.abs} file={f} cwd={cwd}
-                        onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
-                        onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
-                    ))}
+                    <PathTree items={alsoChanged} pathOf={(f) => relativeTo(f.abs, cwd)} resetKey={cwd}
+                      renderFile={(f, indent) => (
+                        <PanelRow file={f} cwd={cwd} indent={indent}
+                          onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "diff" })}
+                          onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
+                      )} />
                     {alsoInFolder.length > 0 && (
                       <div className="wf-group">Also in folders this conversation wrote to</div>
                     )}
                     {/* Opens on the file, not on a diff: these rows exist precisely
                         because git cannot describe them, so there is no diff to show
                         and the viewer would only bounce itself to the contents view. */}
-                    {alsoInFolder.map((f) => (
-                      <PanelRow key={f.abs} file={f} cwd={cwd}
-                        onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })}
-                        onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
-                    ))}
+                    <PathTree items={alsoInFolder} pathOf={(f) => relativeTo(f.abs, cwd)} resetKey={cwd}
+                      renderFile={(f, indent) => (
+                        <PanelRow file={f} cwd={cwd} indent={indent}
+                          onOpen={() => openFilePreview({ abs: f.abs, path: relativeTo(f.abs, cwd), mode: "file" })}
+                          onMenu={(x, y) => openMenu(f.abs, false, x, y)} />
+                      )} />
                     {folders.some((f) => f.truncated) && (
                       <div className="wf-note">Those folders hold more than this list shows.</div>
                     )}
@@ -605,11 +620,12 @@ export function FilePanel() {
                     {context.length === 0 && (
                       <div className="wf-empty">No files consulted in this conversation yet.</div>
                     )}
-                    {context.map((f) => (
-                      <ContextRow key={f.path} path={f.path} label={f.label} cwd={cwd}
-                        onOpen={() => openFilePreview({ abs: f.path, path: relativeTo(f.path, cwd), mode: "file" })}
-                        onMenu={(x, y) => openMenu(f.path, false, x, y)} />
-                    ))}
+                    <PathTree items={context} pathOf={(f) => relativeTo(f.path, cwd)} resetKey={cwd}
+                      renderFile={(f, indent) => (
+                        <ContextRow path={f.path} label={f.label} cwd={cwd} indent={indent}
+                          onOpen={() => openFilePreview({ abs: f.path, path: relativeTo(f.path, cwd), mode: "file" })}
+                          onMenu={(x, y) => openMenu(f.path, false, x, y)} />
+                      )} />
                   </Section>
                 </div>
               )}

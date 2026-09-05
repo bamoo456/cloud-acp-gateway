@@ -7,9 +7,10 @@ import {
 } from "../lib/api.ts";
 import { buildReviewMessage, buildApprovalMessage } from "../lib/reviewPrompt.ts";
 import { UnifiedDiff, type DiffAnchor } from "./UnifiedDiff.tsx";
-import { basename, dirname, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
+import { basename, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
 import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import { IconBack, IconTrash } from "../lib/icons.tsx";
+import { PathTree } from "./PathTree.tsx";
 
 // Review mode: read a diff, write comments against its lines, send them to the
 // agent as one message.
@@ -352,27 +353,34 @@ export function ReviewPanel({ cwd, refreshKey, reloadKey, onCount, split, onDeta
               <EmptyState changes={changes} scope={scope} ref_={spec?.base ?? spec?.commit} />
             )}
             {files.length > 0 && <StatLine files={files} truncated={!!changes?.truncated} />}
-            {files.map((f) => (
-              <button key={f.abs} className={"wf-row" + (openFile?.abs === f.abs ? " on" : "")}
-                onClick={() => openReviewFile(f)} title={f.path}>
-                <span className={"wf-mark wf-git " + f.status} title={STATUS_LABEL[f.status]}>
-                  {STATUS_MARK[f.status]}
-                </span>
-                <span className="wf-name">
-                  <span className="wf-nm">{basename(f.path)}</span>
-                  {dirname(f.path) && <span className="wf-dir">{dirname(f.path)}</span>}
-                </span>
-                {countFor(f.path) > 0 && <span className="rv-badge">{countFor(f.path)}</span>}
-                <span className="wf-counts">
-                  {f.binary
-                    ? <span className="bin">bin</span>
-                    : <>
-                        {(f.additions ?? 0) > 0 && <span className="add">+{f.additions}</span>}
-                        {(f.deletions ?? 0) > 0 && <span className="del">−{f.deletions}</span>}
-                      </>}
-                </span>
-              </button>
-            ))}
+            {/* Grouped by folder rather than one flat list: a review of more
+                than a handful of files is read a folder at a time, and the
+                path each row used to carry on its second line is the folder
+                row's job now. Keyed on the revision — a different diff is a
+                different tree. */}
+            <PathTree items={files} pathOf={(f) => f.path} resetKey={cwd + ":" + specKey}
+              renderFile={(f, indent) => (
+                <button className={"wf-row wf-tree-row" + (openFile?.abs === f.abs ? " on" : "")}
+                  style={{ paddingLeft: indent }}
+                  onClick={() => openReviewFile(f)} title={f.path}>
+                  <span className="wf-twist" />
+                  <span className={"wf-mark wf-git " + f.status} title={STATUS_LABEL[f.status]}>
+                    {STATUS_MARK[f.status]}
+                  </span>
+                  <span className="wf-name">
+                    <span className="wf-nm">{basename(f.path)}</span>
+                  </span>
+                  {countFor(f.path) > 0 && <span className="rv-badge">{countFor(f.path)}</span>}
+                  <span className="wf-counts">
+                    {f.binary
+                      ? <span className="bin">bin</span>
+                      : <>
+                          {(f.additions ?? 0) > 0 && <span className="add">+{f.additions}</span>}
+                          {(f.deletions ?? 0) > 0 && <span className="del">−{f.deletions}</span>}
+                        </>}
+                  </span>
+                </button>
+              )} />
           </>
         )}
       </div>
