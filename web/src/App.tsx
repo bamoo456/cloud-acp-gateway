@@ -135,32 +135,29 @@ export function App() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { alive = false; clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
-  // Poll every configured provider's quota (Claude, Codex), independent of
-  // which agent is currently active — the bottom bar shows every provider on
-  // hover/click, not just the one on screen, so all of them need to stay
-  // fresh in the background. Separate from the /running poll and much
+  // Poll every configured account's quota, independent of which agent is
+  // currently active — the bottom bar shows every account on hover/click, not
+  // just the one on screen, so all of them need to stay fresh in the background.
+  // Separate from the /running poll and much
   // slower: the gateway caches for 5 minutes, so a tighter loop would only
-  // ask the same cached answer more often. Joined into one string because a
-  // new array/Set every render would restart the interval on every render.
-  const quotaKinds = useStore((s) => {
-    const kinds = new Set<string>();
-    for (const a of s.cfg.agents) {
-      const kind = agentQuotaKind(a);
-      if (kind) kinds.add(kind);
-    }
-    return [...kinds].sort().join(",");
+  // ask the same cached answer more often. A serialized list keeps the effect
+  // stable without relying on a freshly-created array identity.
+  const quotaAgentsKey = useStore((s) => {
+    return JSON.stringify(s.cfg.agents
+      .map((a) => ({ name: a.name, kind: agentQuotaKind(a) }))
+      .filter((a): a is { name: string; kind: "claude" | "codex" } => a.kind !== null));
   });
   useEffect(() => {
-    if (!quotaKinds) return;
-    const kinds = quotaKinds.split(",") as Array<"claude" | "codex">;
+    const agents = JSON.parse(quotaAgentsKey) as Array<{ name: string; kind: "claude" | "codex" }>;
+    if (!agents.length) return;
     let alive = true;
     const tick = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       if (useStore.getState().locked) return;
-      for (const kind of kinds) {
-        void getUsageLimits(kind).then((result) => {
+      for (const { name, kind } of agents) {
+        void getUsageLimits(kind, name).then((result) => {
           if (alive && result) {
-            useStore.getState().ingestUsageLimits(kind, result.windows, result.unlimited, result.unavailable);
+            useStore.getState().ingestUsageLimits(name, result.windows, result.unlimited, result.unavailable);
           }
         });
       }
@@ -170,7 +167,7 @@ export function App() {
     const onVisible = () => { if (document.visibilityState === "visible") tick(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { alive = false; clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
-  }, [quotaKinds]);
+  }, [quotaAgentsKey]);
   // Badge the tab (favicon + title) with conversations that have something to
   // read — a turn that finished or a prompt waiting on an answer. Counted from
   // the gateway's inbox rather than from this tab's own sessions, so a run

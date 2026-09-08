@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CLIENT_CONFIG_SCHEMA_VERSION, buildClientConfig } from "./client-config.ts";
 
-test("native client config exposes capabilities without credentials or commands", () => {
+test("native client config exposes capabilities without credentials, commands, or env", () => {
   const config = buildClientConfig({
     gatewayVersion: "test",
     ssePath: "/stream",
@@ -19,6 +19,7 @@ test("native client config exposes capabilities without credentials or commands"
       sessionLoad: true,
       skin: "codex",
       cmd: "/secret/codex-acp",
+      env: { CODEX_HOME: "/secret/codex-home", ACPG_PRIVATE: "secret" },
     }],
   });
 
@@ -36,4 +37,5 @@ test("native client config exposes capabilities without credentials or commands"
   }]);
   assert.equal(JSON.stringify(config).includes("/secret"), false);
   assert.equal(JSON.stringify(config).includes("token"), false);
+  assert.equal("env" in config.agents[0], false);
 });

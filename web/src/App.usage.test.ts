@@ -55,7 +55,13 @@ describe("App usage strip", () => {
     document.body.innerHTML = "";
   });
 
-  async function mountAndConnect() {
+  async function mountAndConnect(
+    agents: Array<Record<string, unknown>> = [{ name: "claude", cwd: "/c" }],
+    defaultAgent = String(agents[0]?.name ?? "claude"),
+  ) {
+    document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
+      token: "t", defaultAgent, agents, fsRoot: "/",
+    });
     const { App } = await import("./App.tsx");
     await act(async () => {
       root = createRoot(container);
@@ -136,5 +142,17 @@ describe("App usage strip", () => {
     await mountAndConnect();
     await vi.waitFor(() => expect(container.querySelector(".usage-strip .u-seg")).not.toBeNull());
     expect(container.querySelector(".usage-strip")!.textContent).toBe("quotare-auth");
+  });
+
+  test("two named Codex profiles are polled with their own account names", async () => {
+    getUsageLimits.mockResolvedValue({ windows: {} });
+    await mountAndConnect([
+      { name: "codex-personal", cwd: "/personal", kind: "codex" },
+      { name: "codex-work", cwd: "/work", kind: "codex" },
+    ], "codex-personal");
+
+    await vi.waitFor(() => expect(getUsageLimits).toHaveBeenCalledTimes(2));
+    expect(getUsageLimits).toHaveBeenCalledWith("codex", "codex-personal");
+    expect(getUsageLimits).toHaveBeenCalledWith("codex", "codex-work");
   });
 });

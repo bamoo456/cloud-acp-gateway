@@ -3,7 +3,15 @@ import { describe, it } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { normalizeLimits, parseCredential, normalizeCodexLimits, parseCodexCredential, readCredential } from "./usage-limits.ts";
+import {
+  codexUsageLimits,
+  normalizeLimits,
+  parseCredential,
+  normalizeCodexLimits,
+  parseCodexCredential,
+  readCredential,
+  resetUsageLimitsCache,
+} from "./usage-limits.ts";
 
 const AT = 1_700_000_000_000;
 
@@ -225,5 +233,53 @@ describe("parseCodexCredential", () => {
 
   it("unparseable content is simply no credential", () => {
     assert.equal(parseCodexCredential("not json"), "no-credential");
+  });
+});
+
+describe("codexUsageLimits", () => {
+  it("isolates credentials, cache entries, and in-flight requests by CODEX_HOME", async () => {
+    const homeA = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codex-quota-a-"));
+    const homeB = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codex-quota-b-"));
+    fs.writeFileSync(path.join(homeA, "auth.json"), JSON.stringify({ tokens: { access_token: "token-a" } }));
+    fs.writeFileSync(path.join(homeB, "auth.json"), JSON.stringify({ tokens: { access_token: "token-b" } }));
+    const previousFetch = globalThis.fetch;
+    const calls: Array<{ token: string; home: string }> = [];
+    globalThis.fetch = ((_: string | URL, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      const token = headers.authorization.replace("Bearer ", "");
+      calls.push({ token, home: token === "token-a" ? homeA : homeB });
+      return new Promise<Response>((resolve) => {
+        setTimeout(() => resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ rate_limit: { primary_window: { used_percent: token === "token-a" ? 10 : 20, limit_window_seconds: 18000 } } }),
+        } as Response), 10);
+      });
+    }) as typeof fetch;
+    resetUsageLimitsCache();
+    try {
+      const [a1, a2, b] = await Promise.all([
+        codexUsageLimits({ codexHome: homeA, now: AT }),
+        codexUsageLimits({ codexHome: path.join(homeA, "."), now: AT }),
+        codexUsageLimits({ codexHome: homeB, now: AT }),
+      ]);
+      assert.equal(calls.length, 2, "same-home requests share one in-flight request");
+      assert.deepEqual(calls.map((c) => c.home).sort(), [homeA, homeB].sort());
+      assert.equal(a1.status, "ok");
+      assert.equal(a2.status, "ok");
+      assert.equal(b.status, "ok");
+      assert.equal(a1.status === "ok" ? a1.windows.five_hour.utilization : -1, 0.1);
+      assert.equal(b.status === "ok" ? b.windows.five_hour.utilization : -1, 0.2);
+
+      const cachedA = await codexUsageLimits({ codexHome: homeA, now: AT + 1_000 });
+      assert.equal(calls.length, 2, "same-home result remains cached");
+      assert.equal(cachedA.status, "ok");
+      assert.equal(cachedA.status === "ok" ? cachedA.windows.five_hour.utilization : -1, 0.1);
+    } finally {
+      globalThis.fetch = previousFetch;
+      resetUsageLimitsCache();
+      fs.rmSync(homeA, { recursive: true, force: true });
+      fs.rmSync(homeB, { recursive: true, force: true });
+    }
   });
 });

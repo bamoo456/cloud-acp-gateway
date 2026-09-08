@@ -119,7 +119,46 @@ for (const k of Object.keys(process.env)) {
 // user also changes for their terminal — the gateway needs a default of its own
 // that a terminal `/model` can't move. Values the session doesn't offer are
 // dropped, like any other control re-apply.
-type AgentProfile = { cmd: string; args: string[]; cwd: string; defaults?: Record<string, string> };
+export type AgentProfile = {
+  cmd: string;
+  args: string[];
+  cwd: string;
+  defaults?: Record<string, string>;
+  env?: Record<string, string>;
+};
+
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function validateAgentEnv(
+  name: string,
+  file: string,
+  raw: unknown,
+): Record<string, string> | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`agents: invalid env for agent "${name}" in ${file}: expected an object of string values`);
+  }
+  const env: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const [key, value] of Object.entries(raw)) {
+    if (!ENV_KEY.test(key)) {
+      throw new Error(`agents: invalid env key "${key}" for agent "${name}" in ${file}`);
+    }
+    if (typeof value !== "string") {
+      throw new Error(`agents: env value for key "${key}" on agent "${name}" in ${file} must be a string`);
+    }
+    if (value.includes("\0")) {
+      throw new Error(`agents: env value for key "${key}" on agent "${name}" in ${file} must not contain NUL`);
+    }
+    if (key === "CODEX_HOME" && (!value || !path.isAbsolute(value))) {
+      throw new Error(`agents: CODEX_HOME for agent "${name}" in ${file} must be a non-empty absolute path`);
+    }
+    if (key === "HOME" && (!value || !path.isAbsolute(value))) {
+      throw new Error(`agents: HOME for agent "${name}" in ${file} must be a non-empty absolute path`);
+    }
+    env[key] = value;
+  }
+  return env;
+}
 
 function resolveCmd(cmd: string): string {
   // Relative agent commands resolve against the gateway's install dir, NOT the
@@ -134,13 +173,15 @@ export function loadAgents(): Record<string, AgentProfile> {
   // the agent should operate on.
   const defaultCwd = process.env.ACPG_AGENT_CWD || os.homedir();
   if (fs.existsSync(file)) {
-    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<
-      string,
-      Partial<AgentProfile>
-    >;
-    const out: Record<string, AgentProfile> = {};
-    for (const [name, p] of Object.entries(raw)) {
-      if (!p.cmd) {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+    const out = Object.create(null) as Record<string, AgentProfile>;
+    for (const [name, value] of Object.entries(raw)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error(`agents: invalid profile for agent "${name}" in ${file}: expected an object`);
+      }
+      const p = value as Partial<AgentProfile>;
+      const env = validateAgentEnv(name, file, p.env);
+      if (typeof p.cmd !== "string" || !p.cmd) {
         console.error(`FATAL: agent "${name}" in ${file} has no "cmd"`);
         process.exit(1);
       }
@@ -162,6 +203,7 @@ export function loadAgents(): Record<string, AgentProfile> {
         cmd,
         args: p.args ?? [],
         cwd: p.cwd ?? defaultCwd,
+        ...(env === undefined ? {} : { env }),
         // Only string values: every ACP select-type control takes a string, and a
         // number/bool/null in the file would otherwise reach the adapter as one.
         defaults: p.defaults && typeof p.defaults === "object"
@@ -181,16 +223,16 @@ export function loadAgents(): Record<string, AgentProfile> {
     `agents: no agents file at ${file}; falling back to a single claude-only agent`,
   );
   // Fallback: a single agent configured from env (defaults to claude-agent-acp).
-  return {
-    claude: {
-      cmd: resolveCmd(
-        process.env.ACPG_AGENT_CMD ??
-          path.join("node_modules", ".bin", "claude-agent-acp"),
-      ),
-      args: (process.env.ACPG_AGENT_ARGS ?? "").split(" ").filter(Boolean),
-      cwd: defaultCwd,
-    },
+  const out = Object.create(null) as Record<string, AgentProfile>;
+  out.claude = {
+    cmd: resolveCmd(
+      process.env.ACPG_AGENT_CMD ??
+        path.join("node_modules", ".bin", "claude-agent-acp"),
+    ),
+    args: (process.env.ACPG_AGENT_ARGS ?? "").split(" ").filter(Boolean),
+    cwd: defaultCwd,
   };
+  return out;
 }
 
 const cfg = {
@@ -345,6 +387,7 @@ export async function findClaudeSessionFile(cwd: string, sessionId: string, proj
 export interface DeleteHistoryOpts {
   projectsRoot?: string;
   withinRoot?: (cwd: string) => boolean;
+  codexHome?: string;
 }
 function allowedCwd(cwd: string | null | undefined, opts?: DeleteHistoryOpts): boolean {
   if (!opts?.withinRoot || !cwd) return true;
@@ -425,10 +468,19 @@ export async function findClaudeProjectDir(cwd: string, projectsRoot = claudePro
   }
   return null;
 }
-const codexHome = () => process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-const codexIndexFile = () => path.join(codexHome(), "session_index.jsonl");
-const codexSessionsDir = () => path.join(codexHome(), "sessions");
-const codexArchivedDir = () => path.join(codexHome(), "archived_sessions");
+// Resolve a Codex store without changing process.env: a named profile can carry
+// either CODEX_HOME or HOME, while the gateway's inherited CODEX_HOME remains the
+// fallback for profiles that do not select their own account.
+const codexHome = (selected?: string, profileHome?: string) => {
+  if (selected) return selected;
+  if (process.env.CODEX_HOME) return process.env.CODEX_HOME;
+  if (profileHome) return path.join(profileHome, ".codex");
+  return path.join(os.homedir(), ".codex");
+};
+const codexHomeForEnv = (env?: Record<string, string>) => codexHome(env?.CODEX_HOME, env?.HOME);
+const codexIndexFile = (home?: string) => path.join(codexHome(home), "session_index.jsonl");
+const codexSessionsDir = (home?: string) => path.join(codexHome(home), "sessions");
+const codexArchivedDir = (home?: string) => path.join(codexHome(home), "archived_sessions");
 
 // opencode keeps its conversation store under the XDG data dir. Recent builds
 // (the SQLite migration) put it all in one DB, `opencode.db`, with `session`
@@ -1389,10 +1441,10 @@ export async function readClaudeHistoryMessages(file: string, sessionId: string,
 type CodexIndexEntry = { id: string; thread_name?: string; updated_at?: string };
 type CodexSessionFile = { id: string; cwd: string; file: string; updatedAt: string; isSubagent: boolean; isHeadless: boolean };
 
-async function readCodexIndex(): Promise<Map<string, CodexIndexEntry>> {
+async function readCodexIndex(home = codexHome()): Promise<Map<string, CodexIndexEntry>> {
   const out = new Map<string, CodexIndexEntry>();
   let raw = "";
-  try { raw = await fs.promises.readFile(codexIndexFile(), "utf8"); } catch { return out; }
+  try { raw = await fs.promises.readFile(codexIndexFile(home), "utf8"); } catch { return out; }
   for (const line of raw.split(/\n/)) {
     const t = line.trim();
     if (!t) continue;
@@ -1471,27 +1523,27 @@ async function codexSessionFileFromPath(file: string): Promise<CodexSessionFile 
   };
 }
 
-async function listCodexArchivedSessions(): Promise<CodexSessionFile[]> {
+async function listCodexArchivedSessions(home = codexHome()): Promise<CodexSessionFile[]> {
   let files: string[];
-  try { files = await fs.promises.readdir(codexArchivedDir()); } catch { return []; }
+  try { files = await fs.promises.readdir(codexArchivedDir(home)); } catch { return []; }
   const out: CodexSessionFile[] = [];
   for (const f of files) {
     if (!f.endsWith(".jsonl")) continue;
-    const file = path.join(codexArchivedDir(), f);
+    const file = path.join(codexArchivedDir(home), f);
     const session = await codexSessionFileFromPath(file);
     if (session) out.push(session);
   }
   return out;
 }
 
-async function listCodexActiveSessions(): Promise<CodexSessionFile[]> {
-  const files = await listJsonlFilesRecursively(codexSessionsDir());
+async function listCodexActiveSessions(home = codexHome()): Promise<CodexSessionFile[]> {
+  const files = await listJsonlFilesRecursively(codexSessionsDir(home));
   const sessions = await Promise.all(files.map(codexSessionFileFromPath));
   return sessions.filter((s): s is CodexSessionFile => !!s);
 }
 
-async function listCodexSessionFiles(): Promise<CodexSessionFile[]> {
-  const [archived, active] = await Promise.all([listCodexArchivedSessions(), listCodexActiveSessions()]);
+async function listCodexSessionFiles(home = codexHome()): Promise<CodexSessionFile[]> {
+  const [archived, active] = await Promise.all([listCodexArchivedSessions(home), listCodexActiveSessions(home)]);
   const byId = new Map<string, CodexSessionFile>();
   for (const s of [...archived, ...active]) {
     const existing = byId.get(s.id);
@@ -1582,8 +1634,8 @@ async function firstCodexUserText(file: string): Promise<string | null> {
   return null;
 }
 
-async function listCodexHistory(cwd: string, limit: number): Promise<HistorySessionItem[]> {
-  const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
+async function listCodexHistory(cwd: string, limit: number, home = codexHome()): Promise<HistorySessionItem[]> {
+  const [index, sessions] = await Promise.all([readCodexIndex(home), listCodexSessionFiles(home)]);
   const custom = await readTitles(cwd);
   const matching = sessions
     .filter((s) => isUserVisibleCodexSession(s) && sameCwd(s.cwd, cwd))
@@ -1602,8 +1654,8 @@ async function listCodexHistory(cwd: string, limit: number): Promise<HistorySess
 // comes from the same index read, so it is free; what is NOT derived here is the
 // firstCodexUserText fallback, which streams a rollout. Paying that per session
 // on disk is the difference between a listing and reading a gigabyte.
-async function codexTranscriptCandidates(): Promise<TranscriptCandidate[]> {
-  const [index, sessions] = await Promise.all([readCodexIndex(), listCodexSessionFiles()]);
+async function codexTranscriptCandidates(home = codexHome()): Promise<TranscriptCandidate[]> {
+  const [index, sessions] = await Promise.all([readCodexIndex(home), listCodexSessionFiles(home)]);
   return sessions.filter(isUserVisibleCodexSession).map((s) => ({
     sessionId: s.id, file: s.file, cwd: s.cwd,
     title: index.get(s.id)?.thread_name ?? null,
@@ -1622,11 +1674,11 @@ async function codexTranscriptCandidates(): Promise<TranscriptCandidate[]> {
 // streams a rollout until it finds a real (non-synthetic) user message, and
 // paying that for every session on disk instead of the <=limit that survive is
 // the difference between a listing and reading into a gigabyte of transcripts.
-export async function discoverCodexHistory(opts?: { fsRoot?: string; limit?: number }): Promise<DiscoveredHistorySessionItem[]> {
+export async function discoverCodexHistory(opts?: { fsRoot?: string; limit?: number; codexHome?: string }): Promise<DiscoveredHistorySessionItem[]> {
   const fsRoot = opts?.fsRoot ?? FS_ROOT;
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
 
-  const candidates = await codexTranscriptCandidates();
+  const candidates = await codexTranscriptCandidates(opts?.codexHome ?? codexHome());
   const within: TranscriptCandidate[] = [];
   for (const c of candidates) {
     const cwd = c.cwd ? resolveWithinRootBase(c.cwd, fsRoot) : null;
@@ -1655,6 +1707,8 @@ export type SearchCandidate = {
   source: "claude-cli" | "codex-cli"; agentName: string; recencyMs: number;
 };
 
+export type HistoryAgent = { name: string; cmd: string; env?: Record<string, string> };
+
 export type SearchScope = { projectsRoot?: string; fsRoot?: string; store?: Db; cwd?: string | null };
 
 // Providers whose conversations can be searched. opencode is out for the same
@@ -1667,7 +1721,7 @@ const SEARCHABLE_PROVIDERS: HistoryProvider[] = ["claude", "codex"];
 // content — that is stage B, and it only ever sees candidates that survived the
 // FS_ROOT guard below.
 export async function searchCandidates(
-  agents: Array<{ name: string; cmd: string }>,
+  agents: HistoryAgent[],
   params: SearchQuery,
   opts?: SearchScope,
 ): Promise<{ candidates: SearchCandidate[]; skipped: string[] }> {
@@ -1675,32 +1729,31 @@ export async function searchCandidates(
   const store = transcriptStore(opts?.store);
   const wanted = params.agents ? new Set(params.agents) : null;
 
-  // One agent name per provider — a provider's store is the same store whichever
-  // configured agent you came in under (agents.example.json ships two claudes).
-  // So with no ?agent= filter, results are attributed to whichever agent is first
-  // in cfg.agents for that provider. That is deliberate and matches
-  // deleteHistorySession's reasoning: an agent name says where a conversation was
-  // seen from, it does not identify the conversation.
-  const agentByProvider = new Map<HistoryProvider, string>();
+  // Claude's store is shared by configured agents. Codex's store is selected by
+  // CODEX_HOME, so two named Codex agents must each be searched once and retain
+  // the name that selected their store in the result.
+  const stores = new Map<string, { provider: HistoryProvider; agentName: string; codexHome?: string }>();
   const skipped = new Set<string>();
   for (const a of agents) {
     if (wanted && !wanted.has(a.name)) continue;
     const provider = historyProviderFor(a.cmd);
     if (!provider) continue;
     if (!SEARCHABLE_PROVIDERS.includes(provider)) { skipped.add(provider); continue; }
-    if (!agentByProvider.has(provider)) agentByProvider.set(provider, a.name);
+    const home = provider === "codex" ? codexHomeForEnv(a.env) : undefined;
+    const key = provider === "codex" ? `${provider}:${path.resolve(home!)}` : provider;
+    if (!stores.has(key)) stores.set(key, { provider, agentName: a.name, codexHome: home });
   }
 
-  const raw: TranscriptCandidate[] = [];
-  if (agentByProvider.has("claude")) {
-    raw.push(...await claudeTranscriptCandidates(opts?.projectsRoot ?? claudeProjectsRoot(), store));
-  }
-  if (agentByProvider.has("codex")) {
-    raw.push(...await codexTranscriptCandidates());
+  const raw: Array<{ candidate: TranscriptCandidate; agentName: string }> = [];
+  for (const selected of stores.values()) {
+    const candidates = selected.provider === "claude"
+      ? await claudeTranscriptCandidates(opts?.projectsRoot ?? claudeProjectsRoot(), store)
+      : await codexTranscriptCandidates(selected.codexHome);
+    raw.push(...candidates.map((candidate) => ({ candidate, agentName: selected.agentName })));
   }
 
   const candidates: SearchCandidate[] = [];
-  for (const c of raw) {
+  for (const { candidate: c, agentName } of raw) {
     // Scoped to one conversation: every other candidate is dropped before its
     // cwd is even resolved, so the scan reads exactly one file.
     if (params.sessionId && c.sessionId !== params.sessionId) continue;
@@ -1719,7 +1772,7 @@ export async function searchCandidates(
 
     candidates.push({
       sessionId: c.sessionId, file: c.file, cwd, title: c.title, source: c.source,
-      agentName: agentByProvider.get(c.source === "claude-cli" ? "claude" : "codex") ?? "",
+      agentName,
       recencyMs,
     });
   }
@@ -1759,7 +1812,7 @@ async function parseForSearch(c: SearchCandidate, cache: Map<string, ViewMessage
 }
 
 export async function searchTranscripts(
-  agents: Array<{ name: string; cmd: string }>,
+  agents: HistoryAgent[],
   params: SearchQuery,
   opts?: SearchScope & { budgetMs?: number; clock?: () => number },
 ): Promise<SearchResponse> {
@@ -1808,7 +1861,7 @@ export async function searchTranscripts(
   for (const cwd of new Set(results.map((r) => r.cwd))) customByCwd.set(cwd, await readTitles(cwd));
   for (const r of results) {
     if (r.title === null && r.source === "codex-cli") {
-      const file = candidates.find((c) => c.sessionId === r.sessionId)?.file;
+      const file = candidates.find((c) => c.sessionId === r.sessionId && c.agentName === r.agentName)?.file;
       if (file) r.title = await firstCodexUserText(file);
     }
     r.title = customByCwd.get(r.cwd)?.[r.sessionId] ?? r.title;
@@ -1824,8 +1877,8 @@ export async function searchTranscripts(
   };
 }
 
-async function findCodexSessionFile(cwd: string, sessionId: string): Promise<CodexSessionFile | null> {
-  const sessions = await listCodexSessionFiles();
+async function findCodexSessionFile(cwd: string, sessionId: string, home = codexHome()): Promise<CodexSessionFile | null> {
+  const sessions = await listCodexSessionFiles(home);
   return sessions.find((s) => s.id === sessionId && sameCwd(s.cwd, cwd)) ?? null;
 }
 
@@ -1834,8 +1887,8 @@ async function findCodexSessionFile(cwd: string, sessionId: string): Promise<Cod
 // filesystem and only joins the index onto files it found, so an index entry
 // with no rollout is already invisible. Rewriting that append-only file would be
 // far riskier than the stale line it removes.
-async function deleteCodexSession(sessionId: string, opts?: DeleteHistoryOpts): Promise<boolean> {
-  const session = await findCodexSessionFileById(sessionId);
+async function deleteCodexSession(sessionId: string, opts?: DeleteHistoryOpts, home = opts?.codexHome ?? codexHome()): Promise<boolean> {
+  const session = await findCodexSessionFileById(sessionId, home);
   if (!session || !allowedCwd(session.cwd, opts)) return false;
   try { await fs.promises.unlink(session.file); } catch { return false; }
   await clearTitleIn(projectDirFor(session.cwd), sessionId);
@@ -1881,8 +1934,8 @@ async function parseCodexHistoryMessages(file: string): Promise<ViewMessage[]> {
 // Locate a Codex rollout by session id alone. Unlike findCodexSessionFile, this
 // ignores cwd — the id is a globally unique UUID, and the repair below runs even
 // when the session/load request didn't carry a cwd to match against.
-async function findCodexSessionFileById(sessionId: string): Promise<CodexSessionFile | null> {
-  const sessions = await listCodexSessionFiles();
+async function findCodexSessionFileById(sessionId: string, home = codexHome()): Promise<CodexSessionFile | null> {
+  const sessions = await listCodexSessionFiles(home);
   return sessions.find((s) => s.id === sessionId) ?? null;
 }
 
@@ -1955,9 +2008,9 @@ export async function repairInterruptedCodexRollout(file: string): Promise<boole
 // Find and trim the rollout for a Codex session about to be resumed. Best
 // effort: a missing file or read/write error is swallowed (logged) so a resume
 // is never blocked by repair — at worst it falls back to the old hang.
-export async function repairInterruptedCodexSession(sessionId: string): Promise<boolean> {
+export async function repairInterruptedCodexSession(sessionId: string, home = codexHome()): Promise<boolean> {
   try {
-    const found = await findCodexSessionFileById(sessionId);
+    const found = await findCodexSessionFileById(sessionId, home);
     if (!found) return false;
     return await repairInterruptedCodexRollout(found.file);
   } catch (e) {
@@ -2133,10 +2186,10 @@ function deleteOpenCodeSession(sessionId: string): boolean {
   }, false);
 }
 
-export async function listAgentHistory(cmd: string, cwd: string, limit: number, opts?: { projectsRoot?: string; store?: Db }): Promise<HistorySessionItem[]> {
+export async function listAgentHistory(cmd: string, cwd: string, limit: number, opts?: { projectsRoot?: string; store?: Db; codexHome?: string }): Promise<HistorySessionItem[]> {
   const provider = historyProviderFor(cmd);
   if (provider === "claude") return listClaudeHistory(cwd, limit, opts?.projectsRoot, opts?.store);
-  if (provider === "codex") return listCodexHistory(cwd, limit);
+  if (provider === "codex") return listCodexHistory(cwd, limit, opts?.codexHome ?? codexHome());
   if (provider === "opencode") return listOpenCodeHistory(cwd, limit);
   return [];
 }
@@ -2146,7 +2199,7 @@ export async function readAgentHistoryMessages(
   cwd: string,
   sessionId: string,
   limit: number,
-  opts?: { projectsRoot?: string; from?: number; to?: number },
+  opts?: { projectsRoot?: string; from?: number; to?: number; codexHome?: string },
 ): Promise<HistoryMessagesResult | null> {
   const page = { limit, from: opts?.from, to: opts?.to };
   const provider = historyProviderFor(cmd);
@@ -2160,7 +2213,7 @@ export async function readAgentHistoryMessages(
     return sliceMessages(await cachedParse(file, () => parseClaudeHistoryMessages(file, sessionId)), page);
   }
   if (provider === "codex") {
-    const found = await findCodexSessionFile(cwd, sessionId);
+    const found = await findCodexSessionFile(cwd, sessionId, opts?.codexHome ?? codexHome());
     if (!found) return null;
     return sliceMessages(await cachedParse(found.file, () => parseCodexHistoryMessages(found.file)), page);
   }
@@ -2175,9 +2228,9 @@ export async function readAgentHistoryMessages(
   return null;
 }
 
-async function deleteFromProvider(provider: HistoryProvider, sessionId: string, opts?: DeleteHistoryOpts): Promise<boolean> {
+async function deleteFromProvider(provider: HistoryProvider, sessionId: string, opts?: DeleteHistoryOpts, home?: string): Promise<boolean> {
   if (provider === "claude") return deleteClaudeSession(sessionId, opts);
-  if (provider === "codex") return deleteCodexSession(sessionId, opts);
+  if (provider === "codex") return deleteCodexSession(sessionId, opts, home);
   const found = listOpenCodeSessions().find((s) => s.id === sessionId);
   if (!found || !allowedCwd(found.directory, opts)) return false;
   return deleteOpenCodeSession(sessionId);
@@ -2204,11 +2257,27 @@ const PROVIDER_DELETE_ORDER: HistoryProvider[] = ["claude", "opencode", "codex"]
 // conversation lives outside `withinRoot`, or the store refused (opencode DB
 // locked) — the caller still clears the gateway-side records either way, so a
 // half-present conversation can always be tidied away.
-export async function deleteHistorySession(cmds: string[], sessionId: string, opts?: DeleteHistoryOpts): Promise<boolean> {
-  const configured = new Set(cmds.map(historyProviderFor).filter((p): p is HistoryProvider => p !== null));
+export async function deleteHistorySession(
+  agents: Array<string | HistoryAgent>,
+  sessionId: string,
+  opts?: DeleteHistoryOpts,
+): Promise<boolean> {
+  const stores = new Map<string, { provider: HistoryProvider; codexHome?: string }>();
+  for (const configured of agents) {
+    const agent = typeof configured === "string" ? { name: "", cmd: configured } : configured;
+    const provider = historyProviderFor(agent.cmd);
+    if (!provider) continue;
+    const home = provider === "codex"
+      ? (agent.env?.CODEX_HOME ?? opts?.codexHome ?? codexHomeForEnv(agent.env))
+      : undefined;
+    const key = provider === "codex" ? `${provider}:${path.resolve(home!)}` : provider;
+    if (!stores.has(key)) stores.set(key, { provider, codexHome: home });
+  }
   for (const provider of PROVIDER_DELETE_ORDER) {
-    if (!configured.has(provider)) continue;
-    if (await deleteFromProvider(provider, sessionId, opts)) return true;
+    for (const store of stores.values()) {
+      if (store.provider !== provider) continue;
+      if (await deleteFromProvider(provider, sessionId, opts, store.codexHome)) return true;
+    }
   }
   return false;
 }
@@ -2236,7 +2305,9 @@ class Agent {
     this.start();
   }
   private start() {
-    const env = { ...process.env };
+    // Profile values override the gateway environment for this child only. Do
+    // not assign into process.env: sibling agents must retain their own stores.
+    const env = { ...process.env, ...this.profile.env };
     console.log(
       `agent: spawning ${this.profile.cmd} ${this.profile.args.join(" ")} (cwd=${this.profile.cwd})`,
     );
@@ -2638,6 +2709,9 @@ class Channel {
   // Whether this agent is Codex — gates the on-resume rollout repair (issue #61),
   // which only applies to Codex's session store.
   private readonly isCodex: boolean;
+  // The Codex store selected by this named agent. Kept on the channel so repair
+  // runs against the same account as the ACP child, not the gateway process.
+  private readonly codexHome?: string;
   // Only claude/codex spawn a per-session backing CLI that an idle session keeps
   // alive, so only they are worth reaping; opencode handles sessions in-process.
   // (Forced on for tests, whose fake agent has no recognizable binary name.)
@@ -2694,6 +2768,7 @@ class Channel {
     this.controlDefaults = new Map(Object.entries(profile.defaults ?? {}));
     const provider = historyProviderFor(profile.cmd);
     this.isCodex = provider === "codex";
+    this.codexHome = provider === "codex" ? codexHomeForEnv(profile.env) : undefined;
     this.reapable = reapAlways || provider === "claude" || provider === "codex";
     this.ledger = new Ledger(path.join(ledgerDir, `ledger.${name}.jsonl`));
     this.agent = makeAgent(
@@ -3761,7 +3836,7 @@ class Channel {
   // load, so the trim must land first. Failure is swallowed inside
   // repairInterruptedCodexSession — the load is always forwarded.
   private async loadCodexWithRepair(sid: string, out: Buffer): Promise<void> {
-    await repairInterruptedCodexSession(sid);
+    await repairInterruptedCodexSession(sid, this.codexHome);
     this.agent.send(out);
   }
 
@@ -4257,7 +4332,7 @@ const gateway = new Gateway(cfg.agents, cfg.ledgerDir, undefined, db);
 for (const [name, prof] of Object.entries(cfg.agents)) {
   // Register the backing CLI so the login PTY runs the right command for a
   // renamed agent (the kind, not the name, decides claude vs codex login).
-  registerLoginAgent(name, historyProviderFor(prof.cmd));
+  registerLoginAgent(name, historyProviderFor(prof.cmd), prof.env, prof.cwd);
   getSession(name).onSuccess = () => {
     if (gateway.restartAgent(name))
       console.log(`login: restarted agent "${name}" to pick up new credentials`);
@@ -5061,11 +5136,12 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // taken from ?cwd= (validated within FS_ROOT), else the agent's default cwd.
   if (consoleEnabled && pathname === "/history") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
-    const prof = cfg.agents[q.get("agent") ?? cfg.defaultAgent];
+    const agentName = q.get("agent") ?? cfg.defaultAgent;
+    const prof = cfg.agents[agentName];
     const cwd = resolveWithinRoot(q.get("cwd") ?? "") ?? (prof ? prof.cwd : null);
     const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "30", 10) || 30, 1), 200);
-    if (!cwd) { res.writeHead(400); res.end(); return; }
-    listAgentHistory(prof?.cmd ?? "", cwd, limit)
+    if (!prof || !cwd) { res.writeHead(400); res.end(); return; }
+    listAgentHistory(prof.cmd, cwd, limit, { codexHome: codexHomeForEnv(prof.env) })
       .then((sessions) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ sessions }));
@@ -5081,14 +5157,18 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // history browsing. Providers outside DISCOVERABLE_PROVIDERS answer empty.
   if (consoleEnabled && pathname === "/history/discovered") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
-    const prof = cfg.agents[q.get("agent") ?? cfg.defaultAgent];
+    const agentName = q.get("agent") ?? cfg.defaultAgent;
+    const prof = cfg.agents[agentName];
     const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "30", 10) || 30, 1), 200);
-    if (!supportsHistoryDiscovery(prof?.cmd ?? "")) {
+    if (!prof) { res.writeHead(400); res.end(); return; }
+    if (!supportsHistoryDiscovery(prof.cmd)) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ sessions: [] }));
       return;
     }
-    (historyProviderFor(prof?.cmd ?? "") === "codex" ? discoverCodexHistory({ limit }) : discoverClaudeHistory({ limit }))
+    (historyProviderFor(prof.cmd) === "codex"
+      ? discoverCodexHistory({ limit, codexHome: codexHomeForEnv(prof.env) })
+      : discoverClaudeHistory({ limit }))
       .then((sessions) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ sessions }));
@@ -5113,7 +5193,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     const rawCwd = q.get("cwd");
     const cwd = rawCwd ? resolveWithinRoot(rawCwd) : null;
     if (rawCwd && !cwd) { res.writeHead(400); res.end(); return; }
-    const agents = Object.entries(cfg.agents).map(([name, a]) => ({ name, cmd: a.cmd }));
+    const agents = Object.entries(cfg.agents).map(([name, a]) => ({ name, cmd: a.cmd, env: a.env }));
     searchTranscripts(agents, params, { cwd })
       .then((r) => {
         res.writeHead(200, { "content-type": "application/json" });
@@ -5127,8 +5207,56 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // rate-limit path only reports after a turn, and usually without a percentage.
   // Only the normalized windows go out; the OAuth token stays in the gateway.
   if (consoleEnabled && pathname === "/usage/limits") {
-    const kind = new URL(req.url ?? "/", "http://x").searchParams.get("kind");
-    const limitsFor = kind === "codex" ? codexUsageLimits({ codexHome: codexHome() }) : usageLimits({ claudeDir: CLAUDE_DIR });
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const requestedKind = q.get("kind");
+    const requestedAgent = q.get("agent");
+    let kind = requestedKind || "claude";
+    let selectedHome = codexHome();
+    if (requestedKind && requestedKind !== "claude" && requestedKind !== "codex") {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "unsupported usage kind" }));
+      return;
+    }
+    if (requestedAgent) {
+      const profile = cfg.agents[requestedAgent];
+      const profileKind = profile ? historyProviderFor(profile.cmd) : null;
+      if (!profile) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unknown agent" }));
+        return;
+      }
+      if (profileKind !== "claude" && profileKind !== "codex") {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "agent does not support usage limits" }));
+        return;
+      }
+      if (requestedKind && requestedKind !== profileKind) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "usage kind does not match agent" }));
+        return;
+      }
+      kind = profileKind;
+      if (kind === "codex") selectedHome = codexHomeForEnv(profile.env);
+    } else if (kind === "codex") {
+      // A legacy kind-only request is safe only when the configured Codex
+      // profiles all resolve to one store. Never silently use the process-global
+      // account when two named accounts are available.
+      const homes = new Map<string, string>();
+      for (const profile of Object.values(cfg.agents)) {
+        if (historyProviderFor(profile.cmd) !== "codex") continue;
+        const home = codexHomeForEnv(profile.env);
+        homes.set(path.resolve(home), home);
+      }
+      if (homes.size > 1) {
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ status: "unavailable", reason: "ambiguous-agent" }));
+        return;
+      }
+      selectedHome = homes.values().next().value ?? selectedHome;
+    }
+    const limitsFor = kind === "codex"
+      ? codexUsageLimits({ codexHome: selectedHome })
+      : usageLimits({ claudeDir: CLAUDE_DIR });
     limitsFor
       .then((limits) => {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
@@ -5170,10 +5298,11 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   if (consoleEnabled && pathname === "/history/rename") {
     if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
     const q = new URL(req.url ?? "/", "http://x").searchParams;
-    const prof = cfg.agents[q.get("agent") ?? cfg.defaultAgent];
+    const agentName = q.get("agent") ?? cfg.defaultAgent;
+    const prof = cfg.agents[agentName];
     const cwd = resolveWithinRoot(q.get("cwd") ?? "") ?? (prof ? prof.cwd : null);
     const session = q.get("session");
-    if (!cwd || !session) { res.writeHead(400); res.end(); return; }
+    if (!prof || !cwd || !session) { res.writeHead(400); res.end(); return; }
     writeTitle(cwd, session, q.get("title") ?? "")
       // The sidecar is only half the story: every device also reads titles from
       // the recents table, whose rows are snapshots taken when the conversation
@@ -5187,7 +5316,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       // calls this conversation and store that instead. Only the cleared path pays
       // for the listing, and a rename is a rare, explicit action.
       .then(async (title) => {
-        const effective = title || (await listAgentHistory(prof?.cmd ?? "", cwd, RENAME_DERIVE_LIMIT))
+        const effective = title || (await listAgentHistory(prof.cmd, cwd, RENAME_DERIVE_LIMIT, { codexHome: codexHomeForEnv(prof.env) }))
           .find((s) => s.sessionId === session)?.title;
         if (effective) db().renameRecentSession(session, effective);
         // The running-task label is a third copy of the title, held in memory per
@@ -5221,7 +5350,11 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       res.end(JSON.stringify({ error: "conversation is running" }));
       return;
     }
-    deleteHistorySession(Object.values(cfg.agents).map((a) => a.cmd), sid, { withinRoot: (c) => resolveWithinRoot(c) !== null })
+    deleteHistorySession(
+      Object.entries(cfg.agents).map(([name, a]) => ({ name, cmd: a.cmd, env: a.env })),
+      sid,
+      { withinRoot: (c) => resolveWithinRoot(c) !== null },
+    )
       .then((deleted) => {
         // Runs even when the transcript was already gone, so a conversation left
         // half-present (transcript deleted outside the gateway) can still be tidied.
@@ -5242,15 +5375,15 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // View one conversation's messages without resuming the agent (no claude spawn).
   if (consoleEnabled && pathname === "/history/messages") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
-    const prof = cfg.agents[q.get("agent") ?? cfg.defaultAgent];
+    const agentName = q.get("agent") ?? cfg.defaultAgent;
+    const prof = cfg.agents[agentName];
     const cwd = resolveWithinRoot(q.get("cwd") ?? "") ?? (prof ? prof.cwd : null);
     // Allow underscores: opencode session ids look like `ses_…` (claude/codex use
     // UUIDs). Still no slashes or dots, so this can't escape the session store.
     const sid = (q.get("session") ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
     const { limit, from, to } = historyPageParams(q);
-    if (!cwd || !sid) { res.writeHead(400); res.end(); return; }
-    const agentName = q.get("agent") ?? cfg.defaultAgent;
-    readAgentHistoryMessages(prof?.cmd ?? "", cwd, sid, limit, { from, to })
+    if (!prof || !cwd || !sid) { res.writeHead(400); res.end(); return; }
+    readAgentHistoryMessages(prof.cmd, cwd, sid, limit, { from, to, codexHome: codexHomeForEnv(prof.env) })
       .then((r) => {
         if (!r) { res.writeHead(404); res.end(); return; }
         res.writeHead(200, { "content-type": "application/json" });
