@@ -111,7 +111,9 @@ test("each known kind maps to its own login command", () => {
     args: ["login"],
     env: { NO_OPEN_BROWSER: "1" },
   });
-  assert.deepEqual(loginCmdFor("kind-antigravity"), { cmd: "agy", args: [] });
+  // Antigravity is deliberately absent: its ACP server has its own credential
+  // store, so `agy` would authenticate the wrong thing and look like it worked.
+  assert.equal(loginCmdFor("kind-antigravity"), null);
 });
 
 test("an agent of unknown kind gets no login command, not Claude's", () => {

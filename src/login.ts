@@ -29,15 +29,15 @@ const LOGIN_CMDS_BY_KIND: Record<string, LoginCmd> = {
   // PTY is being driven from a phone: NO_OPEN_BROWSER makes it print the URL
   // instead, which is the form this surface exists to relay.
   cursor: { cmd: "agent", args: ["login"], env: { NO_OPEN_BROWSER: "1" } },
-  // Antigravity has no login subcommand (confirmed against `agy --help`): bare
-  // `agy` prompts for Google sign-in when the keyring holds no session, and
-  // prints the URL instead of opening a browser once it detects a headless/SSH
-  // session. It drops straight into the agent TUI when already authenticated,
-  // so this is a login prompt only for an agent that needs one; stop() closes
-  // it either way.
-  // unverified: that agy_acp_server.par reads the same keyring entry `agy`
-  // writes. If it doesn't, this logs in the wrong thing — see issue #272.
-  antigravity: { cmd: "agy", args: [] },
+  // No antigravity entry, deliberately. `agy` was the obvious candidate, but the
+  // ACP server keeps its own credential store: it logs
+  // `settings: path=~/.gemini/antigravity-acp/settings.json status=missing` and
+  // `credential_manager.py: Credentials missing or invalid` on a host where both
+  // ~/.gemini/oauth_creds.json and agy's own ~/.gemini/antigravity-cli/ are
+  // populated. Running `agy` there would authenticate something else and report
+  // success, which is the exact failure this map was rewritten to stop. The
+  // server does its own OAuth via the ACP `authenticate` method — which this
+  // gateway does not yet send — so until then this kind gets the 501 + hint.
 };
 // Enough scrollback that a phone reconnecting mid-flow still sees the login URL
 // and the "Paste code here" prompt replayed.

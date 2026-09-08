@@ -66,8 +66,10 @@ available on the same host or inside the same container as the gateway.
     `agy_acp_server` for your platform, ~300-680 MB download), or the
     `agy_acp_server.par` archive from Google's ACP registry entry. Not a
     dependency of this gateway: the download would land on every `npm ci`.
-    The **Login** screen additionally needs Google's `agy` CLI installed
-    separately — the ACP server archive does not carry it.
+    The **Login** screen cannot authenticate this one: the ACP server keeps its
+    own credential store (`~/.gemini/antigravity-acp/`) and does its own OAuth
+    through the ACP `authenticate` method, which this gateway does not yet send.
+    Authenticate it once on the gateway host before configuring it here.
 
 ## Quick Start
 
