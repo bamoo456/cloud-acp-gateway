@@ -100,6 +100,94 @@ test("loadAgents with an opencode entry whose binary exists keeps the agent", ()
   }
 });
 
+test("loadAgents preserves configured names that shadow Object properties", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-names-"));
+  const fakeBin = path.join(dir, "agent");
+  fs.writeFileSync(fakeBin, "");
+  fs.chmodSync(fakeBin, 0o755);
+  try {
+    const file = path.join(dir, "agents.json");
+    const raw: Record<string, unknown> = {};
+    for (const name of ["constructor", "__proto__", "toString"]) {
+      Object.defineProperty(raw, name, {
+        value: { cmd: fakeBin, args: [] },
+        enumerable: true,
+      });
+    }
+    fs.writeFileSync(file, JSON.stringify(raw));
+
+    withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: undefined }, () => {
+      const agents = loadAgents();
+      assert.equal(Object.getPrototypeOf(agents), null);
+      for (const name of ["constructor", "__proto__", "toString"]) {
+        assert.equal(agents[name].cmd, fakeBin);
+      }
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadAgents accepts literal per-agent env without changing the profile shape", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-env-"));
+  const fakeBin = path.join(dir, "codex-acp");
+  fs.writeFileSync(fakeBin, "");
+  fs.chmodSync(fakeBin, 0o755);
+  const home = path.join(dir, "codex-home");
+  try {
+    const file = path.join(dir, "agents.json");
+    const rawEnv = { CODEX_HOME: home, ACPG_INHERITED: "from-profile" } as Record<string, string>;
+    Object.defineProperty(rawEnv, "__proto__", { value: "safe-value", enumerable: true });
+    fs.writeFileSync(file, JSON.stringify({
+      personal: {
+        cmd: fakeBin,
+        args: [],
+        env: rawEnv,
+      },
+    }));
+
+    withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: undefined }, () => {
+      const agents = loadAgents();
+      assert.equal(agents.personal.env?.CODEX_HOME, home);
+      assert.equal(agents.personal.env?.ACPG_INHERITED, "from-profile");
+      assert.deepEqual(Object.keys(agents.personal.env ?? {}).sort(), ["ACPG_INHERITED", "CODEX_HOME", "__proto__"]);
+      assert.equal(Object.prototype.hasOwnProperty.call(agents.personal.env, "__proto__"), true);
+      assert.equal(agents.personal.env?.["__proto__"], "safe-value");
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadAgents rejects malformed env values and unsafe CODEX_HOME paths", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-env-"));
+  const fakeBin = path.join(dir, "codex-acp");
+  fs.writeFileSync(fakeBin, "");
+  fs.chmodSync(fakeBin, 0o755);
+  const cases: Array<{ env: unknown; message: RegExp }> = [
+    { env: null, message: /expected an object/ },
+    { env: ["not-an-object"], message: /expected an object/ },
+    { env: { "BAD-KEY": "value" }, message: /invalid env key/ },
+    { env: { ACPG_NUMBER: 1 }, message: /must be a string/ },
+    { env: { ACPG_NUL: "bad\0value" }, message: /must not contain NUL/ },
+    { env: { CODEX_HOME: "relative/home" }, message: /CODEX_HOME.*absolute path/ },
+    { env: { CODEX_HOME: "" }, message: /CODEX_HOME.*absolute path/ },
+    { env: { HOME: "relative/home" }, message: /HOME.*absolute path/ },
+    { env: { HOME: "" }, message: /HOME.*absolute path/ },
+  ];
+  try {
+    for (const [i, c] of cases.entries()) {
+      const file = path.join(dir, `agents-${i}.json`);
+      fs.writeFileSync(file, JSON.stringify({ codex: { cmd: fakeBin, args: [], env: c.env } }));
+      withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: undefined }, () => {
+        assert.throws(() => loadAgents(), c.message);
+      });
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The Claude adapter was renamed claude-code-acp -> claude-agent-acp; the old
 // binary name must still be detected so pre-migration agents.json keeps working.
 test("the legacy claude-code-acp binary name is still recognized as Claude", () => {
@@ -299,6 +387,24 @@ test("loadAgents keeps only one agent when the others are all missing (no FATAL)
     withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: undefined }, () => {
       const agents = loadAgents();
       assert.deepEqual(Object.keys(agents), ["claude"]);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("missing agents file fallback uses a null-prototype registry", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-fallback-"));
+  try {
+    withEnv({
+      ACPG_AGENTS_FILE: path.join(dir, "missing-agents.json"),
+      ACPG_AGENT_CWD: undefined,
+      ACPG_AGENT_CMD: undefined,
+      ACPG_AGENT_ARGS: undefined,
+    }, () => {
+      const agents = loadAgents();
+      assert.equal(Object.getPrototypeOf(agents), null);
+      assert.ok(Object.prototype.hasOwnProperty.call(agents, "claude"));
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

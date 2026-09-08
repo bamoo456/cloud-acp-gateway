@@ -151,7 +151,7 @@ describe("UsageStrip", () => {
     expect(strip().querySelector(".u-seg b")!.textContent).toBe("36%");
   });
 
-  test("every provider with data appears in the popover, not just the active one", async () => {
+  test("every account with data appears in the popover, not just the active one", async () => {
     await render({
       activeId: null, sessions: {},
       rateLimits: {
@@ -162,6 +162,30 @@ describe("UsageStrip", () => {
     const rows = [...container.querySelectorAll(".usage-popover-row")];
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.querySelector(".u-seg b")!.textContent)).toEqual(["36%", "90%"]);
+  });
+
+  test("named Codex accounts keep distinct windows and labels", async () => {
+    await render({
+      cfg: {
+        defaultAgent: "codex-personal",
+        agents: [
+          { name: "codex-personal", cwd: "/personal", kind: "codex" },
+          { name: "codex-work", cwd: "/work", kind: "codex" },
+        ],
+        fsRoot: "/",
+      },
+      agentName: "codex-personal",
+      activeId: null,
+      sessions: {},
+      rateLimits: {
+        "codex-personal": { five_hour: { rateLimitType: "five_hour", utilization: 0.2 } },
+        "codex-work": { five_hour: { rateLimitType: "five_hour", utilization: 0.8 } },
+      },
+    });
+    const rows = [...container.querySelectorAll(".usage-popover-row")];
+    expect(rows.map((r) => r.querySelector(".usage-popover-agent")?.textContent))
+      .toEqual(["codex-personal", "codex-work"]);
+    expect(rows.map((r) => r.querySelector(".u-seg b")?.textContent)).toEqual(["20%", "80%"]);
   });
 
   test("the popover is closed until clicked, and a click elsewhere closes it again", async () => {

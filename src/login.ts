@@ -38,9 +38,16 @@ const MAX_SCROLLBACK = 64 * 1024;
 // undefined).
 const agentKinds = new Map<string, string>();
 const knownAgents = new Set<string>();
-export function registerLoginAgent(agentName: string, kind: string | null | undefined): void {
+const agentConfigs = new Map<string, { env?: Record<string, string>; cwd?: string }>();
+export function registerLoginAgent(
+  agentName: string,
+  kind: string | null | undefined,
+  env?: Record<string, string>,
+  cwd?: string,
+): void {
   knownAgents.add(agentName);
   if (kind) agentKinds.set(agentName, kind);
+  agentConfigs.set(agentName, { env, cwd });
 }
 
 function loginCmdFor(agentName: string): { cmd: string; args: string[] } {
@@ -59,7 +66,8 @@ export function getSession(agentName: string): LoginSession {
   let s = sessions.get(agentName);
   if (!s) {
     const { cmd, args } = loginCmdFor(agentName);
-    s = new LoginSession(cmd, args);
+    const config = agentConfigs.get(agentName);
+    s = new LoginSession(cmd, args, config?.env, config?.cwd);
     sessions.set(agentName, s);
   }
   return s;
@@ -83,7 +91,12 @@ class LoginSession {
   // the agent to pick up the freshly written credentials.
   onSuccess?: () => void;
 
-  constructor(private cmd: string, private args: string[]) {}
+  constructor(
+    private cmd: string,
+    private args: string[],
+    private env?: Record<string, string>,
+    private cwd?: string,
+  ) {}
 
   running(): boolean {
     return this.proc !== null;
@@ -93,7 +106,7 @@ class LoginSession {
     return { running: this.running(), lastExit: this.lastExit };
   }
 
-  start(cwd?: string): void {
+  start(): void {
     // If a PTY is still tracked but the underlying process has already exited
     // (e.g. killed via stop()), clear the stale reference so a new one can start.
     try { this.proc?.write(""); } catch { this.proc = null; }
@@ -110,8 +123,10 @@ class LoginSession {
       name: "xterm-color",
       cols: 100,
       rows: 30,
-      cwd: cwd || process.env.HOME || process.cwd(),
-      env: process.env as { [k: string]: string },
+      cwd: this.cwd || process.env.HOME || process.cwd(),
+      // The login PTY must use the same per-agent account as its ACP child,
+      // while preserving the gateway's inherited environment for everything else.
+      env: { ...process.env, ...this.env } as { [k: string]: string },
     });
     this.proc = proc;
     proc.onData((d) => {

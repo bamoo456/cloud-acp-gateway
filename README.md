@@ -115,7 +115,8 @@ Common optional settings:
 | `ACPG_FS_ROOT` | user home | Directory root the web UI may browse for folders and `@` file references. |
 | `ACPG_PREVIEW_ROOTS` | _(none)_ | Extra directories the file preview panel may read, colon-separated (e.g. `/tmp`). By default it sees only the conversation's own project — see [What the preview can reach](#what-the-preview-can-reach). |
 | `ACPG_PREVIEW_FILTER_ENABLED` | `1` | Set `0` to let the preview panel read **any** file on the host, ignoring the rules above. Convenient on a machine you own; makes the gateway credential a read-any-file capability. |
-| `CODEX_HOME` | `~/.codex` | Codex login/session state. |
+| `ACPG_HISTORY_HEADLESS` | `off` | Set `on` to list headless runs — `claude -p` and `codex exec` — alongside real conversations. Off by default: a scripted or cron-driven run writes one transcript per invocation, usually in a throwaway cwd, so a nightly job buries your own sessions under its folders. The interactive CLIs and SDK/ACP sessions (including the gateway's own) are always listed. |
+| `CODEX_HOME` | `~/.codex` | Default Codex login/session state for agent entries without `env.CODEX_HOME` or `env.HOME`. |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude login/session state and history. |
 
 ## Agents
@@ -133,6 +134,62 @@ Common optional settings:
 Relative `cmd` values resolve from the gateway install directory. `cwd` is the
 project directory the agent works in. If `cwd` is omitted, `ACPG_AGENT_CWD` is
 used, then the gateway user's home directory.
+
+### Per-agent environment and Codex accounts
+
+Each agent may define an optional `env` object. Its string values are merged over
+the gateway environment for that ACP child only, and for that agent's `/login/*`
+PTY. The gateway process environment is never changed, so sibling agents can use
+different accounts concurrently. Environment values are literal strings: keys
+must be valid environment names, values must not contain NUL, and `CODEX_HOME`
+and `HOME` must be non-empty absolute paths. Shell variables and `~` are not
+expanded.
+
+For gateway-side Codex history and quota lookups, the fallback is precise:
+non-empty `env.CODEX_HOME`, then inherited `CODEX_HOME`, then
+`env.HOME/.codex`, then the ordinary `~/.codex` default. The ACP and login
+children receive the complete per-agent environment. The gateway never mutates
+its own environment.
+
+For example, two named Codex agents can keep separate login, history, search,
+deletion, and usage stores:
+
+```json
+{
+  "codex": {
+    "cmd": "node_modules/.bin/codex-acp",
+    "args": [],
+    "cwd": "/workspace",
+    "env": { "CODEX_HOME": "/workspace/.codex-personal" }
+  },
+  "codex-work": {
+    "cmd": "node_modules/.bin/codex-acp",
+    "args": [],
+    "cwd": "/workspace",
+    "env": { "CODEX_HOME": "/workspace/.codex-work" }
+  }
+}
+```
+
+The two directories do not need to exist before startup; remove the extra entry
+when a second account is not needed. The first login for each named agent writes
+credentials into its selected `CODEX_HOME`, and the ACP child receives the same
+path. History routes select the account with `agent=<name>`; search without an
+agent scans each distinct configured Codex home and preserves the matching agent
+name. Session-ID deletion scans configured stores but still refuses transcripts
+whose recorded cwd is outside `FS_ROOT`. Gateway metadata and deletion are keyed
+by session ID, not account, and therefore assume session IDs are globally unique
+across configured Codex homes.
+
+Usage clients may request `GET /usage/limits?kind=codex&agent=codex-work`.
+Existing kind-only requests remain valid when the configured Codex store is
+unambiguous; with multiple distinct homes they return an unavailable response
+with `reason: "ambiguous-agent"` instead of silently selecting an account.
+
+The environment override applies to every ACP child and to the existing
+Claude/Codex login PTYs. Provider-specific history isolation for Claude/opencode
+and provider-specific quota overrides remain outside this feature; their existing
+shared stores and quota behavior are unchanged.
 
 The gateway skips agent entries whose command does not exist, so one shared
 `agents.json` can include optional agents. It exits if no usable agents remain.

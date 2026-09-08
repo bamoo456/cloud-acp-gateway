@@ -1,5 +1,6 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { FakeSse, installFakeSse } from "../test/fakeSse.ts";
+import type { AgentRef } from "../types.ts";
 
 const flush = async () => {
   await Promise.resolve();
@@ -7,11 +8,14 @@ const flush = async () => {
   await new Promise((r) => setTimeout(r, 0));
 };
 
-async function bootClaude() {
+async function bootAgent(defaultAgent = "claude", configuredAgents: AgentRef[] = [
+  { name: "claude", cwd: "/c", history: true },
+  { name: "codex", cwd: "/p", skin: "codex" },
+]) {
   document.getElementById("acpg-cfg")!.textContent = JSON.stringify({
     token: "t",
-    defaultAgent: "claude",
-    agents: [{ name: "claude", cwd: "/c", history: true }, { name: "codex", cwd: "/p", skin: "codex" }],
+    defaultAgent,
+    agents: configuredAgents,
     fsRoot: "/",
   });
   const { useStore } = await import("./store.ts");
@@ -28,6 +32,8 @@ async function bootClaude() {
   await flush();
   return { useStore, ws };
 }
+
+const bootClaude = () => bootAgent();
 
 const usage = (sessionId: string, update: Record<string, unknown>) => ({
   jsonrpc: "2.0" as const,
@@ -108,5 +114,23 @@ describe("usage_update", () => {
     await flush();
     useStore.getState().setAgent("codex");
     expect(useStore.getState().rateLimits.claude.five_hour.utilization).toBe(0.36);
+  });
+
+  test("two named Codex accounts keep quota polls and ACP events separate", async () => {
+    const { useStore, ws } = await bootAgent("codex-personal", [
+      { name: "codex-personal", cwd: "/personal", kind: "codex" },
+      { name: "codex-work", cwd: "/work", kind: "codex" },
+    ]);
+    useStore.getState().ingestUsageLimits("codex-personal", {
+      five_hour: { rateLimitType: "five_hour", utilization: 0.2 },
+    });
+    useStore.getState().ingestUsageLimits("codex-work", {
+      five_hour: { rateLimitType: "five_hour", utilization: 0.8 },
+    });
+    ws.recv(usage("s1", { ...rateLimit("five_hour", 0.35) }));
+    await flush();
+
+    expect(useStore.getState().rateLimits["codex-personal"].five_hour.utilization).toBe(0.35);
+    expect(useStore.getState().rateLimits["codex-work"].five_hour.utilization).toBe(0.8);
   });
 });

@@ -38,7 +38,9 @@ export type UsageLimits =
 
 // `reauth` covers every "the credential can't authorize this" case, including
 // Claude Code 2.1.x writing a keychain item that holds only MCP OAuth state.
-export type UnavailableReason = "no-credential" | "reauth" | "expired" | "rate-limited" | "http-error" | "network";
+export type UnavailableReason =
+  | "no-credential" | "reauth" | "expired" | "rate-limited" | "http-error" | "network"
+  | "ambiguous-agent";
 
 interface Credential { accessToken: string; expiresAt?: number }
 
@@ -180,8 +182,8 @@ let inFlight: Promise<UsageLimits> | null = null;
 export function resetUsageLimitsCache(): void {
   cache = null;
   inFlight = null;
-  codexCache = null;
-  codexInFlight = null;
+  codexCache.clear();
+  codexInFlight.clear();
 }
 
 async function fetchLimits(claudeDir: string, now: number): Promise<UsageLimits> {
@@ -308,20 +310,24 @@ async function fetchCodexLimits(codexHome: string, now: number): Promise<UsageLi
   }
 }
 
-let codexCache: { at: number; value: UsageLimits } | null = null;
-let codexInFlight: Promise<UsageLimits> | null = null;
+const codexCache = new Map<string, { at: number; value: UsageLimits }>();
+const codexInFlight = new Map<string, Promise<UsageLimits>>();
 
 export function codexUsageLimits(
   opts: { codexHome: string; now?: number },
 ): Promise<UsageLimits> {
   const now = opts.now ?? Date.now();
-  if (codexCache && now - codexCache.at < TTL_MS) return Promise.resolve(codexCache.value);
-  if (codexInFlight) return codexInFlight;
-  codexInFlight = fetchCodexLimits(opts.codexHome, now)
+  const home = path.resolve(opts.codexHome);
+  const cached = codexCache.get(home);
+  if (cached && now - cached.at < TTL_MS) return Promise.resolve(cached.value);
+  const running = codexInFlight.get(home);
+  if (running) return running;
+  const request = fetchCodexLimits(home, now)
     .then((value) => {
-      codexCache = { at: now, value };
+      codexCache.set(home, { at: now, value });
       return value;
     })
-    .finally(() => { codexInFlight = null; });
-  return codexInFlight;
+    .finally(() => { codexInFlight.delete(home); });
+  codexInFlight.set(home, request);
+  return request;
 }

@@ -249,6 +249,72 @@ test("Codex discovery applies its limit to the most recent sessions", async () =
   assert.deepEqual(sessions.map((s) => [s.sessionId, s.title]), [["CDX-NEW", "new"]]);
 });
 
+test("named Codex homes isolate list/read/discover/search and deletion", async () => {
+  const fsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codex-isolation-root-"));
+  const cwd = path.join(fsRoot, "repo");
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codex-isolation-out-"));
+  const homeA = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codex-home-a-"));
+  const homeB = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codex-home-b-"));
+  fs.mkdirSync(cwd, { recursive: true });
+  const personalFile = writeCodexRollout(homeA, "PERSONAL", {
+    id: "CDX-PERSONAL", cwd, timestamp: "2026-08-01T10:00:00.000Z",
+  }, "needle personal");
+  const workFile = writeCodexRollout(homeB, "WORK", {
+    id: "CDX-WORK", cwd, timestamp: "2026-08-01T11:00:00.000Z",
+  }, "needle work");
+  const outsideFile = writeCodexRollout(homeB, "OUTSIDE", {
+    id: "CDX-OUTSIDE", cwd: outside, timestamp: "2026-08-01T12:00:00.000Z",
+  }, "needle outside");
+  fs.writeFileSync(path.join(homeA, "session_index.jsonl"), JSON.stringify({
+    id: "CDX-PERSONAL", thread_name: "Personal account", updated_at: "2026-08-01T10:00:00.000Z",
+  }) + "\n");
+  fs.writeFileSync(path.join(homeB, "session_index.jsonl"), [
+    { id: "CDX-WORK", thread_name: "Work account", updated_at: "2026-08-01T11:00:00.000Z" },
+    { id: "CDX-OUTSIDE", thread_name: "Outside root", updated_at: "2026-08-01T12:00:00.000Z" },
+  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+  const agents = [
+    { name: "personal", cmd: CODEX_CMD, env: { CODEX_HOME: homeA } },
+    { name: "work", cmd: CODEX_CMD, env: { CODEX_HOME: homeB } },
+  ];
+  try {
+    const personal = await listAgentHistory(CODEX_CMD, cwd, 10, { codexHome: homeA });
+    const work = await listAgentHistory(CODEX_CMD, cwd, 10, { codexHome: homeB });
+    assert.deepEqual(personal.map((s) => [s.sessionId, s.title]), [["CDX-PERSONAL", "Personal account"]]);
+    assert.deepEqual(work.map((s) => [s.sessionId, s.title]), [["CDX-WORK", "Work account"]]);
+
+    const messages = await readAgentHistoryMessages(CODEX_CMD, cwd, "CDX-WORK", 10, { codexHome: homeB });
+    assert.equal(messages?.messages[0].blocks[0].text, "needle work");
+    assert.equal(await readAgentHistoryMessages(CODEX_CMD, cwd, "CDX-WORK", 10, { codexHome: homeA }), null);
+
+    const personalDiscovery = await discoverCodexHistory({ fsRoot, codexHome: homeA, limit: 10 });
+    const workDiscovery = await discoverCodexHistory({ fsRoot, codexHome: homeB, limit: 10 });
+    assert.deepEqual(personalDiscovery.map((s) => s.sessionId), ["CDX-PERSONAL"]);
+    assert.deepEqual(workDiscovery.map((s) => s.sessionId), ["CDX-WORK"]);
+
+    const searched = await searchTranscripts(agents, searchParams("q=needle&all=1"), {
+      fsRoot, store: memStore(),
+    });
+    assert.deepEqual(searched.results.map((s) => [s.sessionId, s.agentName]), [
+      ["CDX-WORK", "work"],
+      ["CDX-PERSONAL", "personal"],
+    ]);
+    const selected = await searchCandidates(agents, searchParams("q=needle&all=1&agent=personal"), { fsRoot });
+    assert.deepEqual(selected.candidates.map((s) => [s.sessionId, s.agentName]), [["CDX-PERSONAL", "personal"]]);
+
+    assert.equal(await deleteHistorySession(agents, "CDX-WORK", { withinRoot: () => false }), false);
+    assert.equal(fs.existsSync(workFile), true, "FS_ROOT refusal leaves the selected store untouched");
+    assert.equal(await deleteHistorySession(agents, "CDX-WORK", { withinRoot: (recordedCwd) => recordedCwd === cwd }), true);
+    assert.equal(fs.existsSync(workFile), false, "deletion scans the configured Codex homes");
+    assert.equal(fs.existsSync(outsideFile), true, "another session remains untouched");
+    assert.equal(fs.existsSync(personalFile), true, "the other account remains untouched");
+  } finally {
+    fs.rmSync(fsRoot, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+    fs.rmSync(homeA, { recursive: true, force: true });
+    fs.rmSync(homeB, { recursive: true, force: true });
+  }
+});
+
 test("history surfaces image content blocks (base64 + url sources)", async () => {
   const file = writeTranscript([
     { type: "user", sessionId: "S", message: { role: "user", content: [
