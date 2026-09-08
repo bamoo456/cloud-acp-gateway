@@ -19,5 +19,21 @@
     "cmd": "/usr/local/bin/opencode",
     "args": ["acp"],
     "cwd": "/workspace"
+  },
+  "cursor": {
+    "cmd": "/Users/me/.local/bin/agent",
+    "args": ["acp"],
+    "cwd": "/workspace"
+  },
+  "cursor-wrapped": {
+    "cmd": "/opt/bin/run-cursor.sh",
+    "args": [],
+    "cwd": "/workspace",
+    "kind": "cursor"
+  },
+  "antigravity": {
+    "cmd": "/opt/antigravity/agy_acp_server.par",
+    "args": [],
+    "cwd": "/workspace"
   }
 }

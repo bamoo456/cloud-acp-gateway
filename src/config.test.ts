@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   loadAgents,
+  agentKindFor,
   supportsClaudeHistory,
   supportsAgentHistory,
   supportsAgentSessionLoad,
@@ -414,4 +415,47 @@ test("missing agents file fallback uses a null-prototype registry", () => {
 test("GATEWAY_VERSION matches package.json, so /healthz reports the real version", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")) as { version: string };
   assert.equal(GATEWAY_VERSION, pkg.version);
+});
+
+test("Cursor and Antigravity are recognised, and neither gets history", () => {
+  // Cursor's ACP binary ships with the app as plain `agent` and runs `agent acp`.
+  assert.equal(agentKindFor("/Users/me/.local/bin/agent"), "cursor");
+  assert.equal(agentKindFor("/usr/local/bin/cursor-agent"), "cursor");
+  // The whole-basename match is what keeps `agent` off claude-agent-acp — the
+  // substring "agent" is in both, so this must not depend on check order.
+  assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/claude-agent-acp"), "claude");
+  assert.equal(agentKindFor("/opt/antigravity/agy_acp_server.par"), "antigravity");
+  // Recognising the kind must not advertise history the gateway can't read.
+  assert.equal(supportsAgentHistory("/Users/me/.local/bin/agent"), false);
+  assert.equal(supportsAgentHistory("/opt/antigravity/agy_acp_server.par"), false);
+});
+
+test("an explicit agents.json kind overrides the cmd sniff", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-kind-"));
+  const file = path.join(dir, "agents.json");
+  // A wrapper script tells the sniff nothing, so the entry states its kind.
+  const wrapper = path.join(dir, "run-cursor.sh");
+  fs.writeFileSync(wrapper, "#!/bin/sh\nexec agent acp\n");
+  try {
+    fs.writeFileSync(file, JSON.stringify({
+      wrapped: { cmd: wrapper, args: [], kind: "cursor" },
+      sniffed: { cmd: wrapper, args: [] },
+    }));
+    withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: dir }, () => {
+      const agents = loadAgents();
+      assert.equal(agents.wrapped.kind, "cursor");
+      assert.equal(agentKindFor(agents.wrapped), "cursor");
+      // Same binary without the field: unidentifiable, and honestly so.
+      assert.equal(agents.sniffed.kind, undefined);
+      assert.equal(agentKindFor(agents.sniffed), null);
+    });
+
+    // A kind outside the known set is a config error, not a silent null.
+    fs.writeFileSync(file, JSON.stringify({ bad: { cmd: wrapper, args: [], kind: "gemini" } }));
+    withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: dir }, () => {
+      assert.throws(() => loadAgents(), /invalid kind "gemini"/);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

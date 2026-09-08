@@ -60,6 +60,8 @@ available on the same host or inside the same container as the gateway.
   - Claude: `claude` installed and logged in.
   - Codex: `OPENAI_API_KEY` / `CODEX_API_KEY`, or `codex login`.
   - opencode: `opencode` installed and authenticated separately.
+  - Cursor: the `agent` CLI that ships with the Cursor app (`agent login`).
+  - Antigravity: `agy_acp_server.par` from Google's ACP registry entry.
 
 ## Quick Start
 
@@ -152,13 +154,32 @@ Common optional settings:
 {
   "claude": { "cmd": "node_modules/.bin/claude-agent-acp", "args": [], "cwd": "/workspace" },
   "codex": { "cmd": "node_modules/.bin/codex-acp", "args": [], "cwd": "/workspace" },
-  "opencode": { "cmd": "/usr/local/bin/opencode", "args": ["acp"], "cwd": "/workspace" }
+  "opencode": { "cmd": "/usr/local/bin/opencode", "args": ["acp"], "cwd": "/workspace" },
+  "cursor": { "cmd": "/Users/me/.local/bin/agent", "args": ["acp"], "cwd": "/workspace" },
+  "antigravity": { "cmd": "/opt/antigravity/agy_acp_server.par", "args": [], "cwd": "/workspace" }
 }
 ```
 
 Relative `cmd` values resolve from the gateway install directory. `cwd` is the
 project directory the agent works in. If `cwd` is omitted, `ACPG_AGENT_CWD` is
 used, then the gateway user's home directory.
+
+### Agent kind
+
+Each entry may state its backing CLI as `"kind"`: `claude`, `codex`, `opencode`,
+`cursor` or `antigravity`. It decides which login command the Login screen runs
+and which resume syntax the terminal hint shows, and it is normally sniffed from
+`cmd`. State it when the binary name can't carry the answer — a wrapper script,
+a renamed or vendored binary — and the gateway will stop guessing:
+
+```json
+{ "cursor": { "cmd": "/opt/bin/run-cursor.sh", "args": [], "kind": "cursor" } }
+```
+
+An agent whose kind is unknown still works as a plain ACP agent; it just gets no
+history browsing, and the Login screen answers 501 instead of running some other
+agent's login flow. Override the command per agent with
+`ACPG_<AGENT>_LOGIN_CMD` / `ACPG_<AGENT>_LOGIN_ARGS`.
 
 ### Per-agent environment and Codex accounts
 
