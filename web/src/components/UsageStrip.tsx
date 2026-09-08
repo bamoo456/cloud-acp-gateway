@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { useStore, activeQuotaKind } from "../store/store.ts";
+import { useStore, activeQuotaKind, agentQuotaKind } from "../store/store.ts";
 import { formatUntil } from "../lib/format.ts";
 import { Robot, CodexMark } from "../lib/icons.tsx";
 import type { RateLimit } from "../types.ts";
@@ -130,14 +130,14 @@ function buildQuotaSegments(windows: Record<string, RateLimit>, unlimited?: bool
 
 // Right-hand end of the bottom status strip: how full the active conversation's
 // context window is, plus the active agent's own rate-limit windows. Every
-// configured provider (Claude, Codex) is polled in the background regardless
-// of which agent is on screen (App.tsx), so a hover/click on the strip reveals
-// all of them — the default row only shows the one you're currently talking
-// to, since that's the number worth a glance without asking for it.
+// configured account is polled in the background regardless of which agent is
+// on screen (App.tsx), so a hover/click on the strip reveals all of them.
 // Renders nothing until an agent has actually reported usage — context arrives
 // on `usage_update`, which no agent sends before a turn has produced tokens.
 export function UsageStrip() {
   const sess = useStore((s) => (s.activeId ? s.sessions[s.activeId] : null));
+  const activeAgentName = useStore((s) => s.agentName);
+  const configuredAgents = useStore((s) => s.cfg.agents);
   const rateLimits = useStore((s) => s.rateLimits);
   const quotaUnlimited = useStore((s) => s.quotaUnlimited);
   const quotaUnavailable = useStore((s) => s.quotaUnavailable);
@@ -178,41 +178,43 @@ export function UsageStrip() {
   }
 
   const activeSegments = buildQuotaSegments(
-    activeKind ? rateLimits[activeKind] ?? {} : {}, activeKind ? quotaUnlimited[activeKind] : undefined,
+    activeKind ? rateLimits[activeAgentName] ?? {} : {}, activeKind ? quotaUnlimited[activeAgentName] : undefined,
   );
-  const activeReason = activeKind ? quotaUnavailable[activeKind] : undefined;
+  const activeReason = activeKind ? quotaUnavailable[activeAgentName] : undefined;
   if (activeKind && activeReason && !activeSegments.length) {
     activeSegments.push(unavailableSegment(activeKind, activeReason));
   }
-  // A provider counts as "has something to show" if it reported real windows,
+  // An account counts as "has something to show" if it reported real windows,
   // turned out to be unlimited, or can't be read at all — an unlimited
   // account's own windows are legitimately `{}`, so that alone can't be the
   // test, and a provider that only has a reason still has something to say.
-  const providerKinds = Array.from(
+  const quotaAgents = Array.from(
     new Set([...Object.keys(rateLimits), ...Object.keys(quotaUnlimited), ...Object.keys(quotaUnavailable)]),
   )
     .filter((k) => Object.keys(rateLimits[k] ?? {}).length > 0 || quotaUnlimited[k] || quotaUnavailable[k])
     .sort();
 
-  if (!ctxSegment && !activeSegments.length && !providerKinds.length) return null;
+  if (!ctxSegment && !activeSegments.length && !quotaAgents.length) return null;
 
   return (
     <span className={"usage-strip-wrap" + (pinned ? " pinned" : "")} ref={rootRef}>
-      <span className="usage-strip" onClick={() => providerKinds.length > 0 && setPinned((p) => !p)}>
+      <span className="usage-strip" onClick={() => quotaAgents.length > 0 && setPinned((p) => !p)}>
         {ctxSegment}
         {activeSegments}
       </span>
-      {providerKinds.length > 0 && (
-        // Every provider with data, not just the active one — the strip itself
+      {quotaAgents.length > 0 && (
+        // Every account with data, not just the active one — the strip itself
         // stays a one-line glance, this is the "show me everything" view.
         <span className="usage-popover">
-          {providerKinds.map((kind) => {
-            const segs = buildQuotaSegments(rateLimits[kind] ?? {}, quotaUnlimited[kind]);
-            const reason = quotaUnavailable[kind];
-            if (reason && !segs.length) segs.push(unavailableSegment(kind, reason));
+          {quotaAgents.map((name) => {
+            const kind = agentQuotaKind(configuredAgents.find((a) => a.name === name));
+            const segs = buildQuotaSegments(rateLimits[name] ?? {}, quotaUnlimited[name]);
+            const reason = quotaUnavailable[name];
+            if (reason && !segs.length) segs.push(unavailableSegment(kind ?? name, reason));
             return (
-              <span className="usage-popover-row" key={kind}>
-                <span className="usage-popover-mark" title={PROVIDER_LABEL[kind] || kind}><ProviderMark kind={kind} /></span>
+              <span className="usage-popover-row" key={name}>
+                <span className="usage-popover-mark" title={name}><ProviderMark kind={kind ?? name} /></span>
+                <span className="usage-popover-agent">{name}</span>
                 <span className="usage-popover-segs">{segs}</span>
               </span>
             );

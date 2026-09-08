@@ -1,7 +1,7 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, getInboxPending, putLockConfig, searchSessions,
-  uploadFile, getFilePreview,
+  uploadFile, getFilePreview, getUsageLimits,
 } from "./api.ts";
 
 function mockFetch(json: unknown) {
@@ -38,6 +38,16 @@ describe("api", () => {
     const url = (globalThis.fetch as any).mock.calls[0][0] as string;
     expect(url).toContain("/history/discovered?agent=claude");
     expect(url).toContain("limit=12");
+  });
+
+  test("getUsageLimits selects a named account", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ status: "ok", windows: {} }),
+    } as Response);
+
+    expect(await getUsageLimits("codex", "codex-work")).toEqual({ windows: {}, unlimited: undefined });
+    expect(lastFetchUrl()).toContain("/usage/limits?kind=codex&agent=codex-work");
   });
 
   test("getMessages returns the full payload", async () => {
