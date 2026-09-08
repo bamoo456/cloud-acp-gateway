@@ -38,7 +38,7 @@ export function buildClientConfig(input: {
   rpcPath: string;
   defaultAgent: string;
   fsRoot: string;
-  agents: Array<NativeAgentConfig & { cmd?: string }>;
+  agents: Array<NativeAgentConfig & { cmd?: string; env?: Record<string, string> }>;
   terminalEnabled: boolean;
 }): NativeClientConfig {
   return {
@@ -50,7 +50,7 @@ export function buildClientConfig(input: {
     },
     defaultAgent: input.defaultAgent,
     fsRoot: input.fsRoot,
-    agents: input.agents.map(({ cmd: _cmd, ...agent }) => agent),
+    agents: input.agents.map(({ cmd: _cmd, env: _env, ...agent }) => agent),
     features: { nativeConsole: true, terminal: input.terminalEnabled },
   };
 }
