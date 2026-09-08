@@ -340,7 +340,11 @@ function sniffAgentKind(cmd: string): AgentKind | null {
   // whose name contains it.
   if (base === "agent" || base.includes("cursor-agent")) return "cursor";
   // Antigravity is distributed as a self-contained archive, agy_acp_server.par.
-  if (base.includes("agy_acp")) return "antigravity";
+  // The npm wrapper (@bamoo456/antigravity-acp) installs the same server under
+  // two bins of its own, `antigravity-acp` and `agy-acp-server`, and that is the
+  // cmd its own docs tell you to configure — so the hyphen spelling and the
+  // product name both have to land here, not just Google's underscored archive.
+  if (/agy[_-]acp|antigravity/.test(base)) return "antigravity";
   return null;
 }
 
