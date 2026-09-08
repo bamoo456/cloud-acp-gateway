@@ -32,8 +32,14 @@
     "kind": "cursor"
   },
   "antigravity": {
-    "cmd": "/opt/antigravity/agy_acp_server.par",
+    "cmd": "node_modules/.bin/antigravity-acp",
     "args": [],
     "cwd": "/workspace"
+  },
+  "antigravity-npx": {
+    "cmd": "npx",
+    "args": ["-y", "@bamoo456/antigravity-acp"],
+    "cwd": "/workspace",
+    "kind": "antigravity"
   }
 }

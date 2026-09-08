@@ -425,9 +425,14 @@ test("Cursor and Antigravity are recognised, and neither gets history", () => {
   // substring "agent" is in both, so this must not depend on check order.
   assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/claude-agent-acp"), "claude");
   assert.equal(agentKindFor("/opt/antigravity/agy_acp_server.par"), "antigravity");
+  // The npm wrapper's two bins are the cmd its own README configures, so both
+  // spellings must be recognised as well as Google's underscored archive.
+  assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/antigravity-acp"), "antigravity");
+  assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/agy-acp-server"), "antigravity");
   // Recognising the kind must not advertise history the gateway can't read.
   assert.equal(supportsAgentHistory("/Users/me/.local/bin/agent"), false);
   assert.equal(supportsAgentHistory("/opt/antigravity/agy_acp_server.par"), false);
+  assert.equal(supportsAgentHistory("/opt/acp-gateway/node_modules/.bin/antigravity-acp"), false);
 });
 
 test("an explicit agents.json kind overrides the cmd sniff", () => {

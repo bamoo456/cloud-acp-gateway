@@ -61,7 +61,12 @@ available on the same host or inside the same container as the gateway.
   - Codex: `OPENAI_API_KEY` / `CODEX_API_KEY`, or `codex login`.
   - opencode: `opencode` installed and authenticated separately.
   - Cursor: the `agent` CLI that ships with the Cursor app (`agent login`).
-  - Antigravity: `agy_acp_server.par` from Google's ACP registry entry.
+  - Antigravity: `npx @bamoo456/antigravity-acp` (fetches Google's
+    `agy_acp_server` for your platform, ~300-680 MB download), or the
+    `agy_acp_server.par` archive from Google's ACP registry entry. Not a
+    dependency of this gateway: the download would land on every `npm ci`.
+    The **Login** screen additionally needs Google's `agy` CLI installed
+    separately — the ACP server archive does not carry it.
 
 ## Quick Start
 
@@ -156,7 +161,7 @@ Common optional settings:
   "codex": { "cmd": "node_modules/.bin/codex-acp", "args": [], "cwd": "/workspace" },
   "opencode": { "cmd": "/usr/local/bin/opencode", "args": ["acp"], "cwd": "/workspace" },
   "cursor": { "cmd": "/Users/me/.local/bin/agent", "args": ["acp"], "cwd": "/workspace" },
-  "antigravity": { "cmd": "/opt/antigravity/agy_acp_server.par", "args": [], "cwd": "/workspace" }
+  "antigravity": { "cmd": "node_modules/.bin/antigravity-acp", "args": [], "cwd": "/workspace" }
 }
 ```
 
@@ -173,8 +178,14 @@ and which resume syntax the terminal hint shows, and it is normally sniffed from
 a renamed or vendored binary — and the gateway will stop guessing:
 
 ```json
-{ "cursor": { "cmd": "/opt/bin/run-cursor.sh", "args": [], "kind": "cursor" } }
+{
+  "cursor": { "cmd": "/opt/bin/run-cursor.sh", "args": [], "kind": "cursor" },
+  "antigravity": { "cmd": "npx", "args": ["-y", "@bamoo456/antigravity-acp"], "kind": "antigravity" }
+}
 ```
+
+The second entry is the common case: launched through `npx`, the basename the
+sniff sees is `npx`, which names no CLI at all.
 
 An agent whose kind is unknown still works as a plain ACP agent; it just gets no
 history browsing, and the Login screen answers 501 instead of running some other
