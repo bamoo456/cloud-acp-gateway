@@ -56,7 +56,7 @@ import {
   readDraft, readDrafts, writeDraft, parseComments, reviewScopeKey, MAX_DRAFTS_BYTES,
 } from "./review.ts";
 import { renderHtmlFile } from "./htmlinline.ts";
-import { buildClientConfig } from "./client-config.ts";
+import { buildClientConfig, type AgentKind } from "./client-config.ts";
 import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, MAX_HITS_IN_SESSION, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
 const ROOT = path.join(__dirname, "..");
@@ -125,7 +125,15 @@ export type AgentProfile = {
   cwd: string;
   defaults?: Record<string, string>;
   env?: Record<string, string>;
+  // Which CLI backs this agent, stated outright. Optional: omitted, it is
+  // sniffed from `cmd` (sniffAgentKind). State it when the binary name can't
+  // carry the answer — Cursor's ACP binary is called plain `agent`, and a
+  // wrapper script or a renamed/vendored binary tells the sniff nothing. A
+  // wrong kind means the wrong login command and the wrong resume syntax.
+  kind?: AgentKind;
 };
+
+export const AGENT_KINDS = ["claude", "codex", "opencode", "cursor", "antigravity"] as const;
 
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -181,6 +189,11 @@ export function loadAgents(): Record<string, AgentProfile> {
       }
       const p = value as Partial<AgentProfile>;
       const env = validateAgentEnv(name, file, p.env);
+      if (p.kind !== undefined && !(AGENT_KINDS as readonly string[]).includes(p.kind)) {
+        throw new Error(
+          `agents: invalid kind "${String(p.kind)}" for agent "${name}" in ${file}: expected one of ${AGENT_KINDS.join(", ")}`,
+        );
+      }
       if (typeof p.cmd !== "string" || !p.cmd) {
         console.error(`FATAL: agent "${name}" in ${file} has no "cmd"`);
         process.exit(1);
@@ -204,6 +217,7 @@ export function loadAgents(): Record<string, AgentProfile> {
         args: p.args ?? [],
         cwd: p.cwd ?? defaultCwd,
         ...(env === undefined ? {} : { env }),
+        ...(p.kind === undefined ? {} : { kind: p.kind }),
         // Only string values: every ACP select-type control takes a string, and a
         // number/bool/null in the file would otherwise reach the adapter as one.
         defaults: p.defaults && typeof p.defaults === "object"
@@ -231,6 +245,9 @@ export function loadAgents(): Record<string, AgentProfile> {
     ),
     args: (process.env.ACPG_AGENT_ARGS ?? "").split(" ").filter(Boolean),
     cwd: defaultCwd,
+    // Stated, not sniffed: this fallback IS the claude agent, and an
+    // ACPG_AGENT_CMD pointing at a wrapper must not cost it its login command.
+    kind: "claude",
   };
   return out;
 }
@@ -307,17 +324,47 @@ function isClaudeAcpCmd(cmd: string): boolean {
 export function supportsClaudeHistory(cmd: string): boolean {
   return isClaudeAcpCmd(cmd);
 }
-type HistoryProvider = "claude" | "codex" | "opencode";
-function historyProviderFor(cmd: string): HistoryProvider | null {
+// Guess the backing CLI from the binary name, for entries that don't state a
+// `kind`. Only a guess: prefer the explicit field whenever the name is not
+// self-evident (agentKindFor consults it first).
+function sniffAgentKind(cmd: string): AgentKind | null {
   const base = path.basename(cmd);
   if (isClaudeAcpCmd(cmd)) return "claude";
   if (base.includes("codex-acp")) return "codex";
   // opencode runs as `opencode acp`, so its binary name is just `opencode`.
   if (base.includes("opencode")) return "opencode";
+  // Cursor's CLI ships with the app as plain `agent` (older installs:
+  // `cursor-agent`) and runs `agent acp`. Matched on the WHOLE basename, not as
+  // a substring: "agent" also occurs in claude-agent-acp, and leaning on the
+  // order of these checks to keep them apart is a trap for the next binary
+  // whose name contains it.
+  if (base === "agent" || base.includes("cursor-agent")) return "cursor";
+  // Antigravity is distributed as a self-contained archive, agy_acp_server.par.
+  if (base.includes("agy_acp")) return "antigravity";
   return null;
 }
-export function supportsAgentHistory(cmd: string): boolean {
-  return historyProviderFor(cmd) !== null;
+
+// Which CLI backs an agent: what it says it is, else what its cmd looks like.
+// Takes a profile OR a bare cmd — the history readers only ever hold a cmd, and
+// for them the sniff is all there is.
+export function agentKindFor(agent: AgentProfile | string): AgentKind | null {
+  if (typeof agent === "string") return sniffAgentKind(agent);
+  return agent.kind ?? sniffAgentKind(agent.cmd);
+}
+
+// The kinds whose on-disk session store this gateway knows how to read. A kind
+// outside this set is a perfectly usable agent — it just gets `history: false`
+// and no Recent entries, rather than a reader that returns nothing.
+const HISTORY_PROVIDERS = ["claude", "codex", "opencode"] as const;
+type HistoryProvider = (typeof HISTORY_PROVIDERS)[number];
+const isHistoryProvider = (kind: AgentKind | null): kind is HistoryProvider =>
+  kind !== null && (HISTORY_PROVIDERS as readonly string[]).includes(kind);
+function historyProviderFor(agent: AgentProfile | string): HistoryProvider | null {
+  const kind = agentKindFor(agent);
+  return isHistoryProvider(kind) ? kind : null;
+}
+export function supportsAgentHistory(agent: AgentProfile | string): boolean {
+  return historyProviderFor(agent) !== null;
 }
 // Which providers can answer /history/discovered — i.e. recover each session's
 // own cwd from its transcript, so the console can list conversations belonging
@@ -328,8 +375,8 @@ export function supportsAgentHistory(cmd: string): boolean {
 // hardcode `kind === "claude"`, which is why codex conversations from other
 // folders were invisible in each of them.
 const DISCOVERABLE_PROVIDERS = new Set<HistoryProvider>(["claude", "codex"]);
-export function supportsHistoryDiscovery(cmd: string): boolean {
-  const provider = historyProviderFor(cmd);
+export function supportsHistoryDiscovery(agent: AgentProfile | string): boolean {
+  const provider = historyProviderFor(agent);
   return provider !== null && DISCOVERABLE_PROVIDERS.has(provider);
 }
 // Optimistic default used only until the agent reports its real capability at
@@ -345,11 +392,12 @@ export function supportsHistoryDiscovery(cmd: string): boolean {
 export function supportsAgentSessionLoad(_cmd: string): boolean {
   return true;
 }
-export function agentSkinFor(cmd: string): "codex" | "opencode" | undefined {
-  const base = path.basename(cmd);
-  if (base.includes("codex-acp")) return "codex";
-  if (base.includes("opencode")) return "opencode";
-  return undefined;
+// The two kinds that carry a skin of their own. Derived from the kind rather
+// than re-sniffing the cmd, so an entry that states `kind: "codex"` for a
+// wrapper script gets Codex's colour instead of the default accent.
+export function agentSkinFor(agent: AgentProfile | string): "codex" | "opencode" | undefined {
+  const kind = agentKindFor(agent);
+  return kind === "codex" || kind === "opencode" ? kind : undefined;
 }
 const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 const encodeProjectPath = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
@@ -4291,11 +4339,11 @@ const CONSOLE_HTML = consoleEnabled
 const agentDetails = Object.entries(cfg.agents).map(([name, p]) => ({
   name,
   cwd: p.cwd,
-  kind: historyProviderFor(p.cmd), // which CLI backs this agent — drives the resume command syntax
-  history: supportsAgentHistory(p.cmd),
-  discover: supportsHistoryDiscovery(p.cmd), // can /history/discovered list this agent's other folders?
+  kind: agentKindFor(p), // which CLI backs this agent — drives the resume command syntax
+  history: supportsAgentHistory(p),
+  discover: supportsHistoryDiscovery(p), // can /history/discovered list this agent's other folders?
   sessionLoad: supportsAgentSessionLoad(p.cmd), // initial guess; refined once the agent reports at initialize
-  skin: agentSkinFor(p.cmd),
+  skin: agentSkinFor(p),
 }));
 // The injected config and /healthz prefer what the agent actually reported over
 // the name-based guess, so an agent that can resume (e.g. codex-acp) is advertised
@@ -4332,11 +4380,14 @@ const gateway = new Gateway(cfg.agents, cfg.ledgerDir, undefined, db);
 for (const [name, prof] of Object.entries(cfg.agents)) {
   // Register the backing CLI so the login PTY runs the right command for a
   // renamed agent (the kind, not the name, decides claude vs codex login).
-  registerLoginAgent(name, historyProviderFor(prof.cmd), prof.env, prof.cwd);
-  getSession(name).onSuccess = () => {
-    if (gateway.restartAgent(name))
-      console.log(`login: restarted agent "${name}" to pick up new credentials`);
-  };
+  registerLoginAgent(name, agentKindFor(prof), prof.env, prof.cwd);
+  // null for an agent with no known login command — nothing to bounce after.
+  const session = getSession(name);
+  if (session)
+    session.onSuccess = () => {
+      if (gateway.restartAgent(name))
+        console.log(`login: restarted agent "${name}" to pick up new credentials`);
+    };
 }
 
 // Serve the SSE downstream (GET ssePath) and POST upstream (POST rpcPath) transport.
@@ -5161,7 +5212,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     const prof = cfg.agents[agentName];
     const limit = Math.min(Math.max(parseInt(q.get("limit") ?? "30", 10) || 30, 1), 200);
     if (!prof) { res.writeHead(400); res.end(); return; }
-    if (!supportsHistoryDiscovery(prof.cmd)) {
+    if (!supportsHistoryDiscovery(prof)) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ sessions: [] }));
       return;

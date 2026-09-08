@@ -8,7 +8,7 @@
 // folders we aren't currently in. Absent on gateways older than this field —
 // fall back via discoverable() rather than reading it as false.
 export type AgentSkin = "codex" | "opencode";
-export type AgentKind = "claude" | "codex" | "opencode";
+export type AgentKind = "claude" | "codex" | "opencode" | "cursor" | "antigravity";
 export interface AgentRef { name: string; cwd: string; kind?: AgentKind; history?: boolean; discover?: boolean; sessionLoad?: boolean; sessionFork?: boolean; skin?: AgentSkin; }
 export interface AppConfig {
   // The gateway serves a single transport: SSE downstream (ssePath) + POST upstream
