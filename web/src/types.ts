@@ -8,7 +8,10 @@
 // folders we aren't currently in. Absent on gateways older than this field —
 // fall back via discoverable() rather than reading it as false.
 export type AgentSkin = "codex" | "opencode";
-export type AgentKind = "claude" | "codex" | "opencode";
+export type AgentKind = "claude" | "codex" | "opencode" | "cursor" | "antigravity";
+// Which brand glyph an agent wears. "mono" is the no-glyph case: an agent the
+// client has no mark for is shown as its own name instead.
+export type AgentGlyph = AgentKind | "mono";
 export interface AgentRef { name: string; cwd: string; kind?: AgentKind; history?: boolean; discover?: boolean; sessionLoad?: boolean; sessionFork?: boolean; skin?: AgentSkin; }
 export interface AppConfig {
   // The gateway serves a single transport: SSE downstream (ssePath) + POST upstream

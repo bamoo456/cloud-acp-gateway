@@ -5,7 +5,13 @@ const base = () => location.protocol + "//" + location.host;
 const qs = (agent: string) => `?agent=${encodeURIComponent(agent)}`;
 
 export async function startLogin(agent: string): Promise<void> {
-  await fetch(base() + "/login/start" + qs(agent), { method: "POST", credentials: "same-origin" });
+  const res = await fetch(base() + "/login/start" + qs(agent), { method: "POST", credentials: "same-origin" });
+  if (res.ok) return;
+  // The gateway answers 501 for an agent whose backing CLI it has no login
+  // command for, and says how to supply one. Throw so the caller renders that
+  // rather than opening a stream that fails with nothing to read.
+  const body = await res.json().catch(() => null) as { error?: string; hint?: string } | null;
+  throw new Error([body?.error || `HTTP ${res.status}`, body?.hint].filter(Boolean).join(" — "));
 }
 
 export function loginStreamUrl(agent: string): string {

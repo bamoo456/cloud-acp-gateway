@@ -1,9 +1,17 @@
 export const CLIENT_CONFIG_SCHEMA_VERSION = 1;
 
+// Which CLI backs an agent. Broader than the set whose history the gateway can
+// read: a kind exists for every CLI the gateway can identify (and every kind an
+// agents.json entry may name explicitly), while history is a capability only
+// some of those kinds have — see HISTORY_PROVIDERS in gateway.ts. Lives here,
+// in the dependency-free client-config module, because both the gateway and
+// every client speak in terms of it.
+export type AgentKind = "claude" | "codex" | "opencode" | "cursor" | "antigravity";
+
 export type NativeAgentConfig = {
   name: string;
   cwd: string;
-  kind: "claude" | "codex" | "opencode" | null;
+  kind: AgentKind | null;
   history: boolean;
   // Whether /history/discovered can list this agent's sessions from folders the
   // console isn't currently in. Server-owned so clients don't re-derive it from

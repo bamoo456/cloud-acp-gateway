@@ -69,11 +69,20 @@ export function shareUrl(sessionId: string, cwd: string, agent: string = "", ori
 // to land in the right folder and match the on-disk transcript. The syntax
 // differs per CLI: Claude uses `--resume <id>`, Codex a `resume <id>` subcommand,
 // opencode a `--session <id>` flag.
-export function resumeCommand(sessionId: string, cwd: string, kind?: AgentKind): string {
+//
+// null for the agents whose CLI cannot reach the conversation at all. Cursor and
+// Antigravity both keep their ACP conversations in a store SEPARATE from the one
+// their interactive CLI resumes from (~/.cursor/acp-sessions vs ~/.cursor/chats;
+// ~/.gemini/antigravity-acp vs ~/.gemini/antigravity-cli), and the ids do not
+// cross between them. A command built from this id would fail, or worse, open
+// some unrelated conversation — so the affordance is withheld instead.
+export function resumeCommand(sessionId: string, cwd: string, kind?: AgentKind): string | null {
   const resume =
     kind === "codex" ? `codex resume ${sessionId}`
     : kind === "opencode" ? `opencode --session ${sessionId}`
+    : kind === "cursor" || kind === "antigravity" ? null
     : `claude --resume ${sessionId}`;
+  if (!resume) return null;
   return cwd ? `cd ${shellQuote(cwd)} && ${resume}` : resume;
 }
 
