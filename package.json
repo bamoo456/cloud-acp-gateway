@@ -16,6 +16,7 @@
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.58.1",
     "@agentclientprotocol/codex-acp": "^1.1.2",
+    "@bamoo456/antigravity-acp": "^0.1.0",
     "node-pty": "npm:@homebridge/node-pty-prebuilt-multiarch@0.13.1"
   },
   "devDependencies": {
