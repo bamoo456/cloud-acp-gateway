@@ -8,7 +8,15 @@
     "args": []
   },
   "opencode": {
-    "cmd": "/opt/homebrew/bin/opencode",
+    "cmd": "/Users/george.c/.opencode/bin/opencode",
     "args": ["acp"]
+  },
+  "cursor": {
+    "cmd": "/Users/george.c/.local/bin/agent",
+    "args": ["acp"]
+  },
+  "antigravity": {
+    "cmd": "node_modules/.bin/antigravity-acp",
+    "args": []
   }
 }
