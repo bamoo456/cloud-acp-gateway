@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Session, MessageImage, MessageFile, ThreadItem } from "../types.ts";
-import { useStore } from "../store/store.ts";
+import type { Session, MessageImage, MessageFile, ThreadItem, AgentGlyph } from "../types.ts";
+import { agentGlyphKind, useStore } from "../store/store.ts";
 import { imageSrc } from "../lib/images.ts";
 import { searchSessions } from "../lib/api.ts";
 import { clearHits, findRanges, paintHits, scrollToHit } from "../lib/findInFile.ts";
@@ -13,7 +13,7 @@ import { PermissionPrompt } from "./PermissionPrompt.tsx";
 import { ElicitationPrompt } from "./ElicitationPrompt.tsx";
 import { Working } from "./Working.tsx";
 import { CopyButton } from "./CopyButton.tsx";
-import { CodexMark, IconChevronDown, IconX, OpencodeMark, Robot } from "../lib/icons.tsx";
+import { AgentMark, IconChevronDown, IconX, Robot } from "../lib/icons.tsx";
 
 // Mount only the most recent slice of a conversation. Every rendered message adds
 // DOM nodes (a code block becomes hundreds), and the browser's per-keystroke layout
@@ -93,7 +93,7 @@ function groupTurns(items: ThreadItem[]): Row[] {
 // the answer you want is one tap away, and only one is ever unrolled (§1.3
 // still holds — no frame either way).
 function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, onToggle }: {
-  agentName: string; agentKind: "claude" | "codex" | "opencode" | "mono"; thoughts: Thought[]; replies: Reply[]; live: boolean;
+  agentName: string; agentKind: AgentGlyph; thoughts: Thought[]; replies: Reply[]; live: boolean;
   expanded: boolean; onToggle: () => void;
 }) {
   const copyable = replies.map((r) => r.text).filter(Boolean).join("\n\n");
@@ -106,7 +106,7 @@ function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, on
         <span className="who">
           {agentKind !== "mono" && (
             <span className={"chip " + agentKind}>
-              {agentKind === "codex" ? <CodexMark /> : agentKind === "opencode" ? <OpencodeMark /> : <Robot />}
+              <AgentMark kind={agentKind} />
             </span>
           )}
           <span className="wm">{agentName}</span>
@@ -215,10 +215,9 @@ export function Thread({ session, agentReady, loading, findOpen, focusFind = 0, 
   const anchorHeight = useRef(0);   // scrollHeight captured before a reveal, to compensate the prepend
   const agent = useStore((s) => s.cfg.agents.find((a) => a.name === s.agentName));
   // The agent's own name, as configured, is the label every turn wears —
-  // alongside its brand glyph (same classification Sidebar.tsx's mark() uses).
+  // alongside its brand glyph.
   const agentLabel = useStore((s) => s.agentName);
-  const agentKind = agent?.skin === "codex" ? "codex" : agent?.kind === "opencode" ? "opencode"
-    : agent?.name === "claude" ? "claude" : "mono";
+  const agentKind = agentGlyphKind(agent);
   const [visible, setVisible] = useState(INITIAL_VISIBLE);
   // Show a "jump to latest" button whenever the user has scrolled up off the bottom,
   // so they can return to the live tail in one tap instead of a long manual scroll.
@@ -552,7 +551,7 @@ export function Thread({ session, agentReady, loading, findOpen, focusFind = 0, 
         <div className="empty"><span className="spinner" /><h2>Joining conversation…</h2><p>Loading the shared session.</p></div>
       )}
       {showEmpty && (
-        <div className="empty">{agent?.skin === "codex" ? <CodexMark /> : agent?.kind === "opencode" ? <OpencodeMark /> : <Robot />}<h2>Ready to code?</h2><p>Let&apos;s write something worth deploying.</p></div>
+        <div className="empty">{agentKind === "mono" ? <Robot /> : <AgentMark kind={agentKind} />}<h2>Ready to code?</h2><p>Let&apos;s write something worth deploying.</p></div>
       )}
       {hidden > 0 && (
         <div className="earlier-hint">↑ Scroll up for {hidden} earlier message{hidden === 1 ? "" : "s"}</div>

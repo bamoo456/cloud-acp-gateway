@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from "react";
-import { branchGate, handoffGate, hasCodexSkin, useStore, engineOf } from "../store/store.ts";
+import { activeAgentGlyph, branchGate, handoffGate, useStore, engineOf } from "../store/store.ts";
 import { Menu, type MenuItem } from "./Menu.tsx";
 import { IconSlash, IconSend, IconStop, IconAt, IconFile, IconGitBranch, IconClock, IconTerminal } from "../lib/icons.tsx";
 import { readImageFile, imageSrc } from "../lib/images.ts";
@@ -7,7 +7,7 @@ import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
 import { listFiles, uploadFile } from "../lib/api.ts";
-import type { MessageImage, MessageFile, QueuedPrompt } from "../types.ts";
+import type { MessageImage, MessageFile, QueuedPrompt, AgentGlyph } from "../types.ts";
 
 // Touch / coarse-pointer devices (phones, tablets) have no Shift key on their
 // virtual keyboard, so there is no way to type Shift+Enter for a newline. On
@@ -15,6 +15,14 @@ import type { MessageImage, MessageFile, QueuedPrompt } from "../types.ts";
 // Send button instead. Desktop keeps Enter=submit, Shift+Enter=newline.
 const isTouchDevice = typeof window !== "undefined" &&
   (window.matchMedia?.("(pointer: coarse)").matches || "ontouchstart" in window);
+
+// Who the box says you are replying to. An agent with no brand of its own falls
+// back to the name it was configured under, which is the only thing the user
+// ever called it.
+const GLYPH_LABEL: Record<AgentGlyph, string | null> = {
+  claude: "Claude", codex: "Codex", opencode: "opencode",
+  cursor: "Cursor", antigravity: "Antigravity", mono: null,
+};
 
 // What a queued message reads as on the rail. An image- or file-only message has
 // no text of its own, and rendering it as an empty row would look like a bug —
@@ -136,7 +144,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   const shellMode = !!s.cfg.terminalEnabled && !!targetId && text.startsWith("!");
   // Mid-turn with something ready to send, the stop button becomes interrupt.
   const cutting = activeBusy && canSend && !shellMode;
-  const placeholder = hasCodexSkin(s) ? "Reply to Codex…" : "Reply to Claude…";
+  const placeholder = `Reply to ${GLYPH_LABEL[activeAgentGlyph(s)] ?? s.agentName}…`;
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
   // a query is set (open), even if nothing matches, so the "no commands" hint
