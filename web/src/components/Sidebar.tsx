@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getHistory, getDiscoveredHistory, searchSessions, type HistorySession, type DiscoveredHistorySession, type RunningTask, type SearchResponse } from "../lib/api.ts";
 import type { RecentSession } from "../lib/recentSessions.ts";
 import { resolveRunningTask, runningView } from "../lib/runningTask.ts";
-import { useStore } from "../store/store.ts";
+import { agentGlyphKind, useStore } from "../store/store.ts";
 import { SearchResults } from "./SearchResults.tsx";
 import { SearchFilters, DEFAULT_FILTERS, filtersToOptions, type FilterState } from "./SearchFilters.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
@@ -12,7 +12,7 @@ import {
   DESKTOP_SIDEBAR_QUERY, isDesktopSidebarWidth,
 } from "../lib/sidebarWidth.ts";
 import { IconFolder, IconChevron, IconChevronDown, IconCheck, IconTrash, IconPencil, IconX, IconHide, IconArchive, IconPlus, IconSideChat, IconPin, WorkingDots,
-  Robot, CodexMark, OpencodeMark } from "../lib/icons.tsx";
+  AgentMark } from "../lib/icons.tsx";
 import { basename, timeAgo } from "../lib/format.ts";
 import { folderKey, homeFrom } from "../lib/folderKey.ts";
 import { groupByFolder, latestWithPinned, splitByAge, hideFolders, type FolderSort, type GroupableRow } from "../lib/sessionGroups.ts";
@@ -385,17 +385,10 @@ export function Sidebar({ open, onClose, onOpenPicker, focusSearch = 0 }: { open
   // and only here. An agent with no glyph of its own still gets its name.
   const mark = (agentName: string) => {
     if (!multiAgent) return null;
-    const agent = agentByName.get(agentName);
-    // Same classification the agent glyph used, kept so anything keying off
-    // "which agent is this row" still can.
-    const kind = agent?.skin === "codex" ? "codex" : agent?.kind === "opencode" ? "opencode"
-      : agent?.name === "claude" ? "claude" : "mono";
+    const kind = agentGlyphKind(agentByName.get(agentName));
     return (
       <span className={"mark who " + kind} title={agentName}>
-        {kind === "codex" ? <CodexMark />
-          : kind === "opencode" ? <OpencodeMark />
-            : kind === "claude" ? <Robot />
-              : <span className="wm">{agentName}</span>}
+        {kind === "mono" ? <span className="wm">{agentName}</span> : <AgentMark kind={kind} />}
       </span>
     );
   };

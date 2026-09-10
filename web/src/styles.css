@@ -34,6 +34,8 @@
     --agent-claude: #d97757;
     --agent-codex: #10a37f;
     --agent-opencode: #5A5858;
+    --agent-cursor: #6E6E6E;
+    --agent-antigravity: #4285F4;
     /* The prompt's tint (below, .turn.user) — a fixed brand colour chosen from
        mockup, not derived from --text or the active agent, so it stays put
        across skins/agents. The mix % and radius are separate tokens (not
@@ -785,7 +787,8 @@
 
   .empty { display: flex; flex-direction: column; align-items: center; justify-content: center;
     text-align: center; min-height: 52vh; gap: 8px; padding: 24px; }
-  .empty .robot, .empty .codex-mark, .empty .opencode-mark { width: 84px; height: 84px; margin-bottom: 6px; }
+  .empty .robot, .empty .codex-mark, .empty .opencode-mark,
+  .empty .cursor-mark, .empty .antigravity-mark { width: 84px; height: 84px; margin-bottom: 6px; }
   .empty .spinner { width: 34px; height: 34px; border: 3px solid var(--border); border-top-color: var(--accent);
     border-radius: 50%; animation: wspin .8s linear infinite; margin-bottom: 12px; }
   .empty h2 { margin: 0; font-size: 22px; font-weight: 600; }
@@ -838,6 +841,8 @@
   .lbl .chip.claude { color: var(--agent-claude); background: color-mix(in srgb, var(--agent-claude) 16%, var(--surface)); }
   .lbl .chip.codex { background: color-mix(in srgb, var(--agent-codex) 16%, var(--surface)); }
   .lbl .chip.opencode { background: color-mix(in srgb, var(--agent-opencode) 16%, var(--surface)); }
+  .lbl .chip.cursor { background: color-mix(in srgb, var(--agent-cursor) 16%, var(--surface)); }
+  .lbl .chip.antigravity { background: color-mix(in srgb, var(--agent-antigravity) 16%, var(--surface)); }
   /* Your prompt takes a tint so a long thread can be skimmed for "where did I
      ask something" — the one place a message carries a surface. The tint is a
      light color-mix over the page (works in both themes), with a hairline

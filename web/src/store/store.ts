@@ -19,7 +19,7 @@ import {
 import type {
   Session, SessionEngine, ConfigOption, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
   AgentSkin, MessageImage, MessageFile, QueuedPrompt, PromptCapabilities, ElicitationResponse, RateLimit,
-  SlashCommand, AgentRef,
+  SlashCommand, AgentRef, AgentGlyph,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
 
@@ -420,8 +420,22 @@ export function handoffGate(state: State): HandoffGate {
   return { targets, disabled: !targets.length || !ready || running, why };
 }
 
-export function hasCodexSkin(state: SkinState): boolean {
-  return activeAgentSkin(state) === "codex";
+// Which brand an agent wears, everywhere it is drawn or named. The skin wins
+// over the kind — a codex-skinned agent is a Codex however its binary is named
+// — then the kind's own brand, then Claude by name for the configs that predate
+// `kind`. Anything left is "mono": no glyph of its own, so it goes by its name.
+// Lives here as the single answer because three components used to re-derive it
+// and one of them had drifted, which is how antigravity ended up wearing the
+// Claude robot on the empty state but not on its turn labels.
+export function agentGlyphKind(agent: AgentRef | undefined): AgentGlyph {
+  if (normalizeAgentSkin(agent?.skin) === "codex") return "codex";
+  const kind = agent?.kind;
+  if (kind === "opencode" || kind === "cursor" || kind === "antigravity") return kind;
+  return agent?.name === "claude" ? "claude" : "mono";
+}
+
+export function activeAgentGlyph(state: SkinState): AgentGlyph {
+  return agentGlyphKind(state.cfg.agents.find((a) => a.name === state.agentName));
 }
 
 // Which provider's quota an agent config maps to — the only two the gateway's
