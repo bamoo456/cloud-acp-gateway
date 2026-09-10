@@ -62,7 +62,9 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   // CLI resume reads the on-disk transcript directly (claude --resume / codex
   // resume / opencode --session), independent of ACP session/load — so it works
   // whenever the agent persists history. The CLIs differ only in command syntax.
-  const canResume = !!resumableId && hasHistory;
+  // No resume command for this agent's CLI means no button — see resumeCommand.
+  const resumeCmd = resumableId ? resumeCommand(resumableId, s.cwd, agentRef?.kind) : null;
+  const canResume = !!resumeCmd && hasHistory;
   const resumeHint = hasHistory
     ? "continue this conversation in your terminal"
     : "this agent's conversations can't be resumed";
@@ -93,10 +95,9 @@ export function ActionMenu({ open, onClose }: { open: boolean; onClose: () => vo
   if (!open) return null;
 
   async function copyResume() {
-    if (!canResume) return;
-    const cmd = resumeCommand(resumableId!, s.cwd, agentRef?.kind);
-    const ok = await copyText(cmd);
-    s.setTip(ok ? "Resume command copied — paste in your terminal on the host running the gateway." : cmd);
+    if (!canResume || !resumeCmd) return;
+    const ok = await copyText(resumeCmd);
+    s.setTip(ok ? "Resume command copied — paste in your terminal on the host running the gateway." : resumeCmd);
     onClose();
   }
 
