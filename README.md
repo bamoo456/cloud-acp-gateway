@@ -48,7 +48,8 @@ available on the same host or inside the same container as the gateway.
   conversation only. The main column's settings are left where they are.
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
-- History browsing for supported agents: Claude Code, Codex, and opencode.
+- History browsing for supported agents: Claude Code, Codex, opencode, Cursor
+  and Antigravity. All but opencode also appear in the cross-folder Recent list.
 
 ## Requirements
 

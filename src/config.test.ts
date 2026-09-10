@@ -8,6 +8,7 @@ import {
   agentKindFor,
   supportsClaudeHistory,
   supportsAgentHistory,
+  supportsHistoryDiscovery,
   supportsAgentSessionLoad,
   agentSkinFor,
   listAgentHistory,
@@ -417,7 +418,7 @@ test("GATEWAY_VERSION matches package.json, so /healthz reports the real version
   assert.equal(GATEWAY_VERSION, pkg.version);
 });
 
-test("Cursor and Antigravity are recognised, and neither gets history", () => {
+test("Cursor and Antigravity are recognised from their binary names", () => {
   // Cursor's ACP binary ships with the app as plain `agent` and runs `agent acp`.
   assert.equal(agentKindFor("/Users/me/.local/bin/agent"), "cursor");
   assert.equal(agentKindFor("/usr/local/bin/cursor-agent"), "cursor");
@@ -429,10 +430,27 @@ test("Cursor and Antigravity are recognised, and neither gets history", () => {
   // spellings must be recognised as well as Google's underscored archive.
   assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/antigravity-acp"), "antigravity");
   assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/agy-acp-server"), "antigravity");
-  // Recognising the kind must not advertise history the gateway can't read.
-  assert.equal(supportsAgentHistory("/Users/me/.local/bin/agent"), false);
-  assert.equal(supportsAgentHistory("/opt/antigravity/agy_acp_server.par"), false);
-  assert.equal(supportsAgentHistory("/opt/acp-gateway/node_modules/.bin/antigravity-acp"), false);
+});
+
+test("Cursor and Antigravity conversations are browsable and discoverable", () => {
+  // Both keep a readable on-disk store, so they advertise history — and both
+  // record the conversation's cwd in their own metadata rather than leaving it
+  // to be recovered from a transcript, which is what qualifies them for
+  // discovery (the cross-folder Recent list) where opencode does not.
+  for (const cmd of [
+    "/Users/me/.local/bin/agent",
+    "/opt/antigravity/agy_acp_server.par",
+    "/opt/acp-gateway/node_modules/.bin/antigravity-acp",
+  ]) {
+    assert.equal(supportsAgentHistory(cmd), true, cmd);
+    assert.equal(supportsHistoryDiscovery(cmd), true, cmd);
+  }
+  // opencode is the counter-example the rule above is drawn against.
+  assert.equal(supportsAgentHistory("/usr/local/bin/opencode"), true);
+  assert.equal(supportsHistoryDiscovery("/usr/local/bin/opencode"), false);
+  // An unknown CLI still gets neither.
+  assert.equal(supportsAgentHistory("/opt/bin/some-other-acp"), false);
+  assert.equal(supportsHistoryDiscovery("/opt/bin/some-other-acp"), false);
 });
 
 test("an explicit agents.json kind overrides the cmd sniff", () => {

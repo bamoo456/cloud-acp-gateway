@@ -40,6 +40,7 @@ import { resolveTls } from "./tls.ts";
 import { accessUrls } from "./access.ts";
 import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.ts";
 import { DatabaseSync } from "node:sqlite";
+import { protobufStringsAt } from "./protobuf-strings.ts";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
 import { handleTerminal, setCwdResolver } from "./terminal.ts";
 import { handleUpload } from "./uploads.ts";
@@ -359,7 +360,7 @@ export function agentKindFor(agent: AgentProfile | string): AgentKind | null {
 // The kinds whose on-disk session store this gateway knows how to read. A kind
 // outside this set is a perfectly usable agent — it just gets `history: false`
 // and no Recent entries, rather than a reader that returns nothing.
-const HISTORY_PROVIDERS = ["claude", "codex", "opencode"] as const;
+const HISTORY_PROVIDERS = ["claude", "codex", "opencode", "cursor", "antigravity"] as const;
 type HistoryProvider = (typeof HISTORY_PROVIDERS)[number];
 const isHistoryProvider = (kind: AgentKind | null): kind is HistoryProvider =>
   kind !== null && (HISTORY_PROVIDERS as readonly string[]).includes(kind);
@@ -378,7 +379,10 @@ export function supportsAgentHistory(agent: AgentProfile | string): boolean {
 // re-derived client-side: both the web sidebar and the iOS console used to
 // hardcode `kind === "claude"`, which is why codex conversations from other
 // folders were invisible in each of them.
-const DISCOVERABLE_PROVIDERS = new Set<HistoryProvider>(["claude", "codex"]);
+// cursor and antigravity record the conversation's cwd in their own metadata
+// (meta.json / <id>.meta), so discovery gets it for free — no transcript scan,
+// which is what keeps opencode out.
+const DISCOVERABLE_PROVIDERS = new Set<HistoryProvider>(["claude", "codex", "cursor", "antigravity"]);
 export function supportsHistoryDiscovery(agent: AgentProfile | string): boolean {
   const provider = historyProviderFor(agent);
   return provider !== null && DISCOVERABLE_PROVIDERS.has(provider);
@@ -549,16 +553,19 @@ const opencodeDbFile = () => {
 // rather than throwing. read-only + WAL lets it run alongside a live opencode.
 // node:sqlite has no `fileMustExist`, but read-only refuses to create the file,
 // so a missing DB throws here and is caught the same way.
-function withOpenCodeDb<T>(fn: (db: DatabaseSync) => T, fallback: T): T {
+function withReadOnlyDb<T>(file: string, fn: (db: DatabaseSync) => T, fallback: T): T {
   let db: DatabaseSync | null = null;
   try {
-    db = new DatabaseSync(opencodeDbFile(), { readOnly: true });
+    db = new DatabaseSync(file, { readOnly: true });
     return fn(db);
   } catch {
     return fallback;
   } finally {
     try { db?.close(); } catch { /* ignore */ }
   }
+}
+function withOpenCodeDb<T>(fn: (db: DatabaseSync) => T, fallback: T): T {
+  return withReadOnlyDb(opencodeDbFile(), fn, fallback);
 }
 
 // Same, but writable — deleting a conversation is the one thing the gateway
@@ -963,7 +970,10 @@ export type ViewBlock = {
   mimeType?: string; data?: string; uri?: string;
 };
 type HistorySessionItem = { sessionId: string; title: string | null; updatedAt: string };
-type DiscoveredHistorySessionItem = HistorySessionItem & { cwd: string; source: "claude-cli" | "codex-cli" };
+type DiscoveredHistorySessionItem = HistorySessionItem & {
+  cwd: string;
+  source: "claude-cli" | "codex-cli" | "cursor-cli" | "antigravity-acp";
+};
 export type ViewMessage = { role: "user" | "assistant"; blocks: ViewBlock[] };
 type HistoryMessagesResult = { messages: ViewMessage[]; total: number; start: number; truncated: boolean };
 
@@ -1756,6 +1766,18 @@ export async function discoverCodexHistory(opts?: { fsRoot?: string; limit?: num
   })));
 }
 
+function discoverForProvider(
+  provider: HistoryProvider | null,
+  limit: number,
+  prof: AgentProfile,
+): Promise<DiscoveredHistorySessionItem[]> {
+  if (provider === "claude") return discoverClaudeHistory({ limit });
+  if (provider === "codex") return discoverCodexHistory({ limit, codexHome: codexHomeForEnv(prof.env) });
+  if (provider === "cursor") return discoverCursorHistory({ limit });
+  if (provider === "antigravity") return discoverAntigravityHistory({ limit });
+  return Promise.resolve([]);
+}
+
 export type SearchCandidate = {
   sessionId: string; file: string; cwd: string; title: string | null;
   source: "claude-cli" | "codex-cli"; agentName: string; recencyMs: number;
@@ -2248,11 +2270,286 @@ function deleteOpenCodeSession(sessionId: string): boolean {
   }, false);
 }
 
+// ------------------------------------------------------ cursor history ----
+// Cursor's ACP CLI keeps one directory per conversation under
+// ~/.cursor/acp-sessions: `meta.json` (the cwd, and a title once the CLI has
+// named the conversation) beside `store.db`, a content-addressed blob store.
+// The cwd is stated outright rather than recovered from a transcript, which is
+// what earns cursor a place in DISCOVERABLE_PROVIDERS.
+const cursorSessionsRoot = () =>
+  process.env.ACPG_CURSOR_SESSIONS_DIR || path.join(os.homedir(), ".cursor", "acp-sessions");
+
+type CursorSession = { sessionId: string; cwd: string | null; title: string | null; db: string; mtime: number };
+
+async function listCursorSessions(root = cursorSessionsRoot()): Promise<CursorSession[]> {
+  let entries: fs.Dirent[];
+  try { entries = await fs.promises.readdir(root, { withFileTypes: true }); } catch { return []; }
+  const found = await Promise.all(entries.map(async (e): Promise<CursorSession | null> => {
+    if (!e.isDirectory()) return null;
+    const dir = path.join(root, e.name);
+    let raw: string;
+    let st: fs.Stats;
+    try {
+      raw = await fs.promises.readFile(path.join(dir, "meta.json"), "utf8");
+      // A directory with no store.db is a session/new nothing was ever said in —
+      // the same empty conversation listOpenCodeHistory drops, visible here as a
+      // missing file rather than a row with no messages.
+      st = await fs.promises.stat(path.join(dir, "store.db"));
+    } catch { return null; }
+    const meta = parseJson<{ cwd?: unknown; title?: unknown }>(raw);
+    const title = typeof meta?.title === "string" ? meta.title.trim() : "";
+    return {
+      sessionId: e.name,
+      cwd: typeof meta?.cwd === "string" && meta.cwd ? meta.cwd : null,
+      title: title || null,
+      db: path.join(dir, "store.db"),
+      mtime: Math.round(st.mtimeMs),
+    };
+  }));
+  return found.filter((s): s is CursorSession => s !== null);
+}
+
+// Cursor stores each message as a JSON blob keyed by its content hash, with a
+// protobuf Merkle tree over them recording the order. We read them in rowid
+// order instead: the store is append-only, so insertion order IS conversation
+// order, and that avoids decoding a schema-less tree to learn what the table
+// already says.
+//
+// `content` tells a real message from Cursor's preamble. The system prompt and
+// the environment dump Cursor prepends both carry `content` as a plain string
+// (the dump runs to hundreds of KB); an actual turn carries an array of parts.
+// Rendering the preamble would put a wall of machine text where the user's first
+// question belongs.
+function parseCursorHistoryMessages(dbFile: string): ViewMessage[] {
+  return withReadOnlyDb(dbFile, (db) => {
+    const out: ViewMessage[] = [];
+    const rows = db.prepare(
+      // The message blobs are the ones that begin `{"role":`; everything else in
+      // the store is the protobuf index over them.
+      `SELECT data FROM blobs WHERE substr(CAST(data AS TEXT), 1, 8) = '{"role":' ORDER BY rowid`,
+    ).all() as Array<{ data: unknown }>;
+    for (const r of rows) {
+      const text = typeof r.data === "string" ? r.data : Buffer.from(r.data as Uint8Array).toString("utf8");
+      const m = parseJson<{ role?: unknown; content?: unknown }>(text);
+      const role = m?.role === "assistant" ? "assistant" : m?.role === "user" ? "user" : null;
+      if (!role || !Array.isArray(m?.content)) continue;
+      const blocks: ViewBlock[] = [];
+      for (const part of m.content as Array<Record<string, unknown>>) {
+        if (!part || typeof part !== "object") continue;
+        // Only `text` and `reasoning` have ever been observed carrying anything
+        // renderable; `redacted-reasoning` is an opaque provider blob with no
+        // text at all. Anything unrecognised is skipped rather than guessed at.
+        const body = typeof part.text === "string" ? part.text : "";
+        if (!body.trim()) continue;
+        if (part.type === "text") {
+          blocks.push({ type: "text", text: role === "user" ? unwrapCursorUserText(body) : body });
+        } else if (part.type === "reasoning") blocks.push({ type: "thought", text: body });
+      }
+      if (blocks.length) out.push({ role, blocks });
+    }
+    return out;
+  }, [] as ViewMessage[]);
+}
+
+// Cursor sends the prompt wrapped in an envelope of its own — a <timestamp> and
+// the text inside <user_query>. Only the query is the message; showing the
+// wrapper would put Cursor's plumbing where the user's question belongs.
+const CURSOR_USER_QUERY = /<user_query>\n?([\s\S]*?)\n?<\/user_query>/;
+function unwrapCursorUserText(text: string): string {
+  return CURSOR_USER_QUERY.exec(text)?.[1] ?? text;
+}
+
+// First thing the user actually typed, for a conversation Cursor never titled.
+function firstCursorUserText(dbFile: string): string | null {
+  const first = parseCursorHistoryMessages(dbFile).find((m) => m.role === "user");
+  const text = first?.blocks.find((b) => b.type === "text")?.text?.trim();
+  return text ? text.split("\n")[0].slice(0, 120) : null;
+}
+
+async function listCursorHistory(cwd: string, limit: number): Promise<HistorySessionItem[]> {
+  const custom = await readTitles(cwd);
+  const top = (await listCursorSessions())
+    .filter((s) => s.cwd && sameCwd(s.cwd, cwd))
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, limit);
+  return top.map((s) => ({
+    sessionId: s.sessionId,
+    // Deriving the title reads the session's store, so it happens after the
+    // limit cut — same reason discoverCodexHistory defers it.
+    title: custom[s.sessionId] ?? s.title ?? firstCursorUserText(s.db),
+    updatedAt: new Date(s.mtime).toISOString(),
+  }));
+}
+
+export async function discoverCursorHistory(opts?: { fsRoot?: string; limit?: number; root?: string }): Promise<DiscoveredHistorySessionItem[]> {
+  const fsRoot = opts?.fsRoot ?? FS_ROOT;
+  const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
+  const within: Array<CursorSession & { cwd: string }> = [];
+  for (const s of await listCursorSessions(opts?.root ?? cursorSessionsRoot())) {
+    const cwd = s.cwd ? resolveWithinRootBase(s.cwd, fsRoot) : null;
+    if (cwd) within.push({ ...s, cwd });
+  }
+  const top = within.sort((a, b) => b.mtime - a.mtime).slice(0, limit);
+  const customByCwd = new Map<string, Record<string, string>>();
+  for (const cwd of new Set(top.map((s) => s.cwd))) customByCwd.set(cwd, await readTitles(cwd));
+  return top.map((s) => ({
+    sessionId: s.sessionId,
+    title: customByCwd.get(s.cwd)?.[s.sessionId] ?? s.title ?? firstCursorUserText(s.db),
+    updatedAt: new Date(s.mtime).toISOString(),
+    cwd: s.cwd,
+    source: "cursor-cli" as const,
+  }));
+}
+
+// The whole conversation is the directory, so deleting one is an rmdir. Guarded
+// by the cwd the session itself records, exactly as the other providers are.
+async function deleteCursorSession(sessionId: string, opts?: DeleteHistoryOpts): Promise<boolean> {
+  const found = (await listCursorSessions()).find((s) => s.sessionId === sessionId);
+  if (!found || !allowedCwd(found.cwd, opts)) return false;
+  try {
+    await fs.promises.rm(path.dirname(found.db), { recursive: true, force: true });
+    return true;
+  } catch { return false; }
+}
+
+// ------------------------------------------------- antigravity history ----
+// Antigravity's ACP server keeps a SQLite database per conversation under
+// ~/.gemini/antigravity-acp/conversations: `<id>.db` holds the turns in a
+// `steps` table, `<id>.meta` the JSON cwd beside it. Note the directory: the
+// desktop IDE and the `agy` CLI have their own stores under sibling paths, and
+// only this one is the ACP server's.
+//
+// Each step's payload is protobuf against an unpublished google3 schema, so the
+// two fields we need were identified from the wire format and are read by path
+// (see protobuf-strings.ts). Both degrade to "no text" if Antigravity renumbers
+// them — a conversation that lists but won't render, never a wrong transcript.
+const antigravityConversationsDir = () =>
+  process.env.ACPG_ANTIGRAVITY_DIR
+  || path.join(process.env.GEMINI_HOME || path.join(os.homedir(), ".gemini"), "antigravity-acp", "conversations");
+
+// step_type -> what the step is. The rest (lifecycle bookkeeping, streaming
+// progress) carry no text at the paths below and fall out on their own.
+const AGY_STEP_USER = 14;
+const AGY_STEP_ASSISTANT = 15;
+const AGY_TOOL_STEPS = new Set([9, 21, 103]);
+// Where the text sits inside each step's payload. The tool path holds a JSON
+// argument blob that already carries the one-line summary Antigravity shows in
+// its own UI, which is all a replayed transcript needs from a tool call.
+const AGY_USER_TEXT_PATH = [19, 2] as const;
+const AGY_ASSISTANT_TEXT_PATH = [20, 1] as const;
+const AGY_TOOL_JSON_PATH = [5, 4, 3] as const;
+
+type AntigravitySession = { sessionId: string; cwd: string | null; db: string; mtime: number };
+
+async function listAntigravitySessions(dir = antigravityConversationsDir()): Promise<AntigravitySession[]> {
+  let files: string[];
+  try { files = await fs.promises.readdir(dir); } catch { return []; }
+  const found = await Promise.all(files
+    .filter((f) => f.endsWith(".db"))
+    .map(async (f): Promise<AntigravitySession | null> => {
+      const sessionId = f.slice(0, -3);
+      const dbFile = path.join(dir, f);
+      let st: fs.Stats;
+      try { st = await fs.promises.stat(dbFile); } catch { return null; }
+      let cwd: string | null = null;
+      try {
+        const meta = parseJson<{ cwd?: unknown }>(await fs.promises.readFile(path.join(dir, sessionId + ".meta"), "utf8"));
+        if (typeof meta?.cwd === "string" && meta.cwd) cwd = meta.cwd;
+      } catch { /* a .db with no .meta still lists; it just has no folder */ }
+      return { sessionId, cwd, db: dbFile, mtime: Math.round(st.mtimeMs) };
+    }));
+  return found.filter((s): s is AntigravitySession => s !== null);
+}
+
+function parseAntigravityHistoryMessages(dbFile: string): ViewMessage[] {
+  return withReadOnlyDb(dbFile, (db) => {
+    const out: ViewMessage[] = [];
+    const rows = db.prepare("SELECT step_type, step_payload FROM steps ORDER BY idx").all() as
+      Array<{ step_type: number; step_payload: unknown }>;
+    for (const r of rows) {
+      if (!(r.step_payload instanceof Uint8Array)) continue;
+      if (AGY_TOOL_STEPS.has(r.step_type)) {
+        const call = protobufStringsAt(r.step_payload, AGY_TOOL_JSON_PATH)
+          .map((j) => parseJson<{ toolAction?: unknown; toolSummary?: unknown }>(j))
+          .find((j) => typeof j?.toolAction === "string" || typeof j?.toolSummary === "string");
+        const summary = typeof call?.toolAction === "string" ? call.toolAction
+          : typeof call?.toolSummary === "string" ? call.toolSummary : null;
+        if (summary) out.push({ role: "assistant", blocks: [{ type: "tool", name: summary, status: "completed" }] });
+        continue;
+      }
+      const role = r.step_type === AGY_STEP_USER ? "user" : r.step_type === AGY_STEP_ASSISTANT ? "assistant" : null;
+      if (!role) continue;
+      const path_ = role === "user" ? AGY_USER_TEXT_PATH : AGY_ASSISTANT_TEXT_PATH;
+      // A turn streams as many steps and only the settled one carries text, so
+      // the empty ones are dropped rather than rendered as blank messages.
+      const text = protobufStringsAt(r.step_payload, path_).join("").trim();
+      if (text) out.push({ role, blocks: [{ type: "text", text }] });
+    }
+    return out;
+  }, [] as ViewMessage[]);
+}
+
+function firstAntigravityUserText(dbFile: string): string | null {
+  const first = parseAntigravityHistoryMessages(dbFile).find((m) => m.role === "user");
+  const text = first?.blocks.find((b) => b.type === "text")?.text?.trim();
+  return text ? text.split("\n")[0].slice(0, 120) : null;
+}
+
+async function listAntigravityHistory(cwd: string, limit: number): Promise<HistorySessionItem[]> {
+  const custom = await readTitles(cwd);
+  const top = (await listAntigravitySessions())
+    .filter((s) => s.cwd && sameCwd(s.cwd, cwd))
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, limit);
+  return top.map((s) => ({
+    sessionId: s.sessionId,
+    title: custom[s.sessionId] ?? firstAntigravityUserText(s.db),
+    updatedAt: new Date(s.mtime).toISOString(),
+  }));
+}
+
+export async function discoverAntigravityHistory(opts?: { fsRoot?: string; limit?: number; dir?: string }): Promise<DiscoveredHistorySessionItem[]> {
+  const fsRoot = opts?.fsRoot ?? FS_ROOT;
+  const limit = Math.min(Math.max(opts?.limit ?? 30, 1), 200);
+  const within: Array<AntigravitySession & { cwd: string }> = [];
+  for (const s of await listAntigravitySessions(opts?.dir ?? antigravityConversationsDir())) {
+    const cwd = s.cwd ? resolveWithinRootBase(s.cwd, fsRoot) : null;
+    if (cwd) within.push({ ...s, cwd });
+  }
+  // Titles come from opening each session's own database, so — as in
+  // discoverCodexHistory — that happens strictly after the limit cut. Doing it
+  // before would open every conversation on disk to render a page of thirty.
+  const top = within.sort((a, b) => b.mtime - a.mtime).slice(0, limit);
+  const customByCwd = new Map<string, Record<string, string>>();
+  for (const cwd of new Set(top.map((s) => s.cwd))) customByCwd.set(cwd, await readTitles(cwd));
+  return top.map((s) => ({
+    sessionId: s.sessionId,
+    title: customByCwd.get(s.cwd)?.[s.sessionId] ?? firstAntigravityUserText(s.db),
+    updatedAt: new Date(s.mtime).toISOString(),
+    cwd: s.cwd,
+    source: "antigravity-acp" as const,
+  }));
+}
+
+// Both halves go, or the leftover would list as a conversation whose transcript
+// can't be opened.
+async function deleteAntigravitySession(sessionId: string, opts?: DeleteHistoryOpts): Promise<boolean> {
+  const found = (await listAntigravitySessions()).find((s) => s.sessionId === sessionId);
+  if (!found || !allowedCwd(found.cwd, opts)) return false;
+  try {
+    await fs.promises.rm(found.db, { force: true });
+    await fs.promises.rm(found.db.replace(/\.db$/, ".meta"), { force: true });
+    return true;
+  } catch { return false; }
+}
+
 export async function listAgentHistory(cmd: string, cwd: string, limit: number, opts?: { projectsRoot?: string; store?: Db; codexHome?: string }): Promise<HistorySessionItem[]> {
   const provider = historyProviderFor(cmd);
   if (provider === "claude") return listClaudeHistory(cwd, limit, opts?.projectsRoot, opts?.store);
   if (provider === "codex") return listCodexHistory(cwd, limit, opts?.codexHome ?? codexHome());
   if (provider === "opencode") return listOpenCodeHistory(cwd, limit);
+  if (provider === "cursor") return listCursorHistory(cwd, limit);
+  if (provider === "antigravity") return listAntigravityHistory(cwd, limit);
   return [];
 }
 
@@ -2287,12 +2584,27 @@ export async function readAgentHistoryMessages(
     if (!found) return null;
     return sliceMessages(parseOpenCodeHistoryMessages(sessionId), page);
   }
+  // Both stores key a conversation by id alone, so the cwd check is the same
+  // scoping the opencode branch above does: confirm the session's own recorded
+  // folder is the one asking, so one cwd can't read another's thread.
+  if (provider === "cursor") {
+    const found = (await listCursorSessions()).find((s) => s.sessionId === sessionId && s.cwd && sameCwd(s.cwd, cwd));
+    if (!found) return null;
+    return sliceMessages(parseCursorHistoryMessages(found.db), page);
+  }
+  if (provider === "antigravity") {
+    const found = (await listAntigravitySessions()).find((s) => s.sessionId === sessionId && s.cwd && sameCwd(s.cwd, cwd));
+    if (!found) return null;
+    return sliceMessages(parseAntigravityHistoryMessages(found.db), page);
+  }
   return null;
 }
 
 async function deleteFromProvider(provider: HistoryProvider, sessionId: string, opts?: DeleteHistoryOpts, home?: string): Promise<boolean> {
   if (provider === "claude") return deleteClaudeSession(sessionId, opts);
   if (provider === "codex") return deleteCodexSession(sessionId, opts, home);
+  if (provider === "cursor") return deleteCursorSession(sessionId, opts);
+  if (provider === "antigravity") return deleteAntigravitySession(sessionId, opts);
   const found = listOpenCodeSessions().find((s) => s.id === sessionId);
   if (!found || !allowedCwd(found.directory, opts)) return false;
   return deleteOpenCodeSession(sessionId);
@@ -2301,7 +2613,7 @@ async function deleteFromProvider(provider: HistoryProvider, sessionId: string, 
 // Cheapest lookup first, because this walks providers until one claims the id.
 // claude is a readdir; opencode is one indexed query; codex has to read the head
 // of every rollout on disk, so it goes last.
-const PROVIDER_DELETE_ORDER: HistoryProvider[] = ["claude", "opencode", "codex"];
+const PROVIDER_DELETE_ORDER: HistoryProvider[] = ["claude", "opencode", "cursor", "antigravity", "codex"];
 
 // Permanently delete one conversation from whichever agent store holds it, given
 // the commands of the configured agents. Neither an agent name nor a cwd is taken
@@ -2828,7 +3140,7 @@ class Channel {
     reapAlways = false,
   ) {
     this.controlDefaults = new Map(Object.entries(profile.defaults ?? {}));
-    const provider = historyProviderFor(profile.cmd);
+    const provider = historyProviderFor(profile);
     this.isCodex = provider === "codex";
     this.codexHome = provider === "codex" ? codexHomeForEnv(profile.env) : undefined;
     this.reapable = reapAlways || provider === "claude" || provider === "codex";
@@ -5240,9 +5552,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       res.end(JSON.stringify({ sessions: [] }));
       return;
     }
-    (historyProviderFor(prof.cmd) === "codex"
-      ? discoverCodexHistory({ limit, codexHome: codexHomeForEnv(prof.env) })
-      : discoverClaudeHistory({ limit }))
+    discoverForProvider(historyProviderFor(prof), limit, prof)
       .then((sessions) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ sessions }));
@@ -5293,7 +5603,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     }
     if (requestedAgent) {
       const profile = cfg.agents[requestedAgent];
-      const profileKind = profile ? historyProviderFor(profile.cmd) : null;
+      const profileKind = profile ? historyProviderFor(profile) : null;
       if (!profile) {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "unknown agent" }));
@@ -5317,7 +5627,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       // account when two named accounts are available.
       const homes = new Map<string, string>();
       for (const profile of Object.values(cfg.agents)) {
-        if (historyProviderFor(profile.cmd) !== "codex") continue;
+        if (historyProviderFor(profile) !== "codex") continue;
         const home = codexHomeForEnv(profile.env);
         homes.set(path.resolve(home), home);
       }
