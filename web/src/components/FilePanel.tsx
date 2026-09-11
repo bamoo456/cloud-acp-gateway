@@ -32,7 +32,7 @@ import {
 } from "../lib/panelWidth.ts";
 import { FolderBrowser } from "./FolderBrowser.tsx";
 import { PathTree } from "./PathTree.tsx";
-import { IconBack, IconX, IconRefresh, IconExpand, IconPanel, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, IconFolder, IconCopy, IconPencil, IconCheck, fileIcon } from "../lib/icons.tsx";
+import { IconBack, IconX, IconRefresh, IconExpand, IconChevrons, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, IconFolder, IconCopy, IconPencil, IconCheck, fileIcon } from "../lib/icons.tsx";
 import { findRanges, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/findInFile.ts";
 
 // The file preview panel: what the agent actually produced, rather than what it
@@ -452,6 +452,17 @@ export function FilePanel() {
           {target && !split && (
             <button className="icon-btn" title="Back to file list" onClick={clearFilePreview}><IconBack /></button>
           )}
+          {/* Leading edge, against the folder name the list is OF — not in the
+              trailing cluster, where Expand and Close act on the whole panel and
+              this one would read as a third of those. Only while there are two
+              panes: with one, folding it away would leave the panel showing
+              nothing. Stays put when folded, so the way back is where the way
+              out was. */}
+          {split && (
+            <button className="icon-btn" aria-pressed={!listFolded}
+              title={listFolded ? "Show the file list" : "Hide the file list"}
+              onClick={() => setListFolded((v) => !v)}><IconChevrons left={!listFolded} /></button>
+          )}
           {/* Naming the folder is half of what the Project mode is for, and it
               is the only thing here that says WHICH checkout the lists describe
               when a session's cwd differs from the picker's. */}
@@ -472,13 +483,6 @@ export function FilePanel() {
           {(!target || split) && (
             <button className="icon-btn" title="Refresh" disabled={loading}
               onClick={() => { loadChanges(); setTreeKey((k) => k + 1); setReloadKey((k) => k + 1); }}><IconRefresh /></button>
-          )}
-          {/* Only while there are two panes — with one, folding it away would
-              leave the panel showing nothing. */}
-          {split && (
-            <button className="icon-btn" aria-pressed={!listFolded}
-              title={listFolded ? "Show the file list" : "Hide the file list"}
-              onClick={() => setListFolded((v) => !v)}><IconPanel left /></button>
           )}
           <button className="icon-btn" aria-pressed={expanded} title={expanded ? "Collapse" : "Expand"}
             onClick={() => setExpanded((v) => !v)}><IconExpand collapse={expanded} /></button>
