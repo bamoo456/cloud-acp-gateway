@@ -58,7 +58,11 @@ export interface ResolvedRef { abs: string; path: string }
 
 // Answers are re-rendered on every streamed chunk, so the same reference is
 // looked at many times over: one request per (cwd, path), and a null is kept
-// too — the misses ("e.g", "Node.js") are the ones that recur most.
+// too — the misses ("e.g", "Node.js") are the ones that recur most. A miss is
+// only kept for a while, though: the file an answer names before the agent
+// creates it, or one asked for during a gateway hiccup, is a hit the next time
+// it is rendered.
+const MISS_TTL = 30_000;
 const cache = new Map<string, ResolvedRef | null>();
 const inflight = new Map<string, Promise<ResolvedRef | null>>();
 const key = (cwd: string, path: string) => cwd + "\0" + path;
@@ -74,7 +78,12 @@ export function resolveRef(cwd: string, path: string): Promise<ResolvedRef | nul
   if (hit !== undefined) return Promise.resolve(hit);
   let p = inflight.get(k);
   if (!p) {
-    p = resolveWorkspaceRef(cwd, path).then((r) => { cache.set(k, r); inflight.delete(k); return r; });
+    p = resolveWorkspaceRef(cwd, path).then((r) => {
+      cache.set(k, r);
+      inflight.delete(k);
+      if (!r) setTimeout(() => cache.delete(k), MISS_TTL);
+      return r;
+    });
     inflight.set(k, p);
   }
   return p;
