@@ -855,7 +855,7 @@ export const useStore = create<State>((set, get) => {
     acp?.close();
     set({
       agentReady: false, tip: "Reconnecting…",
-      sessions: {}, activeId: null, sideWindows: [],
+      sessions: {}, activeId: null, sideWindows: [], askFix: null,
       // rateLimits is deliberately untouched: it's polled per account,
       // independent of this connection, and a restart shouldn't blank it.
       promptCapabilities: {}, pendingPermissions: [],
@@ -1382,7 +1382,7 @@ export const useStore = create<State>((set, get) => {
       conn: "connecting", agentReady: false, tip,
       // rateLimits carries over: it's keyed by account and polled independent
       // of which agent is active, so a different provider's quota is still valid.
-      sessions: {}, activeId: null,
+      sessions: {}, activeId: null, askFix: null,
       promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
@@ -2179,6 +2179,11 @@ export const useStore = create<State>((set, get) => {
       // shows a waiting strip instead of a composer; this is the belt to that
       // braces, for any other caller.
       if (!target || target.viewOnly || sessionId.startsWith("pending-") || !get().agentReady) return false;
+      // The connection belongs to get().agentName; a session another agent owns
+      // (kept across setAgent) would be prompted on a socket that has never
+      // heard of it, and the error would land as a note in that off-screen
+      // conversation while this resolved true.
+      if (target.agentName && target.agentName !== get().agentName) return false;
       if (get().busySessionIds[sessionId]) return false;
       const imgs = get().promptCapabilities.image ? (images || []) : [];
       const refs = get().promptCapabilities.embeddedContext ? (files || []) : [];
