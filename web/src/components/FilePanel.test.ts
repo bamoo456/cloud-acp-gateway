@@ -352,6 +352,77 @@ describe("FilePanel", () => {
     expect(container.querySelector("pre.wf-text")?.textContent).toBe("line one\nline two\n");
   });
 
+  // Highlights are painted through the CSS Custom Highlight API; jsdom has
+  // none, so the registry is stood in for and read back.
+  function stubHighlights() {
+    const reg = new Map<string, { ranges: Range[] }>();
+    vi.stubGlobal("CSS", { highlights: reg });
+    vi.stubGlobal("Highlight", class { ranges: Range[]; constructor(...ranges: Range[]) { this.ranges = ranges; } });
+    return reg;
+  }
+  const landed = (reg: Map<string, { ranges: Range[] }>) =>
+    reg.get("wf-line-current")?.ranges.map((r) => r.toString());
+
+  test("a code reference lands on its line, and again on another line of the same file", async () => {
+    const reg = stubHighlights();
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    const open = async (line: number, endLine?: number) => {
+      await act(async () => {
+        useStore.getState().openFilePreview({
+          abs: "/repo/src/gateway.ts", path: "src/gateway.ts", mode: "file", line, endLine,
+        });
+      });
+      await act(async () => { await flush(); });
+    };
+
+    await open(2);
+    expect(landed(reg)).toEqual(["line two\n"]);
+    // Same file, new line: no second fetch, but the mark moves.
+    await open(1, 2);
+    expect(getFilePreview).toHaveBeenCalledTimes(1);
+    expect(landed(reg)).toEqual(["line one\nline two\n"]);
+    // Closing the file takes the mark with it.
+    await act(async () => { useStore.getState().clearFilePreview(); });
+    expect(reg.has("wf-line-current")).toBe(false);
+  });
+
+  test("a line past what was loaded marks nothing — a cut-short preview is not the file", async () => {
+    const reg = stubHighlights();
+    getFilePreview.mockResolvedValue({
+      path: "src/gateway.ts", abs: "/repo/src/gateway.ts", kind: "text",
+      size: 900000, modifiedAt: new Date().toISOString(), text: "line one\nline two\n", truncated: true,
+    } satisfies FilePreviewResult);
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/gateway.ts", path: "src/gateway.ts", mode: "file", line: 5 });
+    });
+    await act(async () => { await flush(); });
+
+    expect(reg.has("wf-line-current")).toBe(false);
+    expect(container.querySelector("pre.wf-text")?.textContent).toBe("line one\nline two\n");
+    expect(container.querySelector(".wf-note")?.textContent).toContain("Showing the start of this file");
+  });
+
+  test("a file gone since the answer named it shows the usual unavailable state, with no line marked", async () => {
+    const reg = stubHighlights();
+    getFilePreview.mockRejectedValue(new Error("This file no longer exists — it may have been moved, renamed, or deleted since the list was loaded."));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/gone.ts", path: "src/gone.ts", mode: "file", line: 2 });
+    });
+    await act(async () => { await flush(); });
+
+    expect(container.querySelector(".wf-empty")?.textContent).toContain("no longer exists");
+    expect(container.querySelector("pre.wf-text")).toBeNull();
+    expect(reg.has("wf-line-current")).toBe(false);
+  });
+
   test("find-in-file counts the matches and Enter steps through them", async () => {
     // A phone has no browser find bar, so the viewer carries its own.
     getFilePreview.mockResolvedValue({

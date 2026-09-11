@@ -16,7 +16,7 @@ import { FileTree } from "./FileTree.tsx";
 import { FileMenu, useRowMenu, type FileMenuTarget } from "./FileMenu.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import { makeAbsFile, makeRangeFile } from "../lib/mentions.ts";
-import { rangeFromOffsets, sliceLines, formatRange, type LineRange } from "../lib/lineRange.ts";
+import { rangeFromOffsets, offsetsOfLines, sliceLines, formatRange, type LineRange } from "../lib/lineRange.ts";
 import { copyText } from "../lib/clipboard.ts";
 import type { MessageFile } from "../types.ts";
 import { UnifiedDiff } from "./UnifiedDiff.tsx";
@@ -33,7 +33,7 @@ import {
 import { FolderBrowser } from "./FolderBrowser.tsx";
 import { PathTree } from "./PathTree.tsx";
 import { IconBack, IconX, IconRefresh, IconExpand, IconChevrons, IconDownload, IconSpinner, IconChevronDown, IconChevronRight, IconAddToChat, IconSearch, IconFolder, IconCopy, IconPencil, IconCheck, fileIcon } from "../lib/icons.tsx";
-import { findRanges, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/findInFile.ts";
+import { findRanges, offsetRange, paintHits, clearHits, scrollToHit, MAX_HITS } from "../lib/findInFile.ts";
 
 // The file preview panel: what the agent actually produced, rather than what it
 // said about it. Two modes, three lists and one viewer.
@@ -767,7 +767,9 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   // not a rule.
   const autoSwitched = useRef<string | null>(null);
 
-  useEffect(() => { setMode(target.mode); }, [target.abs, target.mode]);
+  // Keyed on the request, not on its fields: a code reference into the file
+  // already open asks for the File view again even if it was switched to Diff.
+  useEffect(() => { setMode(target.mode); }, [target]);
   // A different file is a different edit. Dropping the buffer silently is safe
   // only because opening another file takes a click on the list, which is not
   // something you do mid-sentence — and the alternative, blocking navigation on
@@ -869,6 +871,22 @@ function FileView({ cwd, target, canAttach, onAttach }: {
 
   // Highlights outlive the component that registered them (see clearHits).
   useEffect(() => clearHits, []);
+
+  // ---- landing on a line ----
+  // The line a code reference asked for, once the file it names is what is on
+  // screen: `file` still holds the previous file for the render that starts
+  // the next fetch. Nothing is marked for a line the loaded text does not
+  // reach — a truncated preview stops where it stops.
+  useEffect(() => {
+    if (mode !== "file" || loading || !target.line || !file?.text || file.abs !== target.abs) return;
+    const code = codeRef.current;
+    const at = code && offsetsOfLines(code.textContent ?? "", { start: target.line, end: target.endLine ?? target.line });
+    const range = at && offsetRange(code, at[0], at[1]);
+    if (!range) return;
+    paintHits([range], 0, "wf-line");
+    scrollToHit(bodyRef.current, range);
+    return () => clearHits("wf-line");
+  }, [target, mode, loading, file]);
 
   // Wraps at both ends — a search that stops dead at the last match sends you
   // back to the box to retype what you already typed.

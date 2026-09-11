@@ -39,7 +39,12 @@ export type PreviewMode = "diff" | "file" | "render";
 // conversation's own: /workspace/* resolves a path against the cwd it is sent,
 // so a file browsed in another project must carry that project's root or the
 // gateway refuses to read it.
-export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode; cwd?: string }
+// `line`/`endLine` is where in the file to land: the viewer scrolls there and
+// marks it once the content has loaded. Every open replaces this object, so an
+// effect keyed on it re-fires for the same file at a new line.
+export interface FilePreviewTarget {
+  abs: string; path: string; mode: PreviewMode; cwd?: string; line?: number; endLine?: number;
+}
 
 // One floating conversation window (see State's `sideWindows`).
 // `slot` is which default corner offset the card is born at, so several open at
@@ -353,7 +358,9 @@ interface State {
   toggleSidebar: () => void;
   // Opens the panel *and* the file — the one entry point for "show me this
   // file", wherever the path was clicked.
-  openFilePreview: (file: { abs: string; path?: string; mode?: PreviewMode; cwd?: string }) => void;
+  openFilePreview: (file: {
+    abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number;
+  }) => void;
   clearFilePreview: () => void;
   attachFiles: (files: MessageFile[]) => void;
   removeAttachedFile: (index: number) => void;
@@ -2618,6 +2625,7 @@ export const useStore = create<State>((set, get) => {
         filesOpen: true,
         filePreview: {
           abs: file.abs, path: file.path || basename(file.abs), mode: file.mode ?? "diff", cwd: file.cwd,
+          line: file.line, endLine: file.endLine,
         },
       });
     },
