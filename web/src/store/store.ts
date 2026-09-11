@@ -12,6 +12,7 @@ import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { execCommand, shellContext, shellNote } from "../lib/terminal.ts";
 import { buildHandoffMessage } from "../lib/handoffPrompt.ts";
+import type { AskFixRequest } from "../lib/reviewPrompt.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
   EMPTY_ENGINE,
@@ -234,6 +235,10 @@ interface State {
   sidebarOpen: boolean;
   // Which file the preview pane is showing; null means the file list.
   filePreview: FilePreviewTarget | null;
+  // The Ask/Fix the composer is about to send (its context chip), captured
+  // when the button was pressed. Set from the file panel and Review, which is
+  // why it is not the composer's own state.
+  askFix: AskFixRequest | null;
   // Files staged on the composer, waiting to be sent with the next message —
   // the chips above the input. In the store for the same reason the preview
   // panel is: they are added from the file panel as well as from the composer's
@@ -362,6 +367,7 @@ interface State {
     abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number;
   }) => void;
   clearFilePreview: () => void;
+  setAskFix: (req: AskFixRequest | null) => void;
   attachFiles: (files: MessageFile[]) => void;
   removeAttachedFile: (index: number) => void;
   clearAttachedFiles: () => void;
@@ -1565,6 +1571,7 @@ export const useStore = create<State>((set, get) => {
     // Same shape for the left column, at its own (860px) breakpoint.
     sidebarOpen: isDesktopSidebarWidth(),
     filePreview: null,
+    askFix: null,
     attachedFiles: [],
 
     bootstrap() {
@@ -2632,6 +2639,10 @@ export const useStore = create<State>((set, get) => {
 
     clearFilePreview() {
       set({ filePreview: null });
+    },
+
+    setAskFix(req) {
+      set({ askFix: req });
     },
 
     // De-duplicated on the URI, which carries the line range: two ranges of one

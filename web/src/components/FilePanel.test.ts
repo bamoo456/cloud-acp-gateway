@@ -1264,6 +1264,52 @@ describe("FilePanel", () => {
     }]);
   });
 
+  test("Ask on selected lines captures them for the conversation on screen", async () => {
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    getFilePreview.mockResolvedValue({
+      path: "notes.txt", abs: "/repo/notes.txt", kind: "text",
+      size: 40, modifiedAt: new Date().toISOString(),
+      text: "alpha\nbravo\ncharlie\ndelta", truncated: false,
+    } satisfies FilePreviewResult);
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", agentName: "claude", promptCapabilities: {},
+      activeId: "s1", sessions: { s1: { ...makeSession("s1"), cwd: "/repo" } },
+      filePreview: { abs: "/repo/notes.txt", path: "notes.txt", mode: "file" },
+    });
+    await render();
+
+    // Offered regardless of embeddedContext — the request goes as text.
+    expect(container.querySelector("button.wf-add:not(.wf-ask)")).toBeNull();
+    const asks = () => [...container.querySelectorAll<HTMLButtonElement>("button.wf-ask")];
+    expect(asks().map((b) => b.textContent)).toEqual(["Ask", "Fix"]);
+    expect(asks().every((b) => b.disabled)).toBe(true);
+
+    const code = container.querySelector("pre.wf-text code")!;
+    await act(async () => {
+      const range = document.createRange();
+      range.setStart(code.firstChild!, 9);
+      range.setEnd(code.firstChild!, 16);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+    // Switching conversations after the selection was made must not retarget
+    // it: the button reads the session at click time, and this one is the one
+    // on screen when it is pressed.
+    await act(async () => { asks()[1].dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(useStore.getState().askFix).toEqual({
+      intent: "fix", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null,
+      path: "notes.txt", line: 2, endLine: 3, code: "bravo\ncharlie",
+    });
+    // The selection stays; the chip is the acknowledgement. Nothing was attached.
+    expect(useStore.getState().attachedFiles).toEqual([]);
+    expect(useStore.getState().filePreview?.abs).toBe("/repo/notes.txt");
+    // jsdom is the non-desktop branch: the sheet gets out of the composer's way.
+    expect(useStore.getState().filesOpen).toBe(false);
+  });
+
   test("attaching from a phone gets the panel out of the way of the chip", async () => {
     // Below the desktop breakpoint this panel is a sheet ON TOP of the composer,
     // so the chip it just added would be behind it. (jsdom reports no matchMedia,
