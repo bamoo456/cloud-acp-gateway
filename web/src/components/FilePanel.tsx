@@ -432,6 +432,17 @@ export function FilePanel() {
     }
     : null;
 
+  // At the leading edge of the pane it moves, not the panel's corner: it folds
+  // the list away to give the file the room, so it belongs against the file's
+  // own name rather than beside Expand and Close, which act on the whole panel.
+  // Only while there are two panes — with one, folding it away would leave the
+  // panel showing nothing.
+  const foldBtn = split && (
+    <button className="icon-btn" aria-pressed={!listFolded}
+      title={listFolded ? "Show the file list" : "Hide the file list"}
+      onClick={() => setListFolded((v) => !v)}><IconChevrons left={!listFolded} /></button>
+  );
+
   return (
     <>
       {/* Mobile only (CSS): on desktop the panel is a column and dimming the
@@ -452,17 +463,9 @@ export function FilePanel() {
           {target && !split && (
             <button className="icon-btn" title="Back to file list" onClick={clearFilePreview}><IconBack /></button>
           )}
-          {/* Leading edge, against the folder name the list is OF — not in the
-              trailing cluster, where Expand and Close act on the whole panel and
-              this one would read as a third of those. Only while there are two
-              panes: with one, folding it away would leave the panel showing
-              nothing. Stays put when folded, so the way back is where the way
-              out was. */}
-          {split && (
-            <button className="icon-btn" aria-pressed={!listFolded}
-              title={listFolded ? "Show the file list" : "Hide the file list"}
-              onClick={() => setListFolded((v) => !v)}><IconChevrons left={!listFolded} /></button>
-          )}
+          {/* Here only when the right pane has no header of its own to put it
+              in — the review's open file carries its own bar. */}
+          {!target && foldBtn}
           {/* Naming the folder is half of what the Project mode is for, and it
               is the only thing here that says WHICH checkout the lists describe
               when a session's cwd differs from the picker's. */}
@@ -652,6 +655,7 @@ export function FilePanel() {
                   Back is gone with it. */}
               {split && (
                 <div className="wf-view-head" title={target.abs}>
+                  {foldBtn}
                   {/* Which checkout, which folder, which file — the three
                       questions the old bare filename left open. Not links:
                       there is nothing for a click on a folder to DO from here
