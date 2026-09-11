@@ -74,7 +74,6 @@ function refAttrs(tok: Token, ref: CodeRef): void {
   if (ref.endLine) tok.attrSet("data-end", String(ref.endLine));
   if (ref.column) tok.attrSet("data-col", String(ref.column));
 }
-const isExternal = (href: string) => /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("//") || href.startsWith("#");
 md.core.ruler.before("linkify", "coderef", (state) => {
   for (const block of state.tokens) {
     if (block.type !== "inline" || !block.children) continue;
@@ -88,9 +87,9 @@ md.core.ruler.before("linkify", "coderef", (state) => {
         // An explicit link to a line: `[label](src/app.ts:12)`. As an <a> it
         // would navigate the console to a relative URL. Only with a line — a
         // link to a bare relative path is how one document points at another,
-        // and stays the link it was written as.
-        const href = tok.attrGet("href") ?? "";
-        const ref = isExternal(href) ? null : parseCodeRef(href);
+        // and stays the link it was written as. No scheme check: a URL never
+        // parses as a reference, and `app.ts:` would fail one as a scheme.
+        const ref = parseCodeRef(tok.attrGet("href") ?? "");
         if (ref?.line) {
           codeLink = true;
           tok.tag = "span";

@@ -41,12 +41,27 @@ describe("renderMarkdown code references", () => {
     expect(html.match(/md-ref/g)).toHaveLength(2);
   });
 
+  // A bare domain is shaped like a bare filename; the rule gives linkify the
+  // ones no source file could be named (see NAMED in lib/codeRef.ts).
+  it("leaves e-mail addresses and domains to linkify", () => {
+    const html = renderMarkdown("mail me@x.com, see github.com, socket.io, www.x.com/y.git and docs.example.com, then README.md");
+    expect(html).toContain('<a href="mailto:me@x.com">me@x.com</a>');
+    expect(html).toContain('<a href="http://github.com">github.com</a>');
+    expect(html).toContain('<a href="http://socket.io">socket.io</a>');
+    expect(html).toContain('<a href="http://www.x.com/y.git">www.x.com/y.git</a>');
+    expect(html).toContain('<a href="http://docs.example.com">docs.example.com</a>');
+    expect(html).toContain('<span class="md-ref" data-path="README.md">README.md</span>');
+    expect(html.match(/md-ref/g)).toHaveLength(1);
+  });
+
   it("marks inline code that is wholly a path, and a link to a line, but not a link to a document", () => {
-    const html = renderMarkdown("`src/app.ts:3` `x = a.b` [label](src/app.ts:12) [docs](guide.md) [ln](web/a.ts#L3-L5)");
+    const html = renderMarkdown("`src/app.ts:3` `x = a.b` [label](src/app.ts:12) [l](app.ts:12) [docs](guide.md) [m](mailto:a@b.co) [ln](web/a.ts#L3-L5)");
     expect(html).toContain('<code class="md-ref" data-path="src/app.ts" data-line="3">src/app.ts:3</code>');
     expect(html).toContain("<code>x = a.b</code>");
     expect(html).toContain('<span class="md-ref" data-path="src/app.ts" data-line="12">label</span>');
+    expect(html).toContain('<span class="md-ref" data-path="app.ts" data-line="12">l</span>');
     expect(html).toContain('<a href="guide.md">docs</a>');
+    expect(html).toContain('<a href="mailto:a@b.co">m</a>');
     expect(html).toContain('<span class="md-ref" data-path="web/a.ts" data-line="3" data-end="5">ln</span>');
   });
 
