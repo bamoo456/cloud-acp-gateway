@@ -756,6 +756,10 @@ describe("FilePanel", () => {
     // The list folds away when one diff wants the whole panel, and comes back.
     const fold = [...container.querySelectorAll<HTMLButtonElement>(".wf-head .icon-btn")]
       .find((b) => b.title === "Hide the file list")!;
+    // Leading edge, against the folder name — not in the trailing cluster,
+    // where Expand and Close act on the whole panel rather than on the list.
+    const head = container.querySelector<HTMLElement>(".wf-head")!;
+    expect([...head.children].indexOf(fold)).toBe(0);
     await act(async () => { fold.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
     expect(container.querySelector(".wf-panes.split.folded")).not.toBeNull();
@@ -767,6 +771,8 @@ describe("FilePanel", () => {
     expect(parseInt(panel.style.width, 10)).toBe(listWidth + 300);
     const unfold = [...container.querySelectorAll<HTMLButtonElement>(".wf-head .icon-btn")]
       .find((b) => b.title === "Show the file list")!;
+    // The way back is where the way out was: same slot, glyph turned around.
+    expect([...head.children].indexOf(unfold)).toBe(0);
     await act(async () => { unfold.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
     expect(container.querySelector(".wf-panes.folded")).toBeNull();
