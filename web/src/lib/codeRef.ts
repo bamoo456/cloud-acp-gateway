@@ -19,11 +19,18 @@ export interface CodeRef {
 // `#L1-L2` fragment the viewer's own "add lines" chip emits. A match may not
 // start mid-word, mid-path or after a colon, which is what keeps the tail of a
 // URL from being read as a path of its own.
+//
+// A bare filename is also what a bare domain looks like, and this rule runs
+// ahead of linkify (see markdown.ts). So a filename may not hold an `@`, start
+// with `www.`, end in a gTLD no source file uses, or stop short of a further
+// `.word` — `me@x.com`, `www.x.com/y.git`, `socket.io` and `docs.example.com`
+// all stay linkify's. ponytail: `example.com/docs/index.html` is still read as
+// a path; a scheme-less host with a path is the known ceiling.
 const SEG = "[\\w.@+-]*[\\w@+-]";
-const NAMED = "[\\w@+-][\\w.@+-]*\\.[A-Za-z]\\w*";
+const NAMED = "[\\w+-][\\w.+-]*\\.(?!(?:com|net|org|io)\\b)[A-Za-z]\\w*";
 const PATH = `(?:\\.{1,2}/(?:${SEG}/)*${SEG}|/(?:${SEG}/)+${SEG}|(?:${SEG}/)+${NAMED}|${NAMED})`;
 const LOC = "(?::(\\d+)(?::(\\d+)|-(\\d+))?|#L(\\d+)(?:-L(\\d+))?)?";
-const REF = `(?<![\\w./:@+\\\\-])${PATH}${LOC}(?![\\w/])`;
+const REF = `(?<![\\w./:@+\\\\-])(?!www\\.)${PATH}${LOC}(?![\\w/]|\\.\\w)`;
 export const CODE_REF_RE = new RegExp(REF, "g");
 const WHOLE_RE = new RegExp(`^${REF}$`);
 
