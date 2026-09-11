@@ -11,7 +11,7 @@ describe("resolveRef", () => {
     vi.doMock("./api.ts", () => ({ resolveWorkspaceRef }));
   });
 
-  afterEach(() => { vi.doUnmock("./api.ts"); });
+  afterEach(() => { vi.doUnmock("./api.ts"); vi.useRealTimers(); });
 
   test("asks the gateway once per (cwd, path), and answers later lookups synchronously", async () => {
     const { resolveRef, lookupRef } = await import("./codeRef.ts");
@@ -26,11 +26,17 @@ describe("resolveRef", () => {
     await resolveRef("/repo", "src/app.ts");
     expect(resolveWorkspaceRef).toHaveBeenCalledTimes(1);
 
-    // A miss is an answer too — "e.g" recurs in every reply.
+    // A miss is an answer too — "e.g" recurs in every reply — but not for
+    // good: the file may exist by the time the reference is rendered again.
+    vi.useFakeTimers();
     resolveWorkspaceRef.mockResolvedValue(null);
     expect(await resolveRef("/repo", "e.g")).toBeNull();
     await resolveRef("/repo", "e.g");
     expect(resolveWorkspaceRef).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(30_000);
+    expect(lookupRef("/repo", "e.g")).toBeUndefined();
+    await resolveRef("/repo", "e.g");
+    expect(resolveWorkspaceRef).toHaveBeenCalledTimes(3);
     // Another folder is another question.
     await resolveRef("/other", "src/app.ts");
     expect(resolveWorkspaceRef).toHaveBeenLastCalledWith("/other", "src/app.ts");
