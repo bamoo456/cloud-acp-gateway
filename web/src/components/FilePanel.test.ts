@@ -754,8 +754,13 @@ describe("FilePanel", () => {
     expect(rows()[0].classList.contains("on")).toBe(false);
 
     // The list folds away when one diff wants the whole panel, and comes back.
-    const fold = [...container.querySelectorAll<HTMLButtonElement>(".wf-head .icon-btn")]
+    const fold = [...container.querySelectorAll<HTMLButtonElement>(".wf-view-head .icon-btn")]
       .find((b) => b.title === "Hide the file list")!;
+    // Against the file's own name, at the leading edge of the pane it moves —
+    // not in the panel header's trailing cluster, where Expand and Close act on
+    // the whole panel rather than on the list.
+    const viewHead = () => container.querySelector<HTMLElement>(".wf-view-head")!;
+    expect([...viewHead().children].indexOf(fold)).toBe(0);
     await act(async () => { fold.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
     expect(container.querySelector(".wf-panes.split.folded")).not.toBeNull();
@@ -765,8 +770,11 @@ describe("FilePanel", () => {
     expect(container.querySelector(".wf-switch")).toBeNull();
     // The panel keeps its extended width — folding is for the diff, not against it.
     expect(parseInt(panel.style.width, 10)).toBe(listWidth + 300);
-    const unfold = [...container.querySelectorAll<HTMLButtonElement>(".wf-head .icon-btn")]
+    const unfold = [...container.querySelectorAll<HTMLButtonElement>(".wf-view-head .icon-btn")]
       .find((b) => b.title === "Show the file list")!;
+    // The way back is where the way out was: the viewer's leading edge, which
+    // folding has moved to the panel's own. Glyph turned around.
+    expect([...viewHead().children].indexOf(unfold)).toBe(0);
     await act(async () => { unfold.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
     expect(container.querySelector(".wf-panes.folded")).toBeNull();
