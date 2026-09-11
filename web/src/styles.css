@@ -1689,9 +1689,11 @@
   .wf-panes.split.folded > .wf-list { display: none; }
   /* The open file's name, over the viewer, once the header's title has gone
      back to naming the folder. */
+  /* The list's fold toggle leads this row, so the left inset is the button's
+     own padding rather than the text inset the crumb used to need. */
   .wf-view-head {
     flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
-    padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--border);
+    padding: 6px; border-bottom: 1px solid var(--border);
   }
   /* repo / folders / file. Only .mid shrinks: the checkout's name says WHICH
      copy of the project this is (the panel can point at another one) and the
