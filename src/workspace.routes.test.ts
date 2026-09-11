@@ -73,6 +73,27 @@ const NESTED = path.join(TREE, "nested");
 fs.mkdirSync(NESTED, { recursive: true });
 execFileSync("git", ["init", "-q", "-b", "main"], { cwd: NESTED, stdio: "pipe" });
 
+// A checkout for /workspace/resolve, laid out so every way a relative path can
+// be read has a witness: `src/store.ts` exists both under `web/` and at the
+// root, `app.ts` is a basename two files share, and `only.ts` is untracked —
+// the index only knows about it through a status snapshot.
+const REFS = path.join(ROOT, "refs");
+fs.mkdirSync(path.join(REFS, "src"), { recursive: true });
+fs.mkdirSync(path.join(REFS, "lib"), { recursive: true });
+fs.mkdirSync(path.join(REFS, "web", "src"), { recursive: true });
+const runRefs = (...args: string[]) => execFileSync("git", args, { cwd: REFS, stdio: "pipe" });
+runRefs("init", "-q", "-b", "main");
+runRefs("config", "user.email", "test@example.com");
+runRefs("config", "user.name", "Test");
+fs.writeFileSync(path.join(REFS, "README.md"), "# refs\n");
+fs.writeFileSync(path.join(REFS, "src", "app.ts"), "export const a = 1;\n");
+fs.writeFileSync(path.join(REFS, "lib", "app.ts"), "export const b = 2;\n");
+fs.writeFileSync(path.join(REFS, "src", "store.ts"), "export const root = 1;\n");
+fs.writeFileSync(path.join(REFS, "web", "src", "store.ts"), "export const web = 1;\n");
+runRefs("add", "-A");
+runRefs("commit", "-q", "-m", "initial");
+fs.writeFileSync(path.join(REFS, "web", "src", "only.ts"), "export const only = 1;\n");
+
 const authHeader = "Basic " + Buffer.from(
   `${process.env.ACPG_AUTH_USER ?? ""}:${process.env.ACPG_AUTH_TOKEN ?? ""}`, "utf8",
 ).toString("base64");
@@ -279,6 +300,59 @@ test("/workspace/find matches on the whole relative path, dotfiles included, and
     const body = await sub.json() as { files: Array<{ path: string; abs: string }> };
     assert.deepEqual(body.files.map((f) => f.path), ["deep/nested.ts"]);
     assert.equal(body.files[0].abs, path.join(TREE, "src", "deep", "nested.ts"));
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/resolve reads a path against the conversation's folder and its repo root, and refuses to guess between them", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const resolve = async (cwd: string, p: string) => {
+      const r = await get(q("/workspace/resolve", { cwd, path: p }));
+      return { status: r.status, body: await r.json() as { abs?: string; path?: string; code?: string } };
+    };
+    const web = path.join(REFS, "web");
+
+    assert.deepEqual(await resolve(REFS, "src/app.ts"),
+      { status: 200, body: { abs: path.join(REFS, "src", "app.ts"), path: "src/app.ts" } });
+    // From a subfolder: its own file by the short path, the root's file by the
+    // path the repo knows it as — shown absolute, since it is outside cwd.
+    assert.deepEqual(await resolve(web, "src/only.ts"),
+      { status: 200, body: { abs: path.join(web, "src", "only.ts"), path: "src/only.ts" } });
+    assert.equal((await resolve(web, "lib/app.ts")).body.abs, path.join(REFS, "lib", "app.ts"));
+    assert.equal((await resolve(web, "lib/app.ts")).body.path, path.join(REFS, "lib", "app.ts"));
+    // `./` and `../` mean the conversation's folder and nothing else.
+    assert.equal((await resolve(web, "./src/store.ts")).body.abs, path.join(web, "src", "store.ts"));
+    assert.equal((await resolve(web, "../README.md")).body.abs, path.join(REFS, "README.md"));
+    // The same relative path at both cwd and root is two files, not a pick.
+    assert.deepEqual(await resolve(web, "src/store.ts"), { status: 404, body: { error: "ambiguous", code: "ambiguous" } });
+    // Absolute paths go through the same read guard as the viewer.
+    assert.equal((await resolve(REFS, path.join(SCRATCH, "note.txt"))).body.abs, path.join(SCRATCH, "note.txt"));
+    assert.deepEqual(await resolve(REFS, path.join(SCRATCH + "-other", "note.txt")),
+      { status: 404, body: { error: "not-found", code: "not-found" } });
+    assert.equal((await resolve(REFS, "../../../../etc/passwd")).status, 404);
+    assert.equal((await resolve("/etc", "passwd")).status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test("a bare filename resolves only through a unique, exact match in the file index", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const resolve = async (p: string) => {
+      const r = await get(q("/workspace/resolve", { cwd: REFS, path: p }));
+      return { status: r.status, body: await r.json() as { abs?: string; code?: string } };
+    };
+    // Untracked, and no /workspace/changes call has fed the index yet — the
+    // resolver has to fetch the status half itself before it can vouch for
+    // uniqueness.
+    assert.equal((await resolve("only.ts")).body.abs, path.join(REFS, "web", "src", "only.ts"));
+    assert.equal((await resolve("app.ts")).body.code, "ambiguous");
+    // Exact means exact: a case-insensitive hit is not the file that was named.
+    assert.equal((await resolve("App.ts")).body.code, "not-found");
+    assert.equal((await resolve("nope.ts")).body.code, "not-found");
   } finally {
     await close();
   }
@@ -496,7 +570,8 @@ test("every workspace route sits behind the gateway account", async () => {
   const { get, close } = await startHttpServer();
   try {
     for (const route of ["/workspace/changes", "/workspace/file", "/workspace/diff", "/workspace/raw",
-                         "/workspace/outputs", "/workspace/render", "/workspace/commits", "/workspace/review"]) {
+                         "/workspace/outputs", "/workspace/render", "/workspace/commits", "/workspace/review",
+                         "/workspace/resolve"]) {
       const r = await get(q(route, { cwd: REPO, path: "kept.txt" }), {});
       assert.equal(r.status, 401, route);
     }

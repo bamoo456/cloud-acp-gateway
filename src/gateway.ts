@@ -47,7 +47,7 @@ import { handleUpload } from "./uploads.ts";
 import { usageLimits, codexUsageLimits } from "./usage-limits.ts";
 import {
   changes as workspaceChanges, fileDiff as workspaceFileDiff, preview as workspacePreview,
-  tree as workspaceTree, find as workspaceFind, grep as workspaceGrep,
+  tree as workspaceTree, find as workspaceFind, grep as workspaceGrep, resolve as workspaceResolve,
   outputFolder as workspaceOutputFolder,
   revChanges as workspaceRevChanges, commits as workspaceCommits,
   writeText as workspaceWriteText,
@@ -877,12 +877,15 @@ async function resolveWorkspaceTarget(q: URLSearchParams, rootIsCwd = false): Pr
     ? await allowedPreviewPath(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw), cwd)
     : cwd;
   if (!abs) return null;
+  return { cwd, abs, display: displayPath(cwd, abs) };
+}
+
+// Files under cwd read better by their short path; anything else (a sibling
+// package elsewhere in the same repo) keeps its absolute path rather than
+// being shown as a "../../" chain nobody can parse at a glance.
+function displayPath(cwd: string, abs: string): string {
   const rel = path.relative(cwd, abs);
-  // Files under cwd read better by their short path; anything else (a sibling
-  // package elsewhere in the same repo) keeps its absolute path rather than
-  // being shown as a "../../" chain nobody can parse at a glance.
-  const display = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : abs;
-  return { cwd, abs, display };
+  return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel.split(path.sep).join("/") : abs;
 }
 
 // One JSON request body, capped. Over the cap rejects with "too-large" rather
@@ -5171,6 +5174,23 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
         });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Which file a path written in an answer names — see workspace.resolve. A
+  // 404 carries whether nothing matched or too much did; the client shows the
+  // reference as plain text either way.
+  if (consoleEnabled && pathname === "/workspace/resolve") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    const raw = q.get("path") ?? "";
+    if (!cwd || !raw) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+    workspaceResolve(cwd, raw, (abs) => allowedPreviewPath(abs, cwd))
+      .then((r) => {
+        if ("code" in r) { res.writeHead(404); res.end(JSON.stringify({ error: r.code, code: r.code })); return; }
+        res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+        res.end(JSON.stringify({ abs: r.abs, path: displayPath(cwd, r.abs) }));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;

@@ -979,6 +979,57 @@ export async function find(cwd: string, abs: string, query: string): Promise<Fin
   };
 }
 
+export type ResolveResult = { abs: string } | { code: "not-found" | "ambiguous" };
+
+// Where a path an agent wrote in prose actually is. `allow` is the gateway's
+// read guard, applied to every candidate BEFORE it is stat'd — a `../../etc/x`
+// or a basename that happens to sit outside the tree is refused, not found.
+//
+// Absolute and `./`-style paths mean one place. A bare relative path is tried
+// against cwd and the repo root — a conversation running in `web/` writes both
+// `src/app.ts` and `web/src/app.ts` — and two different hits is an answer we
+// refuse rather than guess between. A lone basename falls back to the filename
+// index, and only an exact, unique match counts: a corpus the caps cut short,
+// or one still missing its untracked half, cannot prove uniqueness.
+export async function resolve(
+  cwd: string, raw: string, allow: (abs: string) => Promise<string | null>,
+): Promise<ResolveResult> {
+  const file = async (p: string): Promise<string | null> => {
+    const abs = await allow(p);
+    if (!abs) return null;
+    try { return (await fs.promises.stat(abs)).isFile() ? abs : null; } catch { return null; }
+  };
+  if (path.isAbsolute(raw) || raw.startsWith("./") || raw.startsWith("../")) {
+    const hit = await file(path.resolve(cwd, raw));
+    return hit ? { abs: hit } : { code: "not-found" };
+  }
+  const root = await repoRoot(cwd);
+  const fromCwd = await file(path.resolve(cwd, raw));
+  const fromRoot = root && root !== cwd ? await file(path.resolve(root, raw)) : null;
+  if (fromCwd && fromRoot && fromCwd !== fromRoot) return { code: "ambiguous" };
+  if (fromCwd || fromRoot) return { abs: (fromCwd ?? fromRoot)! };
+  if (raw.includes("/")) return { code: "not-found" };
+
+  let corpus = root ? await fileIndex.corpusGit(root) : await fileIndex.corpusWalk(cwd);
+  // A root nobody has opened the panel on yet has no status snapshot, so its
+  // untracked files are not in the corpus. changes() is what feeds that half.
+  if (corpus.pending && root) {
+    await changes(cwd);
+    corpus = await fileIndex.corpusGit(root);
+  }
+  if (corpus.pending || corpus.limited) return { code: "ambiguous" };
+  const lower = raw.toLowerCase();
+  const hits: string[] = [];
+  for (let i = 0; i < corpus.paths.length && hits.length < 2; i++) {
+    if (corpus.bases[i] === lower && corpus.paths[i].slice(corpus.paths[i].lastIndexOf("/") + 1) === raw) {
+      hits.push(corpus.paths[i]);
+    }
+  }
+  if (hits.length !== 1) return { code: hits.length ? "ambiguous" : "not-found" };
+  const hit = await file(path.join(root ?? cwd, hits[0]));
+  return hit ? { abs: hit } : { code: "not-found" };
+}
+
 // `git grep -z -n` writes one record per matching line, newline-separated:
 //
 //   path\0line\0the matching line's text
