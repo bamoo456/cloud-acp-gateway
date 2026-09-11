@@ -469,6 +469,21 @@ export async function findWorkspaceFiles(cwd: string, query: string): Promise<Fi
   };
 }
 
+// The file a path written in an answer names, or null when the gateway could
+// not settle on exactly one (see workspace.resolve). Null rather than a throw:
+// an unresolved reference is the ordinary outcome, not an error to surface.
+export async function resolveWorkspaceRef(cwd: string, filePath: string): Promise<{ abs: string; path: string } | null> {
+  const url = base() + "/workspace/resolve?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const body = await r.json() as { abs?: unknown; path?: unknown };
+    return typeof body?.abs === "string" ? { abs: body.abs, path: typeof body.path === "string" ? body.path : body.abs } : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function grepWorkspace(cwd: string, query: string): Promise<GrepResult> {
   const url = base() + "/workspace/grep?cwd=" + encodeURIComponent(cwd) + "&q=" + encodeURIComponent(query);
   const r = await readJson(await fetch(url), "Couldn't search this folder.");
