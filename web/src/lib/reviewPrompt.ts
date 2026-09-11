@@ -91,6 +91,8 @@ export interface AskFixRequest {
   sessionId: string;
   cwd: string;
   spec: RevSpec | null;
+  // How the commit reads in Review (short sha + subject); the spec only has the sha.
+  label?: string;
   path: string;
   side?: "new" | "old";
   line: number;
@@ -104,5 +106,5 @@ export function buildAskFixMessage(r: AskFixRequest, body: string): string {
     : "Fix request for selected code — make the change described below.";
   const f = fence(r.code);
   const quote = r.code.trim() ? `\n${f}\n${r.code}\n${f}` : "";
-  return `${head}\n\nIn checkout \`${r.cwd}\` (${describeScope(r.spec)}):\n\n### ${anchor(r)}${quote}\n\n${body.trim()}`;
+  return `${head}\n\nIn checkout \`${r.cwd}\` (${describeScope(r.spec, r.label)}):\n\n### ${anchor(r)}${quote}\n\n${body.trim()}`;
 }

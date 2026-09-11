@@ -1310,6 +1310,24 @@ describe("FilePanel", () => {
     expect(useStore.getState().filesOpen).toBe(false);
   });
 
+  test("Ask/Fix are not offered on a saved conversation that has not been resumed", async () => {
+    // sendPromptTo refuses a view-only session, so the buttons would only bounce.
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    getFilePreview.mockResolvedValue({
+      path: "notes.txt", abs: "/repo/notes.txt", kind: "text",
+      size: 5, modifiedAt: new Date().toISOString(), text: "alpha", truncated: false,
+    } satisfies FilePreviewResult);
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", promptCapabilities: {},
+      activeId: "s1", sessions: { s1: { ...makeSession("s1"), cwd: "/repo", viewOnly: true } },
+      filePreview: { abs: "/repo/notes.txt", path: "notes.txt", mode: "file" },
+    });
+    await render();
+    expect(container.querySelector("pre.wf-text code")).toBeTruthy();
+    expect(container.querySelector("button.wf-ask")).toBeNull();
+  });
+
   test("attaching from a phone gets the panel out of the way of the chip", async () => {
     // Below the desktop breakpoint this panel is a sheet ON TOP of the composer,
     // so the chip it just added would be behind it. (jsdom reports no matchMedia,

@@ -75,8 +75,10 @@ export function ReviewPanel({ cwd, refreshKey, reloadKey, onCount, split, onDeta
   // Ask/Fix on a diff line is not disabled mid-turn: the composer queues it.
   // Read flat, at click time — the request is bound to the conversation on
   // screen NOW, and must still land there after switching to another one.
-  const activeId = useStore((s) => s.activeId);
-  const agentName = useStore((s) => s.agentName);
+  // Not on a saved conversation that has not been resumed: sendPromptTo refuses
+  // a view-only session, and a button that only ever bounces is a broken one.
+  const activeId = useStore((s) => (s.activeId && !s.sessions[s.activeId]?.viewOnly ? s.activeId : null));
+  const agentName = useStore((s) => (s.activeId && s.sessions[s.activeId]?.agentName) || s.agentName);
   const setAskFix = useStore((s) => s.setAskFix);
 
   const [scope, setScope] = useState<Scope>("working");
@@ -266,6 +268,7 @@ export function ReviewPanel({ cwd, refreshKey, reloadKey, onCount, split, onDeta
       onAskFix={activeId ? (intent, anchor) => {
         setAskFix({
           intent, agentName, sessionId: activeId, cwd, spec, path: openFile.path,
+          label: commit ? commit.shortSha + " " + commit.subject : undefined,
           side: anchor.side, line: anchor.line, code: anchor.code,
         });
         // The same exit Send takes: below the column breakpoint this sheet

@@ -268,7 +268,8 @@ describe("ReviewPanel", () => {
     vi.doMock("../store/store.ts", () => ({
       useStore: (pick: (s: unknown) => unknown) => pick({
         sendPrompt, agentReady: true, closeFiles, filePreview: null, clearFilePreview: vi.fn(),
-        activeId: "s1", agentName: "claude", setAskFix,
+        // The session's own agent, not the connection's: they differ right after a switch.
+        activeId: "s1", agentName: "codex", sessions: { s1: { agentName: "claude" } }, setAskFix,
         // Mid-turn on purpose: Ask is not the Send button, the composer queues it.
         busySessionIds: { s1: true },
       }),
@@ -279,7 +280,7 @@ describe("ReviewPanel", () => {
     await click([...container.querySelectorAll(".rv-acts button")].find((b) => b.textContent === "Ask"));
 
     expect(setAskFix).toHaveBeenCalledWith({
-      intent: "ask", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null,
+      intent: "ask", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null, label: undefined,
       path: "src/workspace.ts", side: "old", line: 405, code: "old line",
     });
     // Nothing became a comment, and the diff under the picked row stays put.
@@ -288,6 +289,23 @@ describe("ReviewPanel", () => {
     expect(container.querySelector(".rv-cmt textarea")).toBeTruthy();
     // jsdom is below the column breakpoint: the sheet gets out of the way.
     expect(closeFiles).toHaveBeenCalled();
+  });
+
+  test("Ask/Fix are not offered on a saved conversation that has not been resumed", async () => {
+    // sendPromptTo refuses a view-only session, so the buttons would only bounce.
+    vi.doMock("../store/store.ts", () => ({
+      useStore: (pick: (s: unknown) => unknown) => pick({
+        sendPrompt, agentReady: true, closeFiles: vi.fn(), filePreview: null, clearFilePreview: vi.fn(),
+        activeId: "s1", agentName: "claude", sessions: { s1: { agentName: "claude", viewOnly: true } }, setAskFix: vi.fn(),
+        busySessionIds: {},
+      }),
+    }));
+    await render();
+    await click(container.querySelector(FILE_ROW));
+    await click(rows().find((r) => r.className.includes("del")));
+    const acts = [...container.querySelectorAll(".rv-acts button")].map((b) => b.textContent);
+    expect(acts).not.toContain("Ask");
+    expect(acts).toContain("Add comment");
   });
 
   test("a comment on a deleted line is anchored to the old side", async () => {
@@ -400,7 +418,7 @@ describe("ReviewPanel · sending mid-turn", () => {
     vi.doMock("../store/store.ts", () => ({
       useStore: (pick: (s: unknown) => unknown) => pick({
         sendPrompt, agentReady: true, closeFiles: vi.fn(),
-        activeId: "s1", busySessionIds: { s1: true },
+        activeId: "s1", sessions: {}, busySessionIds: { s1: true },
       }),
     }));
     const { ReviewPanel } = await import("./ReviewPanel.tsx");
