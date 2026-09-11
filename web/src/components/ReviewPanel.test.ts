@@ -262,6 +262,34 @@ describe("ReviewPanel", () => {
     expect(onCount).toHaveBeenLastCalledWith(1);
   });
 
+  test("Ask on a diff line captures that line, its side and the scope for the composer", async () => {
+    const setAskFix = vi.fn();
+    const closeFiles = vi.fn();
+    vi.doMock("../store/store.ts", () => ({
+      useStore: (pick: (s: unknown) => unknown) => pick({
+        sendPrompt, agentReady: true, closeFiles, filePreview: null, clearFilePreview: vi.fn(),
+        activeId: "s1", agentName: "claude", setAskFix,
+        // Mid-turn on purpose: Ask is not the Send button, the composer queues it.
+        busySessionIds: { s1: true },
+      }),
+    }));
+    await render();
+    await click(container.querySelector(FILE_ROW));
+    await click(rows().find((r) => r.className.includes("del")));
+    await click([...container.querySelectorAll(".rv-acts button")].find((b) => b.textContent === "Ask"));
+
+    expect(setAskFix).toHaveBeenCalledWith({
+      intent: "ask", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null,
+      path: "src/workspace.ts", side: "old", line: 405, code: "old line",
+    });
+    // Nothing became a comment, and the diff under the picked row stays put.
+    expect(saveReviewDraft).not.toHaveBeenCalled();
+    expect(getFileDiff).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".rv-cmt textarea")).toBeTruthy();
+    // jsdom is below the column breakpoint: the sheet gets out of the way.
+    expect(closeFiles).toHaveBeenCalled();
+  });
+
   test("a comment on a deleted line is anchored to the old side", async () => {
     // The two numbering schemes are not interchangeable — storing this against
     // the new side would point at unrelated code.

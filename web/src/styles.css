@@ -2040,6 +2040,9 @@
   /* Except when it is carrying a range: the chip is the point of that state, so
      the button grows for it rather than clipping it. */
   .wf-acts .wf-add { width: auto; min-width: 30px; padding: 0 7px; gap: 4px; }
+  /* Ask / Fix are words, not glyphs, so they set their own type. */
+  .wf-acts .wf-ask { font-size: 12px; font-weight: 700; color: var(--muted); }
+  .wf-acts .wf-ask:not(:disabled):hover { color: var(--text); }
 
   /* ---- editing one file ----
      The textarea takes the body's place, so it inherits the body's job of being

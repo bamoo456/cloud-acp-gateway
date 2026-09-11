@@ -72,6 +72,12 @@ export function ReviewPanel({ cwd, refreshKey, reloadKey, onCount, split, onDeta
   // flight. Nothing rejects, so a Send pressed mid-turn would resolve, clear the
   // draft, and lose a whole review to a no-op. Disable it instead.
   const activeBusy = useStore((s) => !!(s.activeId && s.busySessionIds[s.activeId]));
+  // Ask/Fix on a diff line is not disabled mid-turn: the composer queues it.
+  // Read flat, at click time — the request is bound to the conversation on
+  // screen NOW, and must still land there after switching to another one.
+  const activeId = useStore((s) => s.activeId);
+  const agentName = useStore((s) => s.agentName);
+  const setAskFix = useStore((s) => s.setAskFix);
 
   const [scope, setScope] = useState<Scope>("working");
   const [log, setLog] = useState<{ commits: CommitEntry[]; branch?: string; defaultBase?: string } | null>(null);
@@ -256,7 +262,16 @@ export function ReviewPanel({ cwd, refreshKey, reloadKey, onCount, split, onDeta
         id: makeId(), path: openFile.path, side: anchor.side, line: anchor.line,
         code: anchor.code, body,
       }])}
-      onDelete={(id) => commitComments(comments.filter((c) => c.id !== id))} />
+      onDelete={(id) => commitComments(comments.filter((c) => c.id !== id))}
+      onAskFix={activeId ? (intent, anchor) => {
+        setAskFix({
+          intent, agentName, sessionId: activeId, cwd, spec, path: openFile.path,
+          side: anchor.side, line: anchor.line, code: anchor.code,
+        });
+        // The same exit Send takes: below the column breakpoint this sheet
+        // covers the composer the chip just landed on.
+        if (!isDesktopPanelWidth()) closeFiles();
+      } : undefined} />
   );
   if (detail && !split) return detail;
 
@@ -493,13 +508,14 @@ function BaseEditor({ value, branch, onDone }: {
 
 // ---- one file's diff, with its comments ----
 
-function FileReview({ cwd, spec, file, comments, reloadKey, onBack, onAdd, onDelete }: {
+function FileReview({ cwd, spec, file, comments, reloadKey, onBack, onAdd, onDelete, onAskFix }: {
   cwd: string; spec: RevSpec | null; file: ChangedFile;
   comments: Map<string, ReviewComment[]>;
   reloadKey?: number;
   onBack: () => void;
   onAdd: (anchor: DiffAnchor, body: string) => void;
   onDelete: (id: string) => void;
+  onAskFix?: (intent: "ask" | "fix", anchor: DiffAnchor) => void;
 }) {
   const [diff, setDiff] = useState<FileDiffResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -558,7 +574,8 @@ function FileReview({ cwd, spec, file, comments, reloadKey, onBack, onAdd, onDel
                         {writing && (
                           <CommentComposer anchor={a} path={file.path}
                             onCancel={() => setPicked(null)}
-                            onAdd={(body) => { onAdd(a, body); setPicked(null); }} />
+                            onAdd={(body) => { onAdd(a, body); setPicked(null); }}
+                            onAskFix={onAskFix && ((intent) => onAskFix(intent, a))} />
                         )}
                       </>
                     );
@@ -587,8 +604,9 @@ function SavedComment({ comment, inList, onDelete }: {
   );
 }
 
-function CommentComposer({ anchor, path, onAdd, onCancel }: {
+function CommentComposer({ anchor, path, onAdd, onCancel, onAskFix }: {
   anchor: DiffAnchor; path: string; onAdd: (body: string) => void; onCancel: () => void;
+  onAskFix?: (intent: "ask" | "fix") => void;
 }) {
   const [text, setText] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -610,6 +628,12 @@ function CommentComposer({ anchor, path, onAdd, onCancel }: {
       <div className="rv-acts">
         <button className="btn-ghost" onClick={onCancel}>Cancel</button>
         <span className="sp" />
+        {/* Not a comment for later — a question or a fix for now, typed in the
+            composer, which is where these two take you. */}
+        {onAskFix && <>
+          <button className="btn-sm" onClick={() => onAskFix("ask")}>Ask</button>
+          <button className="btn-sm" onClick={() => onAskFix("fix")}>Fix</button>
+        </>}
         <button className="btn-sm primary" disabled={!text.trim()} onClick={submit}>
           Add comment
         </button>
