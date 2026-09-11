@@ -689,9 +689,9 @@ export function FilePanel() {
                 ])}
                 // Bound to the conversation on screen NOW: the request can be
                 // sent after switching to another one, and must still land here.
-                onAskFix={session ? (intent, range, text) => {
+                onAskFix={session && !session.viewOnly ? (intent, range, text) => {
                   setAskFix({
-                    intent, agentName, sessionId: session.id, cwd: target.cwd ?? cwd, spec: null,
+                    intent, agentName: session.agentName || agentName, sessionId: session.id, cwd: target.cwd ?? cwd, spec: null,
                     path: target.path, line: range.start, endLine: range.end, code: text,
                   });
                   if (!desktop) closeFiles();
@@ -814,7 +814,7 @@ function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
     };
     document.addEventListener("selectionchange", sync);
     return () => document.removeEventListener("selectionchange", sync);
-  }, [mode, target.abs, edit]);
+  }, [mode, target.abs, edit, file?.hash]);
 
   function addSelection() {
     const text = codeRef.current?.textContent;

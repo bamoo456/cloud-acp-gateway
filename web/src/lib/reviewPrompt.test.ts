@@ -107,4 +107,9 @@ describe("buildAskFixMessage", () => {
   test("a removed diff line says so — its number belongs to the old side", () => {
     expect(buildAskFixMessage(r({ side: "old" }), "gone?")).toContain("### src/workspace.ts:408 (removed line)");
   });
+
+  test("a commit is named the way Review names it, not by its full sha", () => {
+    const spec = { commit: "3f2a9c0d3f2a9c0d3f2a9c0d3f2a9c0d3f2a9c0d" };
+    expect(buildAskFixMessage(r({ spec, label: "3f2a9c0 fix: guard it" }), "why?")).toContain("(commit `3f2a9c0 fix: guard it`):");
+  });
 });

@@ -46,7 +46,7 @@ function askFixLabel(a: AskFixRequest): string {
     a.intent === "ask" ? "Ask" : "Fix",
     basename(a.path) + ":" + formatRange({ start: a.line, end: a.endLine ?? a.line }),
     a.side,
-    describeScope(a.spec).replace(/`/g, ""),
+    describeScope(a.spec, a.label).replace(/`/g, ""),
   ].filter(Boolean).join(" · ");
 }
 
@@ -108,6 +108,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // Whether the message queues or sends is decided by the conversation it
   // GOES to — for an Ask/Fix that is the captured one, not the one on screen.
   const sendBusy = ask ? !!s.busySessionIds[ask.sessionId] : activeBusy;
+  const askTarget = (a: AskFixRequest) => s.sessions[a.sessionId]?.title || "another conversation";
   // Messages typed into this conversation while its turn was running, waiting for
   // that turn to end (store.ts's queuedPrompts).
   const queued = (targetId && s.queuedPrompts[targetId]) || [];
@@ -427,10 +428,17 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     if (ask) {
       const text = buildAskFixMessage(ask, t);
       s.setAskFix(null);
-      if (sendBusy) { s.queuePrompt(ask.sessionId, { text, images: imgs, files: refs }); return; }
+      if (sendBusy) {
+        s.queuePrompt(ask.sessionId, { text, images: imgs, files: refs });
+        // The rail here shows THIS conversation's queue; one that went elsewhere
+        // has to say where, or the box empties and nothing else moves.
+        if (ask.sessionId !== targetId) s.setTip("Queued for " + askTarget(ask) + " — sends after its current work finishes.");
+        return;
+      }
       void s.sendPromptTo(ask.sessionId, text, imgs, refs).then((sent) => {
         if (sent) return;
         setText(t); setImages(imgs); attach(refs); s.setAskFix(ask);
+        s.setTip("Couldn't send to " + askTarget(ask) + " — that conversation isn't available right now.");
       });
       return;
     }
@@ -561,7 +569,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
           <div className="file-chips">
             {ask && (
               <span className="file-chip" title={ask.path + " · " + ask.cwd + " · " + ask.agentName}>
-                <span className="nm">{askFixLabel(ask)}</span>
+                <span className="nm">{askFixLabel(ask)}{ask.sessionId !== s.activeId && " → " + askTarget(ask)}</span>
                 <button className="chip-x" title="Drop this code context" onClick={() => s.setAskFix(null)}>✕</button>
               </span>
             )}
@@ -627,7 +635,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
             ? <button className="send stop" title="Interrupt and send now" onClick={interrupt}><IconStop />interrupt</button>
             : <button className="send stop" title="Stop" onClick={stop}><IconStop />stop</button>
           )}
-          <button className="send" title={sendBusy ? "Queue for after this turn" : "Send"}
+          <button className="send" title={sendBusy ? "Queue — sends after the current work finishes" : "Send"}
             disabled={!canSend} onClick={submit}>
             {shellMode ? <>run<IconTerminal /></> : sendBusy ? <>queue<IconClock /></> : <>send<IconSend /></>}
           </button>

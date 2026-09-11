@@ -1048,11 +1048,33 @@ describe("Composer session busy state", () => {
     expect(cmView(container).state.doc.toString()).toBe("why?");
     expect(useStore.getState().askFix).toEqual(ASK);
     expect(container.querySelector(".file-chip .nm")!.textContent).toContain("Ask · x.ts:41");
+    // A silent bounce looks like a send that lost the text on the way.
+    expect(useStore.getState().tip).toMatch(/^Couldn't send to/);
+  });
+
+  test("queued into a conversation other than the one on screen, it says where it went", async () => {
+    const { useStore, queuePrompt } = await mountBusy({}, {
+      askFix: ASK, activeId: "s2", sessions: { s1: { title: "Refactor auth" } },
+    });
+    // The chip is the only thing on this screen that knows the target.
+    expect(container.querySelector(".file-chip .nm")!.textContent).toContain(" → Refactor auth");
+    expect(primary().title).toBe("Queue — sends after the current work finishes");
+
+    await act(async () => { cmSet(cmView(container), "why?"); });
+    await act(async () => { primary().click(); });
+
+    expect(queuePrompt.mock.calls[0][0]).toBe("s1");
+    // s1's rail is not on screen (s2 is), so the acknowledgement is the tip.
+    expect(container.querySelector(".queue-rail")).toBeNull();
+    expect(useStore.getState().tip).toBe("Queued for Refactor auth — sends after its current work finishes.");
   });
 
   test("the chip's ✕ drops the context; an empty box with a chip does not stop the turn", async () => {
+    // Enter, not the button: the button is disabled on an empty box, so a click
+    // there never reaches submit (see the Enter test above for the touch flag).
+    delete (window as any).ontouchstart;
     const { useStore, cancel } = await mountBusy({}, { askFix: ASK });
-    await act(async () => { primary().click(); });
+    await act(async () => { cmKey(cmView(container), "Enter"); });
     expect(cancel).not.toHaveBeenCalled();
 
     await act(async () => { container.querySelector<HTMLButtonElement>(".file-chip .chip-x")!.click(); });
