@@ -767,9 +767,10 @@ function FileView({ cwd, target, canAttach, onAttach }: {
   // not a rule.
   const autoSwitched = useRef<string | null>(null);
 
-  // Keyed on the request, not on its fields: a code reference into the file
-  // already open asks for the File view again even if it was switched to Diff.
-  useEffect(() => { setMode(target.mode); }, [target]);
+  // The line is part of the key: a code reference into the file already open
+  // asks for the File view again even if it was switched to Diff. Not the
+  // request object itself — re-clicking the open file's row stays a no-op.
+  useEffect(() => { setMode(target.mode); }, [target.abs, target.mode, target.line, target.endLine]);
   // A different file is a different edit. Dropping the buffer silently is safe
   // only because opening another file takes a click on the list, which is not
   // something you do mid-sentence — and the alternative, blocking navigation on

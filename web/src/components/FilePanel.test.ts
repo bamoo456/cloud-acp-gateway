@@ -350,6 +350,13 @@ describe("FilePanel", () => {
 
     expect(getFilePreview).toHaveBeenCalledWith("/repo", "/repo/src/gateway.ts");
     expect(container.querySelector("pre.wf-text")?.textContent).toBe("line one\nline two\n");
+
+    // Clicking the same row again is not a request to see the empty pane.
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/gateway.ts", path: "src/gateway.ts" });
+    });
+    await act(async () => { await flush(); });
+    expect(container.querySelector("pre.wf-text")?.textContent).toBe("line one\nline two\n");
   });
 
   // Highlights are painted through the CSS Custom Highlight API; jsdom has
