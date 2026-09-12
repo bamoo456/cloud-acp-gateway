@@ -77,6 +77,25 @@ describe("global styles", () => {
     expect(styles).toMatch(/@media \(min-width: 1100px\)[\s\S]*?#files \{[^}]*max-height:\s*none/);
   });
 
+  test("the review columns borrow the sidebar's and the file panel's widths", () => {
+    // Three columns only fit at the file panel's breakpoint, not the sidebar's,
+    // and they are the same two columns re-labelled — a new width here would be
+    // a third opinion about how wide a side column is.
+    const review = styles.slice(styles.indexOf("---- review workspace ----"));
+    const desktop = review.match(/@media \(min-width: 1100px\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+
+    expect(desktop).toMatch(/\.rv-left \{[^}]*width: 284px/);
+    expect(styles).toMatch(/@media \(min-width: 860px\)[\s\S]*?#panel \{[^}]*width: 284px/);
+    expect(desktop).toMatch(/\.content\.comp \{[^}]*width: min\(440px, 34vw\)/);
+    expect(styles).toMatch(/@media \(min-width: 1100px\)[\s\S]*?#files \{[^}]*width: min\(440px, 34vw\)/);
+    // Below the gate both are the floating card the sessions/files panels use,
+    // and the canvas keeps the row to itself.
+    expect(cssRule(".rv-left, .content.comp")).toMatch(/position: absolute/);
+    expect(cssRule(".rv-left, .content.comp")).toMatch(/display: none/);
+    expect(cssRule(".rv-left.open, .content.comp.open")).toMatch(/display: flex/);
+    expect(review).toMatch(/@media \(max-width: 859px\)[\s\S]*?\.rv-left\.open, \.content\.comp\.open \{[^}]*border-radius: 0/);
+  });
+
   test("the expanded files panel fills the window instead of pinning left", () => {
     // A fixed box with inset:0 but the column rule's width still applied is
     // over-constrained: `right` is dropped and the panel lands 440px wide

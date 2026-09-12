@@ -908,6 +908,9 @@ describe("FilePanel", () => {
     await act(async () => { row.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
 
+    // The tab is also the workspace's door; the panel keeps drawing Review
+    // until the workspace takes it over.
+    expect(useStore.getState().workspace).toBe("review");
     expect(container.querySelector(".wf-panes.split")).not.toBeNull();
     expect(parseInt(panel.style.width, 10)).toBe(listWidth + 300);
     // The scope chips are still there — the list did not go anywhere.

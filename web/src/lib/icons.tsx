@@ -213,6 +213,19 @@ export function IconPanel() {
   );
 }
 
+// The Review workspace's entry point: a checked list — the changed files with a
+// pass run over them. Not IconPanel (that divided rect is the file panel's own
+// toggle, one button away) and not IconGitBranch (the status bar's), so the
+// three buttons a reviewer reaches for don't read as the same thing.
+export function IconReview() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 5.5h9M4 12h6M4 18.5h9" />
+      <path d="m15 15.5 2.4 2.4L22 13.4" />
+    </svg>
+  );
+}
+
 // A double chevron pointing the way the thing it folds will travel. The file
 // panel's list toggle wore IconPanel's divided rect, which is also the top
 // bar's button for opening this whole panel — two near-identical glyphs a few
