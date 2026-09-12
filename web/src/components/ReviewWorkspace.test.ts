@@ -352,6 +352,28 @@ describe("review workspace", () => {
     expect(container.querySelector(".rv-cmt textarea")).toBeTruthy();
   });
 
+  test("Ask uncovers the companion the chip lands in", async () => {
+    const { makeSession } = await import("../store/reducers.ts");
+    const useStore = await setup({
+      activeId: "s1", sessions: { s1: makeSession("s1") },
+      // Folded away above 1100px and a sheet below it: the composer holding
+      // the chip is off screen either way until Ask puts it back.
+      companionCollapsed: true,
+    });
+    await click(container.querySelector(FILE_ROW));
+    await click(rows().find((r) => r.className.includes("del")));
+    await click([...container.querySelectorAll(".rv-acts button")].find((b) => b.textContent === "Ask"));
+
+    expect(useStore.getState().companionCollapsed).toBe(false);
+    expect(useStore.getState().reviewSheet).toBe("companion");
+
+    // A sheet nobody clicked open still leaves Escape somewhere to hand focus.
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(document.activeElement).toBe(button("Companion"));
+  });
+
   test("Ask/Fix are not offered on a saved conversation that has not been resumed", async () => {
     // sendPromptTo refuses a view-only session, so the buttons would only bounce.
     const { makeSession } = await import("../store/reducers.ts");
