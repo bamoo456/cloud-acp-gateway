@@ -1954,6 +1954,18 @@
   .rv-stale { padding-bottom: 10px; }
   .rv-other { color: var(--muted); font-style: italic; }
 
+  /* Read, on the file's row. Muted rather than green: green means a diff `+`,
+     and a column of green ticks buries the files nobody has opened. The changed
+     mark wears the accent instead — that row is work again, not a finished one. */
+  .wf-reviewed { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+  .wf-reviewed.changed { color: var(--accent); }
+  /* And on the file itself, above its diff. */
+  .rv-changed {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    background: var(--surface-2); font-size: 12.5px;
+  }
+
   /* The mode's own footer. Present only once there is a checkout to review, so
      the mode has no chrome at all before then. */
   .rv-foot {
