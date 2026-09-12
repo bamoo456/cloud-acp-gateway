@@ -1912,6 +1912,48 @@
   .rv-acts { display: flex; align-items: center; gap: 6px; padding: 0 8px 8px; }
   .rv-acts .sp { flex: 1; }
 
+  /* The changed files, and what has been said about them. Sits above the list
+     rather than inside it: a discussion is cross-file, the tree is not. */
+  .rv-tabs {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 2px;
+    padding: 4px 8px; border-bottom: 1px solid var(--border);
+  }
+  .rv-tab {
+    display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px;
+    border-radius: 8px; color: var(--muted); font-size: 12.5px; font-weight: 700;
+  }
+  .rv-tab.on { color: var(--text); background: var(--surface-2); }
+  /* Open threads, not every thread: a resolved one is done. Its own class
+     rather than .rv-badge, which counts draft comments on a file's row. */
+  .rv-tab-n {
+    min-width: 16px; padding: 0 5px; border-radius: 999px; text-align: center;
+    background: var(--accent); color: var(--accent-text);
+    font-size: 10px; font-weight: 800; line-height: 16px;
+  }
+
+  /* A durable discussion, collapsed to its anchor. The diamond is the marker
+     the diff shows; the disclosure triangle is hidden because the row IS the
+     control. */
+  .rv-cmt.discussion { border-style: dashed; }
+  .rv-cmt.discussion > summary { cursor: pointer; list-style: none; }
+  .rv-cmt.discussion > summary::-webkit-details-marker { display: none; }
+  .rv-cmt.discussion > summary:hover { color: var(--text); }
+  .rv-diamond { margin-right: 5px; color: var(--accent); }
+  /* Resolved is quieter, not struck through: the thread is still the record. */
+  .rv-cmt.discussion.resolved { opacity: .65; }
+  .rv-cmt.discussion.resolved .rv-diamond { color: var(--muted); }
+  .rv-open {
+    padding: 0; text-decoration: underline dotted; text-underline-offset: 2px;
+  }
+  .rv-open:hover { color: var(--text); }
+  .rv-cmt.discussion .rv-quote { padding: 6px 10px 0; }
+  /* A reply, indented off the opening body so the thread reads as a thread. */
+  .rv-reply { padding-left: 20px; border-left: 2px solid var(--border); margin-left: 10px; }
+  .rv-gone { color: var(--muted); font-size: 12.5px; }
+  /* Discussions whose line the diff no longer has, at the end of the file. */
+  .rv-stale { padding-bottom: 10px; }
+  .rv-other { color: var(--muted); font-style: italic; }
+
   /* The mode's own footer. Present only once there is a checkout to review, so
      the mode has no chrome at all before then. */
   .rv-foot {

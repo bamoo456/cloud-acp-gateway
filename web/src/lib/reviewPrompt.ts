@@ -108,3 +108,18 @@ export function buildAskFixMessage(r: AskFixRequest, body: string): string {
   const quote = r.code.trim() ? `\n${f}\n${r.code}\n${f}` : "";
   return `${head}\n\nIn checkout \`${r.cwd}\` (${describeScope(r.spec, r.label)}):\n\n### ${anchor(r)}${quote}\n\n${body.trim()}`;
 }
+
+// One durable discussion, as the message a branch opens with. Same quoting
+// rules as a review comment, plus the trailing reference line: a fork is a new
+// conversation with no idea where it came from, and the id is what lets an
+// answer be tied back to the record that asked for it.
+export function buildDiscussionMessage(d: {
+  id: string; path: string; side: "new" | "old"; line: number; endLine?: number;
+  code: string; body: string; replies: { body: string }[];
+}): string {
+  const f = fence(d.code);
+  const quote = d.code.trim() ? `\n${f}\n${d.code}\n${f}` : "";
+  const thread = [d.body, ...d.replies.map((r) => r.body)].map((b) => b.trim()).filter(Boolean).join("\n\n");
+  return `Review discussion — look into this and report back.\n\n### ${anchor(d)}${quote}\n\n${thread}\n\n` +
+    `Discussion ${d.id} at ${d.path}:${d.line}`;
+}

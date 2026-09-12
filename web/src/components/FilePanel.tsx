@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, useIsOpenFile } from "../store/store.ts";
 import type { FilePreviewTarget, PreviewMode } from "../store/store.ts";
 import {
   getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, getHtmlRender,
   getReviewDraft, rawFileUrl, saveFilePreview,
   type ChangesResult, type FileDiffResult, type FilePreviewResult,
-  type HtmlRender, type OutputFolder, type ReviewComment, type RevSpec,
+  type Discussion, type HtmlRender, type OutputFolder, type ReviewComment, type RevSpec,
 } from "../lib/api.ts";
+import { parseUnifiedDiff, type DiffRow } from "../lib/unified-diff.ts";
 import { touchedFiles } from "../lib/touchedFiles.ts";
 import { mergePanelFiles, outputFolderCandidates, type PanelFile } from "../lib/panelFiles.ts";
 import { fileKind, extensionOf } from "../lib/fileKind.ts";
@@ -19,8 +20,9 @@ import { makeAbsFile, makeRangeFile } from "../lib/mentions.ts";
 import { rangeFromOffsets, offsetsOfLines, sliceLines, formatRange, type LineRange } from "../lib/lineRange.ts";
 import { copyText } from "../lib/clipboard.ts";
 import type { MessageFile } from "../types.ts";
-import { UnifiedDiff, type DiffAnchor } from "./UnifiedDiff.tsx";
-import { SavedComment, CommentComposer, anchorKey } from "./ReviewComments.tsx";
+import { UnifiedDiff, anchorOf, type DiffAnchor } from "./UnifiedDiff.tsx";
+import { SavedComment, CommentComposer, DiscussionCard, anchorKey,
+  type DiscussionActs } from "./ReviewComments.tsx";
 import { HtmlPreview } from "./HtmlPreview.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { Lightbox } from "./Lightbox.tsx";
@@ -732,6 +734,17 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAtta
     onAdd: (anchor: DiffAnchor, body: string) => void;
     onDelete: (id: string) => void;
     onAskFix?: (intent: "ask" | "fix", anchor: DiffAnchor) => void;
+    // The durable discussions recorded against THIS file. Where each one still
+    // belongs is decided here, against the diff on screen — the anchors
+    // themselves are never touched.
+    discussion?: {
+      items: Discussion[];
+      // `revision`/`diffHash` identify the diff that rendered the anchor, which
+      // is why they come from here rather than from the caller: only the viewer
+      // knows which response is on screen.
+      onCreate: (anchor: DiffAnchor, body: string, revision: string, diffHash?: string) => Promise<boolean>;
+      acts: DiscussionActs;
+    };
   };
   // Where in the body to land, and a way to tell the caller which view is on
   // screen. Both are the Review canvas's Back/Forward: a location it returns to
@@ -869,6 +882,38 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAtta
     }
     return () => { alive = false; };
   }, [cwd, target.abs, mode, spec?.commit, spec?.base]);
+
+  // Every addressable row of the diff on screen, by the same key a comment is
+  // stored under. One walk answers both of the questions the review layer asks
+  // per line: is this a changed line (Discuss is offered on those only), and
+  // does it still read the way a discussion recorded it.
+  const diffRows = useMemo(() => {
+    const rows = new Map<string, DiffRow>();
+    if (!diff) return rows;
+    for (const h of parseUnifiedDiff(diff.diff).hunks) {
+      for (const r of h.rows) {
+        const a = anchorOf(r);
+        if (a) rows.set(anchorKey(a), r);
+      }
+    }
+    return rows;
+  }, [diff]);
+
+  // A discussion renders under its line only while that line is still in the
+  // diff AND still says what it said. Anything else goes to the group at the
+  // end of the file: a card quoting one line while sitting under another is the
+  // silent move the whole anchor rule exists to prevent.
+  const inlineTalk = new Map<string, Discussion[]>();
+  const staleTalk: Discussion[] = [];
+  for (const d of review?.discussion?.items ?? []) {
+    const row = diffRows.get(anchorKey(d));
+    if (row && row.text.trim() === d.code.trim()) {
+      const at = inlineTalk.get(anchorKey(d));
+      if (at) at.push(d); else inlineTalk.set(anchorKey(d), [d]);
+    } else {
+      staleTalk.push(d);
+    }
+  }
 
   // ---- find in file ----
   // The search surface is the whole body, so one implementation covers the
@@ -1135,8 +1180,8 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAtta
       <div className="wf-body" ref={bodyRef} hidden={edit !== null}>
         {err && <div className="wf-empty">{err}</div>}
         {!err && loading && <div className="wf-empty">Loading…</div>}
-        {!err && !loading && mode === "diff" && diff && (
-          // A deletion git can still describe — a tracked file removed from the
+        {!err && !loading && mode === "diff" && diff && (<>
+          {// A deletion git can still describe — a tracked file removed from the
           // worktree — keeps its diff, and showing the lines that went is the
           // most useful thing the panel can do. It is the deletion git has NO
           // record of (a file the agent wrote and later removed through a
@@ -1153,10 +1198,19 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAtta
                     onPick={review ? (a) => setPicked((p) => (p && p.side === a.side && p.line === a.line ? null : a)) : undefined}
                     renderComments={review ? (a) => {
                       const saved = review.comments.get(anchorKey(a)) ?? [];
+                      const talk = inlineTalk.get(anchorKey(a)) ?? [];
                       const writing = picked && picked.side === a.side && picked.line === a.line;
-                      if (!saved.length && !writing) return null;
+                      if (!saved.length && !talk.length && !writing) return null;
+                      // Only a line this revision changed: a discussion is a
+                      // record against the change, and context rows are here to
+                      // read it by.
+                      const changed = diffRows.get(anchorKey(a))?.t !== "ctx";
+                      const discussion = review.discussion;
                       return (
                         <>
+                          {talk.map((d) => (
+                            <DiscussionCard key={d.id} d={d} acts={discussion!.acts} />
+                          ))}
                           {saved.map((c) => (
                             <SavedComment key={c.id} comment={c} onDelete={() => review.onDelete(c.id!)} />
                           ))}
@@ -1164,12 +1218,31 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAtta
                             <CommentComposer anchor={a} path={target.path}
                               onCancel={() => setPicked(null)}
                               onAdd={(body) => { review.onAdd(a, body); setPicked(null); }}
-                              onAskFix={review.onAskFix && ((intent) => review.onAskFix!(intent, a))} />
+                              onAskFix={review.onAskFix && ((intent) => review.onAskFix!(intent, a))}
+                              onDiscuss={discussion && changed && diff
+                                ? async (body) => {
+                                    const ok = await discussion.onCreate(a, body, diff.revision, diff.hash);
+                                    if (ok) setPicked(null);
+                                    return ok;
+                                  }
+                                : undefined} />
                           )}
                         </>
                       );
-                    } : undefined} />
-        )}
+                    } : undefined} />}
+          {/* Discussions whose line is gone, or no longer reads the way it did.
+              After the diff rather than inside it, and drawn for every shape of
+              diff pane — a binary or deleted file has no rows at all, so all of
+              its discussions land here. */}
+          {staleTalk.length > 0 && review?.discussion && (
+            <div className="rv-stale">
+              <div className="wf-group">Not on a current line</div>
+              {staleTalk.map((d) => (
+                <DiscussionCard key={d.id} d={d} inList acts={review.discussion!.acts} />
+              ))}
+            </div>
+          )}
+        </>)}
         {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} codeRef={codeRef} />}
         {!err && !loading && mode === "render" && file && (
           file.kind !== "text"
