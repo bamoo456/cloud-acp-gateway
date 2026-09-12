@@ -569,6 +569,24 @@ describe("review workspace", () => {
     expect(nav("Forward")?.disabled).toBe(true);
   });
 
+  test("the Diff/File toggle leaves the reader where they have scrolled to", async () => {
+    // The restored offset belongs to the arrival, not to every re-read the
+    // viewer does: switching view reloads the body, and re-applying there
+    // would drag the reader back to where they landed.
+    const useStore = await setup();
+    await act(async () => {
+      useStore.setState({
+        reviewPreview: { abs: "/repo/src/workspace.ts", path: "src/workspace.ts", mode: "diff", scrollTop: 120 },
+      });
+    });
+    await act(async () => { await flush(); });
+    expect(canvasBody().scrollTop).toBe(120);
+
+    canvasBody().scrollTop = 800;
+    await click(button("File"));
+    expect(canvasBody().scrollTop).toBe(800);
+  });
+
   test("Back out of a scope change brings the revision with it", async () => {
     // Choosing a revision closes the file read against the old one. Back has to
     // put the chips back too, or the header would name a revision the canvas
