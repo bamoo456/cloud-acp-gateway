@@ -1,5 +1,6 @@
 import MarkdownIt from "markdown-it";
 import hljs from "highlight.js";
+import { CODE_REF_RE, parseCodeRef, refFromMatch, type CodeRef } from "./codeRef.ts";
 
 // Same renderer the legacy console bundled (markdown-it + highlight.js). Output
 // is dropped into a .md container; styles.css carries the .hljs-* token colors.
@@ -54,6 +55,83 @@ const withCopy = (render: Rule): Rule => (tokens, idx, options, env, self) => {
 };
 md.renderer.rules.fence = withCopy(md.renderer.rules.fence!);
 md.renderer.rules.code_block = withCopy(md.renderer.rules.code_block!);
+
+// Code references (see lib/codeRef.ts) are marked at the token level, so a
+// path inside a fence, a code block or an ordinary link is never touched. The
+// rule runs before linkify: with a ccTLD like .md or .rs on the end, linkify
+// reads `README.md:12` as a URL and there would be no text left to mark. It
+// also runs before escapes are joined back into the text, so a text_special
+// neighbour means the path was escaped — `foo\_bar.ts` — and the fragment
+// beside it is not a filename.
+//
+// The mark is inert: a bare span with data attributes. Markdown.tsx turns it
+// into a link only once the gateway has said which file it is.
+type Token = ReturnType<MarkdownIt["parse"]>[number];
+function refAttrs(tok: Token, ref: CodeRef): void {
+  tok.attrJoin("class", "md-ref");
+  tok.attrSet("data-path", ref.path);
+  if (ref.line) tok.attrSet("data-line", String(ref.line));
+  if (ref.endLine) tok.attrSet("data-end", String(ref.endLine));
+  if (ref.column) tok.attrSet("data-col", String(ref.column));
+}
+md.core.ruler.before("linkify", "coderef", (state) => {
+  for (const block of state.tokens) {
+    if (block.type !== "inline" || !block.children) continue;
+    const kids = block.children;
+    const out: Token[] = [];
+    let inLink = false, codeLink = false;
+    for (let i = 0; i < kids.length; i++) {
+      const tok = kids[i];
+      if (tok.type === "link_open") {
+        inLink = true;
+        // An explicit link to a line: `[label](src/app.ts:12)`. As an <a> it
+        // would navigate the console to a relative URL. Only with a line — a
+        // link to a bare relative path is how one document points at another,
+        // and stays the link it was written as. No scheme check: a URL never
+        // parses as a reference, and `app.ts:` would fail one as a scheme.
+        const ref = parseCodeRef(tok.attrGet("href") ?? "");
+        if (ref?.line) {
+          codeLink = true;
+          tok.tag = "span";
+          tok.attrs = (tok.attrs ?? []).filter(([name]) => name !== "href" && name !== "title");
+          refAttrs(tok, ref);
+        }
+      } else if (tok.type === "link_close") {
+        inLink = false;
+        if (codeLink) { tok.tag = "span"; codeLink = false; }
+      } else if (!inLink && tok.type === "code_inline") {
+        const ref = parseCodeRef(tok.content);
+        if (ref) refAttrs(tok, ref);
+      } else if (!inLink && tok.type === "text") {
+        const text = tok.content;
+        let last = 0;
+        for (const m of text.matchAll(CODE_REF_RE)) {
+          const at = m.index ?? 0, end = at + m[0].length;
+          if (at === 0 && kids[i - 1]?.type === "text_special") continue;
+          if (end === text.length && kids[i + 1]?.type === "text_special") continue;
+          if (at > last) out.push(textToken(state, text.slice(last, at)));
+          const t = new state.Token("coderef", "span", 0);
+          t.content = m[0];
+          refAttrs(t, refFromMatch(m));
+          out.push(t);
+          last = end;
+        }
+        if (last === 0) { out.push(tok); continue; }
+        if (last < text.length) out.push(textToken(state, text.slice(last)));
+        continue;
+      }
+      out.push(tok);
+    }
+    block.children = out;
+  }
+});
+function textToken(state: { Token: new (type: string, tag: string, nesting: 0) => Token }, content: string): Token {
+  const t = new state.Token("text", "", 0);
+  t.content = content;
+  return t;
+}
+md.renderer.rules.coderef = (tokens, idx, _options, _env, self) =>
+  `<span${self.renderAttrs(tokens[idx])}>${md.utils.escapeHtml(tokens[idx].content)}</span>`;
 
 export function renderMarkdown(text: string, env?: MarkdownEnv): string {
   return md.render(text || "", env ?? {});

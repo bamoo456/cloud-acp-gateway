@@ -92,9 +92,9 @@ function groupTurns(items: ThreadItem[]): Row[] {
 // line unless it is the open one. A thread reads as the questions you asked;
 // the answer you want is one tap away, and only one is ever unrolled (§1.3
 // still holds — no frame either way).
-function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, onToggle }: {
+function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, onToggle, cwd }: {
   agentName: string; agentKind: AgentGlyph; thoughts: Thought[]; replies: Reply[]; live: boolean;
-  expanded: boolean; onToggle: () => void;
+  expanded: boolean; onToggle: () => void; cwd?: string;
 }) {
   const copyable = replies.map((r) => r.text).filter(Boolean).join("\n\n");
   // A streaming turn is never folded — you have to be able to watch the output
@@ -114,7 +114,7 @@ function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, on
         {thoughts.length > 0 && (
           <details className="think">
             <summary>· thought<IconChevronDown /></summary>
-            <div className="in">{thoughts.map((t) => <Markdown key={t.id} text={t.text} />)}</div>
+            <div className="in">{thoughts.map((t) => <Markdown key={t.id} text={t.text} cwd={cwd} />)}</div>
           </details>
         )}
         <span className="sp" />
@@ -125,7 +125,7 @@ function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, on
             {replies.map((r) => (
               <div className="body" data-id={r.id} key={r.id}>
                 {r.images && r.images.length > 0 && <MessageImages images={r.images} />}
-                {r.text && <Markdown text={r.text} />}
+                {r.text && <Markdown text={r.text} cwd={cwd} />}
               </div>
             ))}
           </div>
@@ -569,6 +569,7 @@ export function Thread({ session, agentReady, loading, findOpen, focusFind = 0, 
             live={row.id === liveTurnId}
             expanded={row.id === openTurnId}
             onToggle={() => setChoice({ id: openTurnId === row.id ? null : row.id })}
+            cwd={session?.cwd}
           />
         );
         const it = row.item;
@@ -578,7 +579,7 @@ export function Thread({ session, agentReady, loading, findOpen, focusFind = 0, 
               <div className="lbl"><span className="you">you</span><span className="sp" /></div>
               {it.images && it.images.length > 0 && <MessageImages images={it.images} />}
               {it.files && it.files.length > 0 && <MessageFiles files={it.files} />}
-              {it.text && <div className="body" data-id={it.id}><Markdown text={it.text} /></div>}
+              {it.text && <div className="body" data-id={it.id}><Markdown text={it.text} cwd={session?.cwd} /></div>}
               {it.text && <CopyButton text={it.text} label="Copy message" />}
             </div>
           );
