@@ -5,7 +5,7 @@ import {
   getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, getHtmlRender,
   getReviewDraft, rawFileUrl, saveFilePreview,
   type ChangesResult, type FileDiffResult, type FilePreviewResult,
-  type HtmlRender, type OutputFolder,
+  type HtmlRender, type OutputFolder, type ReviewComment, type RevSpec,
 } from "../lib/api.ts";
 import { touchedFiles } from "../lib/touchedFiles.ts";
 import { mergePanelFiles, outputFolderCandidates, type PanelFile } from "../lib/panelFiles.ts";
@@ -19,13 +19,13 @@ import { makeAbsFile, makeRangeFile } from "../lib/mentions.ts";
 import { rangeFromOffsets, offsetsOfLines, sliceLines, formatRange, type LineRange } from "../lib/lineRange.ts";
 import { copyText } from "../lib/clipboard.ts";
 import type { MessageFile } from "../types.ts";
-import { UnifiedDiff } from "./UnifiedDiff.tsx";
+import { UnifiedDiff, type DiffAnchor } from "./UnifiedDiff.tsx";
+import { SavedComment, CommentComposer, anchorKey } from "./ReviewComments.tsx";
 import { HtmlPreview } from "./HtmlPreview.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { Lightbox } from "./Lightbox.tsx";
 import { Plan } from "./Plan.tsx";
 import { basename, dirname, formatBytes, relativeTo, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
-import { ReviewPanel } from "./ReviewPanel.tsx";
 import {
   clampPanelWidth, readPanelWidth, savePanelWidth, MIN_PANEL_WIDTH, MAX_PANEL_WIDTH,
   DESKTOP_PANEL_QUERY, isDesktopPanelWidth,
@@ -76,7 +76,7 @@ import { findRanges, offsetRange, paintHits, clearHits, scrollToHit, MAX_HITS } 
 // Back returns to the mode you opened the file from.
 
 type Section = "Progress" | "Outputs" | "Context";
-type Mode = "session" | "project" | "review";
+type Mode = "session" | "project";
 
 // The list keeps this much of the panel when the viewer opens beside it, and
 // the viewer needs at least this much to be worth splitting for — under that a
@@ -204,6 +204,7 @@ export function FilePanel() {
   const openFilePreview = useStore((s) => s.openFilePreview);
   const attachFiles = useStore((s) => s.attachFiles);
   const setAskFix = useStore((s) => s.setAskFix);
+  const setWorkspace = useStore((s) => s.setWorkspace);
   const agentName = useStore((s) => s.agentName);
   const setChangeStat = useStore((s) => s.setChangeStat);
   // The same capability the composer's "@" button is gated on: file references
@@ -249,15 +250,6 @@ export function FilePanel() {
   // Only the newest request may write state: switching folders or hammering
   // refresh must not let a slow earlier `git status` land on top of a later one.
   const gen = useRef(0);
-  // Review mode keeps its own reads (a revision this panel knows nothing about),
-  // so it cannot ride on `changes`. Every reason to re-read the checkout goes
-  // through the two loaders below, so bumping there is what reaches it — turn
-  // end, Refresh, opening the panel.
-  const [refreshKey, setRefreshKey] = useState(0);
-  // The Refresh button only. Pressing it says "re-read everything now", which
-  // includes the file open in Review — where a turn ending stops short, because
-  // redrawing a diff someone is commenting on is the panel fighting them.
-  const [reloadKey, setReloadKey] = useState(0);
 
   // What the conversation wrote, as the thread itself recorded it. Also the
   // source of the folder candidates below, so it is computed before the loader
@@ -266,7 +258,6 @@ export function FilePanel() {
 
   function loadChanges() {
     const mine = ++gen.current;
-    setRefreshKey((k) => k + 1);
     setLoading(true);
     getWorkspaceChanges(cwd)
       .then((r) => {
@@ -300,10 +291,6 @@ export function FilePanel() {
   // build for a panel nobody is looking at.
   function loadStat() {
     const mine = ++gen.current;
-    // Bumped here too: the mode survives the panel being closed, so a Review
-    // left open behind a shut panel must not come back showing the checkout as
-    // it was before the last three turns.
-    setRefreshKey((k) => k + 1);
     getWorkspaceChanges(cwd)
       .then((r) => { if (mine === gen.current) setChangeStat(diffstat(r)); })
       .catch(() => { if (mine === gen.current) setChangeStat(null); });
@@ -368,11 +355,7 @@ export function FilePanel() {
   const canSplit = expanded
     ? winWidth >= LIST_WIDTH + MIN_VIEW_WIDTH
     : extended - LIST_WIDTH >= MIN_VIEW_WIDTH;
-  // Review's open file is its own state and it draws its own viewer pane (the
-  // diff has comments written on it), so it reports up rather than going
-  // through `filePreview` — but it widens the panel exactly the same way.
-  const [reviewOpen, setReviewOpen] = useState(false);
-  const split = canSplit && (!!target || reviewOpen);
+  const split = canSplit && !!target;
   const panelWidth = split ? extended : width;
   // Folding the list away gives the whole extended panel to one diff — which is
   // what a wide file wants, and what the extra 300px was for. Hidden in CSS
@@ -465,9 +448,6 @@ export function FilePanel() {
           {target && !split && (
             <button className="icon-btn" title="Back to file list" onClick={clearFilePreview}><IconBack /></button>
           )}
-          {/* Here only when the right pane has no header of its own to put it
-              in — the review's open file carries its own bar. */}
-          {!target && foldBtn}
           {/* Naming the folder is half of what the Project mode is for, and it
               is the only thing here that says WHICH checkout the lists describe
               when a session's cwd differs from the picker's. */}
@@ -487,7 +467,7 @@ export function FilePanel() {
           </span>
           {(!target || split) && (
             <button className="icon-btn" title="Refresh" disabled={loading}
-              onClick={() => { loadChanges(); setTreeKey((k) => k + 1); setReloadKey((k) => k + 1); }}><IconRefresh /></button>
+              onClick={() => { loadChanges(); setTreeKey((k) => k + 1); }}><IconRefresh /></button>
           )}
           <button className="icon-btn" aria-pressed={expanded} title={expanded ? "Collapse" : "Expand"}
             onClick={() => setExpanded((v) => !v)}><IconExpand collapse={expanded} /></button>
@@ -511,8 +491,12 @@ export function FilePanel() {
                 while you are looking at something else. It counts every scope's
                 draft, not the open one's: "you have comments waiting" is the
                 claim, and which revision they are on is the mode's own business. */}
-            <button role="tab" aria-selected={mode === "review"} className={mode === "review" ? "active" : ""}
-              onClick={() => setMode("review")}>
+            {/* A door, not a mode: Review is a workspace of its own, and this
+                panel is not mounted inside it — so the button never comes back
+                selected, and the panel it leaves behind keeps the mode it was
+                in for when you return. */}
+            <button role="tab" aria-selected={false}
+              onClick={() => setWorkspace("review")}>
               Review{reviewCount > 0 && <span className="wf-badge">{reviewCount}</span>}
             </button>
           </div>
@@ -522,7 +506,7 @@ export function FilePanel() {
             `.split` is what lays them side by side; without it whichever one is
             rendered has the panel to itself, which is the narrow layout. */}
         <div className={"wf-panes" + (split ? " split" : "") + (split && listFolded ? " folded" : "")}>
-          {(!target || split) && mode !== "review" && (
+          {(!target || split) && (
             <div className="wf-list">
 
               {mode === "project" && (
@@ -641,15 +625,6 @@ export function FilePanel() {
             </div>
           )}
 
-          {/* Its own two panes, not a list inside ours: a review's detail is
-              its diff WITH the comments written on it, which only this
-              component can draw. Keyed on cwd so a folder change restarts the
-              review rather than leaving one checkout's draft over another's. */}
-          {(!target || split) && mode === "review" && (
-            <ReviewPanel key={cwd} cwd={cwd} refreshKey={refreshKey} reloadKey={reloadKey} onCount={setReviewCount}
-              split={canSplit} onDetail={setReviewOpen} />
-          )}
-
           {target && (
             <div className="wf-view">
               {/* The header's title is the folder's again while the list is on
@@ -742,12 +717,35 @@ function selectedRange(code: HTMLElement | null): LineRange | null {
   return rangeFromOffsets(code.textContent ?? "", from, from + picked.toString().length);
 }
 
-function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
+// The one viewer. The panel mounts it for a previewed file; the review
+// workspace mounts it as its canvas, which is what `spec` and `review` are for:
+// a diff read against some other revision than the working tree, with the
+// comments of an unsent review written onto its lines.
+export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAttach, onAttach, onAskFix }: {
   cwd: string; target: FilePreviewTarget; canAttach: boolean;
+  // Which revision the diff is of. Null — the panel's case — is the working
+  // tree, and the only case where the File view shows the same content the
+  // diff was taken from.
+  spec?: RevSpec | null;
+  review?: {
+    comments: Map<string, ReviewComment[]>;
+    onAdd: (anchor: DiffAnchor, body: string) => void;
+    onDelete: (id: string) => void;
+    onAskFix?: (intent: "ask" | "fix", anchor: DiffAnchor) => void;
+  };
+  // Where in the body to land, and a way to tell the caller which view is on
+  // screen. Both are the Review canvas's Back/Forward: a location it returns to
+  // is only the same place if it comes back in the same view, at the same
+  // offset. The panel passes neither.
+  scrollTop?: number;
+  onMode?: (mode: PreviewMode) => void;
   onAttach: (range: LineRange, text: string) => void;
   onAskFix?: (intent: "ask" | "fix", range: LineRange, text: string) => void;
 }) {
   const [mode, setMode] = useState<PreviewMode>(target.mode);
+  // The diff line a review comment is being written against. Null is the
+  // ordinary state, and there is no such line without a review to hold it.
+  const [picked, setPicked] = useState<DiffAnchor | null>(null);
   const [diff, setDiff] = useState<FileDiffResult | null>(null);
   const [file, setFile] = useState<FilePreviewResult | null>(null);
   const [render, setRender] = useState<HtmlRender | null>(null);
@@ -783,11 +781,13 @@ function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
   // asks for the File view again even if it was switched to Diff. Not the
   // request object itself — re-clicking the open file's row stays a no-op.
   useEffect(() => { setMode(target.mode); }, [target.abs, target.mode, target.line, target.endLine]);
+  useEffect(() => { onMode?.(mode); }, [mode, onMode]);
   // A different file is a different edit. Dropping the buffer silently is safe
   // only because opening another file takes a click on the list, which is not
   // something you do mid-sentence — and the alternative, blocking navigation on
   // a confirm, makes the panel modal over a textarea nobody asked to keep.
   useEffect(() => { setEdit(null); setConflict(null); setSaveErr(null); }, [target.abs]);
+  useEffect(() => { setPicked(null); }, [target.abs, spec?.commit, spec?.base]);
 
   // The rendered code element, and which lines are selected inside it. Watched
   // through selectionchange rather than a mouseup: a selection is also made by
@@ -841,7 +841,7 @@ function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
     setLoading(true);
     const done = () => { if (alive) setLoading(false); };
     if (mode === "diff") {
-      getFileDiff(cwd, target.abs)
+      getFileDiff(cwd, target.abs, spec)
         .then((d) => {
           if (!alive) return;
           setDiff(d);
@@ -852,7 +852,9 @@ function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
           // /workspace/file must 404 for a path that is no longer on disk, so
           // the switch turned "the agent removed this" into a red error. The
           // diff pane says so itself now.
-          if (d.status !== "deleted" && (d.binary || !d.diff.trim()) && autoSwitched.current !== target.abs) {
+          // Never under a revision: /workspace/file reads what is on disk NOW,
+          // which under a commit's name would be unrelated current code.
+          if (!spec && d.status !== "deleted" && (d.binary || !d.diff.trim()) && autoSwitched.current !== target.abs) {
             autoSwitched.current = target.abs;
             setMode("file");
           }
@@ -866,7 +868,7 @@ function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
         .finally(done);
     }
     return () => { alive = false; };
-  }, [cwd, target.abs, mode]);
+  }, [cwd, target.abs, mode, spec?.commit, spec?.base]);
 
   // ---- find in file ----
   // The search surface is the whole body, so one implementation covers the
@@ -908,6 +910,20 @@ function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
     scrollToHit(bodyRef.current, range);
     return () => clearHits("wf-line");
   }, [target, mode, loading, file]);
+
+  // A remembered offset, once there is something to scroll. After the line
+  // landing above on purpose: a location that carries both was left at this
+  // offset, which is the more recent answer to where the reader was.
+  //
+  // Once per arrival: a Diff/File toggle cycles `loading`, and re-applying
+  // there would drag the reader back to where they landed rather than leave
+  // them where they have since read to.
+  const restored = useRef<FilePreviewTarget | null>(null);
+  useEffect(() => {
+    if (!scrollTop || loading || !bodyRef.current || restored.current === target) return;
+    restored.current = target;
+    bodyRef.current.scrollTop = scrollTop;
+  }, [scrollTop, loading, target]);
 
   // Wraps at both ends — a search that stops dead at the last match sends you
   // back to the box to retype what you already typed.
@@ -1130,7 +1146,29 @@ function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
             ? <div className="wf-empty">This file has been deleted — there's nothing left on disk to show.</div>
             : diff.binary
               ? <div className="wf-empty">Binary file — there's nothing to diff. Switch to File to preview or download it.</div>
-              : <UnifiedDiff diff={diff.diff} path={target.path} truncated={diff.truncated} />
+              : spec && !diff.diff.trim()
+                ? <div className="wf-empty">This revision didn't change this file.</div>
+                : <UnifiedDiff diff={diff.diff} path={target.path} truncated={diff.truncated}
+                    picked={review ? picked : undefined}
+                    onPick={review ? (a) => setPicked((p) => (p && p.side === a.side && p.line === a.line ? null : a)) : undefined}
+                    renderComments={review ? (a) => {
+                      const saved = review.comments.get(anchorKey(a)) ?? [];
+                      const writing = picked && picked.side === a.side && picked.line === a.line;
+                      if (!saved.length && !writing) return null;
+                      return (
+                        <>
+                          {saved.map((c) => (
+                            <SavedComment key={c.id} comment={c} onDelete={() => review.onDelete(c.id!)} />
+                          ))}
+                          {writing && (
+                            <CommentComposer anchor={a} path={target.path}
+                              onCancel={() => setPicked(null)}
+                              onAdd={(body) => { review.onAdd(a, body); setPicked(null); }}
+                              onAskFix={review.onAskFix && ((intent) => review.onAskFix!(intent, a))} />
+                          )}
+                        </>
+                      );
+                    } : undefined} />
         )}
         {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} codeRef={codeRef} />}
         {!err && !loading && mode === "render" && file && (
