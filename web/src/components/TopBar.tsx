@@ -4,7 +4,7 @@ import { ActionMenu } from "./ActionMenu.tsx";
 import { PendingPermissions } from "./PendingPermissions.tsx";
 import { basename, dirname } from "../lib/format.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
-import { IconClock, IconPlus, IconDots, IconPanel, IconSearch } from "../lib/icons.tsx";
+import { IconClock, IconPlus, IconDots, IconPanel, IconReview, IconSearch } from "../lib/icons.tsx";
 
 // The crumb answers one question — where are you — and nothing else (§1.4).
 // The folder's parents are muted, its own name is ink, the session title trails
@@ -52,11 +52,21 @@ export function TopBar({ onPanel, onPicker, findOpen, onFind }: {
         aria-pressed={findOpen} onClick={onFind}><IconSearch /></button>
       <button className="icon-btn" title="Conversation menu" onClick={() => setMenu((v) => !v)}><IconDots /></button>
       <button className="icon-btn" title="New chat" onClick={() => { if (s.agentReady) s.newSession(); }}><IconPlus /></button>
+      {/* Beside the files button because both are about the folder rather than
+          the conversation, and pressed-in like it: Review is a place you are,
+          not an action. */}
+      <button className={"icon-btn review-btn" + (s.workspace === "review" ? " on" : "")} title="Review"
+        aria-label="Review" aria-pressed={s.workspace === "review"}
+        onClick={() => s.setWorkspace(s.workspace === "review" ? "agent" : "review")}><IconReview /></button>
       {/* Last, against the edge the panel it opens slides out from — the same
           place every editor puts its right-panel toggle, and the glyph is that
-          toggle's own. */}
-      <button className={"icon-btn files-btn" + (s.filesOpen ? " on" : "")} title="Files and changes"
-        aria-pressed={s.filesOpen} onClick={s.toggleFiles}><IconPanel /></button>
+          toggle's own. Gone in Review, where the panel is unmounted: the button
+          would still flip `filesOpen` and hand the Agent workspace back a state
+          it was never left in. */}
+      {s.workspace === "agent" && (
+        <button className={"icon-btn files-btn" + (s.filesOpen ? " on" : "")} title="Files and changes"
+          aria-pressed={s.filesOpen} onClick={s.toggleFiles}><IconPanel /></button>
+      )}
       <ActionMenu open={menu} onClose={() => setMenu(false)} />
     </header>
   );
