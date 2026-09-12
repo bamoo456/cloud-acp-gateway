@@ -3,8 +3,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ChangesResult, CommitEntry, FileDiffResult, ReviewComment } from "../lib/api.ts";
 
-// A file row, not a folder row: every list in the panel is a folder tree now,
-// so ".wf-row" also matches the folder headers the tree draws.
+// A file row, not a folder row: the changed files are a folder tree, so
+// ".wf-row" also matches the folder headers the tree draws.
 const FILE_ROW = "button.wf-row:not(.wf-dir-row)";
 
 const flush = async () => {
@@ -40,19 +40,24 @@ const DIFF: FileDiffResult = {
   diff: ["@@ -404,3 +404,4 @@", " keep", "-old line", "+new line"].join("\n"),
 };
 
-describe("ReviewPanel", () => {
+describe("review workspace", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
   let getCommits: ReturnType<typeof vi.fn>;
   let getWorkspaceChanges: ReturnType<typeof vi.fn>;
   let getFileDiff: ReturnType<typeof vi.fn>;
+  let getFilePreview: ReturnType<typeof vi.fn>;
   let getReviewDraft: ReturnType<typeof vi.fn>;
   let saveReviewDraft: ReturnType<typeof vi.fn>;
   let sendPrompt: ReturnType<typeof vi.fn>;
+  let Harness: React.FunctionComponent<{ active?: boolean }>;
 
   beforeEach(() => {
     vi.resetModules();
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "token":"t","defaultAgent":"claude",
+      "agents":[{"name":"claude","cwd":"/repo"}],"fsRoot":"/"}</script>`;
     container = document.createElement("div");
     document.body.appendChild(container);
 
@@ -61,18 +66,18 @@ describe("ReviewPanel", () => {
     });
     getWorkspaceChanges = vi.fn().mockResolvedValue(CHANGES);
     getFileDiff = vi.fn().mockResolvedValue(DIFF);
+    getFilePreview = vi.fn().mockResolvedValue({
+      abs: "/repo/src/workspace.ts", path: "src/workspace.ts", kind: "text", size: 12, text: "on disk",
+    });
     getReviewDraft = vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true });
     saveReviewDraft = vi.fn().mockResolvedValue(true);
     sendPrompt = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("../lib/api.ts", () => ({
-      getCommits, getWorkspaceChanges, getFileDiff, getReviewDraft, saveReviewDraft,
-    }));
-    vi.doMock("../store/store.ts", () => ({
-      useStore: (pick: (s: unknown) => unknown) =>
-        // filePreview/clearFilePreview: the panel has one viewer pane, and this
-        // component gives it up when a file is opened from anywhere else.
-        pick({ sendPrompt, agentReady: true, closeFiles: vi.fn(), filePreview: null, clearFilePreview: vi.fn() }),
+      getCommits, getWorkspaceChanges, getFileDiff, getFilePreview, getReviewDraft, saveReviewDraft,
+      // The viewer builds a download link as it renders, so this one is read
+      // even by a test that never opens a file.
+      rawFileUrl: () => "/raw",
     }));
   });
 
@@ -83,29 +88,39 @@ describe("ReviewPanel", () => {
     }
     document.body.innerHTML = "";
     vi.doUnmock("../lib/api.ts");
-    vi.doUnmock("../store/store.ts");
   });
 
-  async function render(onCount = vi.fn()) {
-    const { ReviewPanel } = await import("./ReviewPanel.tsx");
+  // The real store, not a stand-in: the canvas reads the location
+  // `openFilePreview` writes, and which of the two slots it writes is decided by
+  // the workspace being in Review. A mocked store cannot do that round trip.
+  async function setup(seed: Record<string, unknown> = {}) {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      cwd: "/repo", workspace: "review", agentReady: true, sendPrompt, ...seed,
+    } as never);
+    const { useReviewSession, ReviewLeft, ReviewCanvas } = await import("./ReviewWorkspace.tsx");
+    // The two columns are siblings around `.content`, sharing one hook that
+    // App holds — this is that shape, minus the conversation between them.
+    Harness = ({ active = true }) => {
+      const rv = useReviewSession("/repo", active);
+      return React.createElement(React.Fragment, null,
+        React.createElement(ReviewLeft, { rv }),
+        React.createElement(ReviewCanvas, { rv }));
+    };
     await act(async () => {
       root = createRoot(container);
-      root.render(React.createElement(ReviewPanel, { cwd: "/repo", onCount }));
+      root.render(React.createElement(Harness, { active: true }));
     });
     await act(async () => { await flush(); });
-    return onCount;
+    return useStore;
   }
 
-  // Re-render in place with new keys: refreshKey is every reason to re-read the
-  // checkout (a turn ending, Refresh, opening the panel), reloadKey is Refresh
-  // alone.
-  async function bump(keys: { refreshKey?: number; reloadKey?: number }) {
-    const { ReviewPanel } = await import("./ReviewPanel.tsx");
-    await act(async () => {
-      root?.render(React.createElement(ReviewPanel, { cwd: "/repo", ...keys, onCount: vi.fn() }));
-    });
+  // The workspace leaving and returning to the screen. Both columns stay
+  // mounted either way — the hook lives in App, which outlives the switch.
+  const setActive = async (active: boolean) => {
+    await act(async () => { root?.render(React.createElement(Harness, { active })); });
     await act(async () => { await flush(); });
-  }
+  };
 
   const click = async (el: Element | null | undefined) => {
     await act(async () => { el?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
@@ -114,22 +129,26 @@ describe("ReviewPanel", () => {
 
   const chip = (label: string) =>
     [...container.querySelectorAll<HTMLButtonElement>(".rv-chip")].find((b) => b.textContent === label);
+  const button = (label: string) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent === label);
+  const refresh = () => container.querySelector<HTMLButtonElement>('.rv-bar button[title="Refresh"]');
   const rows = () => [...container.querySelectorAll<HTMLElement>(".udiff-row")];
 
   test("opens on the working tree — the scope that needs no picking", async () => {
-    await render();
+    await setup();
     expect(chip("Working")?.className).toContain("on");
-    // No revision parameter: the working tree is what the panel has always shown.
+    // No revision parameter: the working tree is what Review has always shown.
     expect(getWorkspaceChanges).toHaveBeenCalledWith("/repo", null);
-    // The folder is a row of its own, with the file nested under it — the
-    // second line each row used to carry the path on is gone.
-    expect(container.querySelector("button.wf-dir-row .wf-nm")?.textContent).toBe("src");
-    expect(container.querySelector(FILE_ROW + " .wf-nm")?.textContent).toBe("workspace.ts");
-    expect(container.querySelector(".wf-dir")).toBeNull();
+    // The scope chips are the canvas's; the files are the left column's.
+    expect(container.querySelector("main.canvas .rv-scope")).not.toBeNull();
+    expect(container.querySelector("aside.rv-left " + FILE_ROW + " .wf-nm")?.textContent).toBe("workspace.ts");
+    expect(container.querySelector("aside.rv-left button.wf-dir-row .wf-nm")?.textContent).toBe("src");
+    // Nothing open yet, so the canvas says what to do rather than nothing.
+    expect(container.querySelector("main.canvas")?.textContent).toContain("Pick a changed file");
   });
 
   test("a folder row folds its files away, and back", async () => {
-    await render();
+    await setup();
     const folder = container.querySelector<HTMLButtonElement>("button.wf-dir-row")!;
     expect(folder.getAttribute("aria-expanded")).toBe("true");
 
@@ -142,37 +161,51 @@ describe("ReviewPanel", () => {
     expect(container.querySelector(FILE_ROW + " .wf-nm")?.textContent).toBe("workspace.ts");
   });
 
-  test("Commits lists the log, and picking one re-asks for that revision", async () => {
-    await render();
+  test("a changed file opens in the canvas, and nowhere else", async () => {
+    // The single-viewer rule: the canvas is the Review workspace's one viewer,
+    // and the Agent workspace's slot must not have been touched on the way.
+    const useStore = await setup();
+    await click(container.querySelector(FILE_ROW));
+    expect(container.querySelector("main.canvas .udiff")).not.toBeNull();
+    expect(container.querySelector("main.canvas .rv-title")?.textContent).toBe("src/workspace.ts");
+    expect(useStore.getState().reviewPreview?.abs).toBe("/repo/src/workspace.ts");
+    expect(useStore.getState().filePreview).toBeNull();
+    expect(useStore.getState().filesOpen).toBe(false);
+  });
+
+  test("Commits lists the log in the canvas, and picking one re-asks for that revision", async () => {
+    await setup();
     await click(chip("Commits"));
-    expect(container.textContent).toContain("feat: the thing");
+    expect(container.querySelector("main.canvas")?.textContent).toContain("feat: the thing");
     // A merge reports no counts rather than zeroes.
     expect(container.textContent).toContain("Merge pull request #97");
+    // The left column has nothing to list until a revision is chosen.
+    expect(container.querySelector("aside.rv-left")?.textContent).toContain("Pick a commit");
 
     await click([...container.querySelectorAll(".rv-commit")][0]);
     expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { commit: "aaaa111bbbb" });
   });
 
   test("a refresh re-reads the log — an agent's commit lands mid-review", async () => {
-    await render();
+    await setup();
     await click(chip("Commits"));
     expect(container.textContent).not.toContain("fix: the other thing");
 
     getCommits.mockResolvedValue({
       repo: "/repo", commits: [NEW_COMMIT, ...COMMITS], branch: "feature", defaultBase: "origin/main",
     });
-    await bump({ refreshKey: 1 });
+    await click(refresh());
     expect(container.textContent).toContain("fix: the other thing");
   });
 
   test("a refresh keeps the revision and the file being read", async () => {
-    await render();
+    await setup();
     await click(chip("Commits"));
     await click([...container.querySelectorAll(".rv-commit")][0]);
     await click(container.querySelector(FILE_ROW));
     expect(rows().length).toBeGreaterThan(0);
 
-    await bump({ refreshKey: 1 });
+    await click(refresh());
     // Still that commit, and still that file: a refresh updates what is on
     // screen, it doesn't send you back to the list.
     expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { commit: "aaaa111bbbb" });
@@ -181,7 +214,7 @@ describe("ReviewPanel", () => {
   });
 
   test("a refresh doesn't overwrite a base someone typed", async () => {
-    await render();
+    await setup();
     await click(chip("Branch"));
     await click(container.querySelector(".rv-ref"));
     const input = container.querySelector("input");
@@ -200,43 +233,75 @@ describe("ReviewPanel", () => {
     await act(async () => { await flush(); });
     expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { base: "develop" });
 
-    await bump({ refreshKey: 1 });
+    await click(refresh());
     expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { base: "develop" });
   });
 
   test("Refresh re-reads the open file's diff; a turn ending leaves it alone", async () => {
-    await render();
+    const { makeSession } = await import("../store/reducers.ts");
+    const useStore = await setup({
+      activeId: "s1", sessions: { s1: { ...makeSession("s1"), working: true } },
+    });
     await click(container.querySelector(FILE_ROW));
     expect(getFileDiff).toHaveBeenCalledTimes(1);
 
     // A turn ending refreshes the lists around the diff, not the diff itself:
     // it could be redrawn under a comment being written.
-    await bump({ refreshKey: 1 });
+    await act(async () => {
+      const st = useStore.getState();
+      useStore.setState({ sessions: { s1: { ...st.sessions.s1, working: false } } });
+    });
+    await act(async () => { await flush(); });
+    expect(getWorkspaceChanges).toHaveBeenCalledTimes(2);
     expect(getFileDiff).toHaveBeenCalledTimes(1);
     expect(rows().length).toBeGreaterThan(0);
 
     // Refresh is an explicit ask, and takes the diff with it.
-    await bump({ refreshKey: 1, reloadKey: 1 });
+    await click(refresh());
     expect(getFileDiff).toHaveBeenCalledTimes(2);
     expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/workspace.ts", null);
-    // Still readable throughout — a reload swaps the diff, it doesn't blank it.
     expect(rows().length).toBeGreaterThan(0);
   });
 
+  test("going back to the conversation leaves the review where it was", async () => {
+    // Nothing is read while the Agent workspace is up — the file panel is
+    // already asking git the same questions over there — and nothing is
+    // dropped either: the revision and the file come back as they were.
+    const useStore = await setup();
+    await click(chip("Commits"));
+    await click([...container.querySelectorAll(".rv-commit")][0]);
+    await click(container.querySelector(FILE_ROW));
+    const reads = getWorkspaceChanges.mock.calls.length;
+    const logs = getCommits.mock.calls.length;
+
+    await setActive(false);
+    expect(getWorkspaceChanges.mock.calls.length).toBe(reads);
+    expect(getCommits.mock.calls.length).toBe(logs);
+    expect(useStore.getState().reviewPreview?.abs).toBe("/repo/src/workspace.ts");
+
+    await setActive(true);
+    expect(chip("Commits")?.className).toContain("on");
+    expect(container.querySelector(".rv-ref")?.textContent).toContain("aaaa111");
+    expect(container.querySelector("main.canvas .rv-title")?.textContent).toBe("src/workspace.ts");
+    // And it re-reads on the way in: the agent may have been working while you
+    // were answering it.
+    expect(getWorkspaceChanges.mock.calls.length).toBeGreaterThan(reads);
+  });
+
   test("Branch defaults to the base the gateway resolved", async () => {
-    await render();
+    await setup();
     await click(chip("Branch"));
     expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { base: "origin/main" });
     expect(container.querySelector(".rv-ref")?.textContent).toContain("origin/main");
   });
 
   test("every diff row is a comment target, and adding one saves the draft", async () => {
-    const onCount = await render();
+    await setup();
     await click(container.querySelector(FILE_ROW));
     expect(getFileDiff).toHaveBeenCalledWith("/repo", "/repo/src/workspace.ts", null);
 
-    // The whole row, not a hover-only affordance: this panel is driven from a
-    // phone, where there is no hover to reveal anything.
+    // The whole row, not a hover-only affordance: this is driven from a phone,
+    // where there is no hover to reveal anything.
     const added = rows().find((r) => r.className.includes("add"));
     expect(added?.tagName).toBe("BUTTON");
     await click(added);
@@ -248,7 +313,7 @@ describe("ReviewPanel", () => {
       setter.call(box!, "this leaks");
       box!.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await click([...container.querySelectorAll("button")].find((b) => b.textContent === "Add comment"));
+    await click(button("Add comment"));
 
     expect(saveReviewDraft).toHaveBeenCalledTimes(1);
     const [, spec, saved] = saveReviewDraft.mock.calls[0] as [string, unknown, ReviewComment[]];
@@ -257,29 +322,24 @@ describe("ReviewPanel", () => {
     expect(saved[0]).toMatchObject({
       path: "src/workspace.ts", side: "new", line: 405, code: "new line", body: "this leaks",
     });
-    // The badge on the tab is the only thing that says an unsent review exists
-    // while you are looking at something else.
-    expect(onCount).toHaveBeenLastCalledWith(1);
+    // And the file's row carries what was written against it.
+    expect(container.querySelector("aside.rv-left .rv-badge")?.textContent).toBe("1");
   });
 
   test("Ask on a diff line captures that line, its side and the scope for the composer", async () => {
-    const setAskFix = vi.fn();
-    const closeFiles = vi.fn();
-    vi.doMock("../store/store.ts", () => ({
-      useStore: (pick: (s: unknown) => unknown) => pick({
-        sendPrompt, agentReady: true, closeFiles, filePreview: null, clearFilePreview: vi.fn(),
-        // The session's own agent, not the connection's: they differ right after a switch.
-        activeId: "s1", agentName: "codex", sessions: { s1: { agentName: "claude" } }, setAskFix,
-        // Mid-turn on purpose: Ask is not the Send button, the composer queues it.
-        busySessionIds: { s1: true },
-      }),
-    }));
-    await render();
+    const { makeSession } = await import("../store/reducers.ts");
+    const useStore = await setup({
+      // The session's own agent, not the connection's: they differ right after a switch.
+      agentName: "codex",
+      activeId: "s1", sessions: { s1: { ...makeSession("s1"), agentName: "claude" } },
+      // Mid-turn on purpose: Ask is not the Send button, the composer queues it.
+      busySessionIds: { s1: true },
+    });
     await click(container.querySelector(FILE_ROW));
     await click(rows().find((r) => r.className.includes("del")));
     await click([...container.querySelectorAll(".rv-acts button")].find((b) => b.textContent === "Ask"));
 
-    expect(setAskFix).toHaveBeenCalledWith({
+    expect(useStore.getState().askFix).toEqual({
       intent: "ask", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null, label: undefined,
       path: "src/workspace.ts", side: "old", line: 405, code: "old line",
     });
@@ -287,23 +347,15 @@ describe("ReviewPanel", () => {
     expect(saveReviewDraft).not.toHaveBeenCalled();
     expect(getFileDiff).toHaveBeenCalledTimes(1);
     expect(container.querySelector(".rv-cmt textarea")).toBeTruthy();
-    // jsdom is below the column breakpoint: the sheet gets out of the way.
-    expect(closeFiles).toHaveBeenCalled();
   });
 
   test("Ask/Fix are not offered on a saved conversation that has not been resumed", async () => {
     // sendPromptTo refuses a view-only session, so the buttons would only bounce.
-    vi.doMock("../store/store.ts", () => ({
-      useStore: (pick: (s: unknown) => unknown) => pick({
-        sendPrompt, agentReady: true, closeFiles: vi.fn(), filePreview: null, clearFilePreview: vi.fn(),
-        activeId: "s1", agentName: "claude", sessions: { s1: { agentName: "claude", viewOnly: true } }, setAskFix: vi.fn(),
-        busySessionIds: {},
-      }),
-    }));
-    await render();
+    const { makeSession } = await import("../store/reducers.ts");
+    await setup({ activeId: "s1", sessions: { s1: { ...makeSession("s1"), viewOnly: true } } });
     await click(container.querySelector(FILE_ROW));
     await click(rows().find((r) => r.className.includes("del")));
-    const acts = [...container.querySelectorAll(".rv-acts button")].map((b) => b.textContent);
+    const acts = [...container.querySelectorAll(".rv-cmt .rv-acts button")].map((b) => b.textContent);
     expect(acts).not.toContain("Ask");
     expect(acts).toContain("Add comment");
   });
@@ -311,10 +363,40 @@ describe("ReviewPanel", () => {
   test("a comment on a deleted line is anchored to the old side", async () => {
     // The two numbering schemes are not interchangeable — storing this against
     // the new side would point at unrelated code.
-    await render();
+    await setup();
     await click(container.querySelector(FILE_ROW));
     await click(rows().find((r) => r.className.includes("del")));
     expect(container.querySelector(".rv-anchor")?.textContent).toContain("removed");
+  });
+
+  test("a file a revision didn't touch says so, instead of showing today's file", async () => {
+    // The viewer falls back to the file on disk when a diff is empty, which
+    // under a commit's name would be unrelated current code.
+    getFileDiff.mockResolvedValue({ ...DIFF, diff: "" });
+    await setup();
+    await click(chip("Commits"));
+    await click([...container.querySelectorAll(".rv-commit")][0]);
+    await click(container.querySelector(FILE_ROW));
+
+    expect(container.textContent).toContain("This revision didn't change this file");
+    expect(getFilePreview).not.toHaveBeenCalled();
+  });
+
+  test("a file opened from the conversation is read as itself, not as the revision's", async () => {
+    // A CodeRef names a line in the working file. Under a commit's scope the
+    // canvas must still show it as that file — and offer no comment layer,
+    // since a line the commit never had cannot be anchored in its draft.
+    const useStore = await setup();
+    await click(chip("Commits"));
+    await click([...container.querySelectorAll(".rv-commit")][0]);
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/gateway.ts", path: "src/gateway.ts", mode: "diff" });
+    });
+    await act(async () => { await flush(); });
+
+    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/gateway.ts", null);
+    expect(rows().length).toBeGreaterThan(0);
+    expect(rows().some((r) => r.tagName === "BUTTON")).toBe(false);
   });
 
   test("Send builds one message from the whole draft and clears it", async () => {
@@ -322,8 +404,8 @@ describe("ReviewPanel", () => {
       scope: "working", persisted: true, counts: { working: 1 },
       comments: [{ id: "x1", path: "src/workspace.ts", side: "new", line: 405, code: "+new line", body: "this leaks" }],
     });
-    await render();
-    await click([...container.querySelectorAll("button")].find((b) => b.textContent === "Send review"));
+    await setup();
+    await click(button("Send review"));
 
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     const text = sendPrompt.mock.calls[0][0] as string;
@@ -336,17 +418,28 @@ describe("ReviewPanel", () => {
   });
 
   test("an empty review offers Approve instead of Send", async () => {
-    await render();
-    const btn = [...container.querySelectorAll("button")].find((b) => b.textContent === "Approve");
+    await setup();
+    const btn = button("Approve");
     expect(btn).toBeTruthy();
     await click(btn);
     expect(sendPrompt.mock.calls[0][0]).toBe("Reviewed the working tree — looks good to me, no comments.");
   });
 
+  test("Send is disabled while the session has a turn in flight", async () => {
+    // sendPrompt returns without sending when the active session is busy, and
+    // nothing rejects — so an enabled button here would resolve, clear the
+    // draft, and lose the whole review to a no-op.
+    const { makeSession } = await import("../store/reducers.ts");
+    await setup({
+      activeId: "s1", sessions: { s1: makeSession("s1") }, busySessionIds: { s1: true },
+    });
+    expect(button("Approve")?.disabled).toBe(true);
+  });
+
   test("a draft the gateway can't store says so rather than losing it quietly", async () => {
     getReviewDraft.mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: false });
     saveReviewDraft.mockResolvedValue(false);
-    await render();
+    await setup();
     await click(container.querySelector(FILE_ROW));
     await click(rows().find((r) => r.className.includes("add")));
     const box = container.querySelector<HTMLTextAreaElement>(".rv-cmt textarea")!;
@@ -354,14 +447,13 @@ describe("ReviewPanel", () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box, "hm");
       box.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await click([...container.querySelectorAll("button")].find((b) => b.textContent === "Add comment"));
-    await click(container.querySelector(".icon-btn"));  // back to the file list
+    await click(button("Add comment"));
     expect(container.querySelector(".rv-warn")?.textContent).toContain("not saved");
   });
 
   test("a folder that isn't a checkout says there's nothing to review", async () => {
     getWorkspaceChanges.mockResolvedValue({ repo: null, files: [], truncated: false, reason: "not-a-repo" });
-    await render();
+    await setup();
     expect(container.textContent).toContain("isn't a git checkout");
     // No footer: there is nothing to send, and nothing to approve.
     expect(container.querySelector(".rv-foot")).toBe(null);
@@ -369,7 +461,7 @@ describe("ReviewPanel", () => {
 
   test("a base ref git doesn't know is named, not rendered as an empty diff", async () => {
     getWorkspaceChanges.mockResolvedValue({ repo: "/repo", files: [], truncated: false, reason: "bad-revision" });
-    await render();
+    await setup();
     await click(chip("Branch"));
     expect(container.textContent).toContain("git doesn't know");
     expect(container.textContent).toContain("origin/main");
@@ -380,7 +472,7 @@ describe("ReviewPanel", () => {
 
   test("a base with no common ancestor points at the fetch depth, not the ref", async () => {
     getWorkspaceChanges.mockResolvedValue({ repo: "/repo", files: [], truncated: false, reason: "no-merge-base" });
-    await render();
+    await setup();
     await click(chip("Branch"));
     expect(container.textContent).toContain("too shallow");
     expect(container.textContent).toContain("git fetch --unshallow");
@@ -392,48 +484,8 @@ describe("ReviewPanel", () => {
     // changes() returns repo: root with reason "status-failed" — non-null repo
     // and no files, which used to land in the "nothing uncommitted" branch.
     getWorkspaceChanges.mockResolvedValue({ repo: "/repo", files: [], truncated: false, reason: "status-failed" });
-    await render();
+    await setup();
     expect(container.textContent).toContain("git couldn't read");
     expect(container.textContent).not.toContain("Nothing uncommitted");
-  });
-});
-
-describe("ReviewPanel · sending mid-turn", () => {
-  test("Send is disabled while the session has a turn in flight", async () => {
-    // sendPrompt returns without sending when the active session is busy, and
-    // nothing rejects — so an enabled button here would resolve, clear the
-    // draft, and lose the whole review to a no-op.
-    vi.resetModules();
-    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const sendPrompt = vi.fn().mockResolvedValue(undefined);
-    vi.doMock("../lib/api.ts", () => ({
-      getCommits: vi.fn().mockResolvedValue({ repo: "/repo", commits: [] }),
-      getWorkspaceChanges: vi.fn().mockResolvedValue(CHANGES),
-      getFileDiff: vi.fn().mockResolvedValue(DIFF),
-      getReviewDraft: vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true }),
-      saveReviewDraft: vi.fn().mockResolvedValue(true),
-    }));
-    vi.doMock("../store/store.ts", () => ({
-      useStore: (pick: (s: unknown) => unknown) => pick({
-        sendPrompt, agentReady: true, closeFiles: vi.fn(),
-        activeId: "s1", sessions: {}, busySessionIds: { s1: true },
-      }),
-    }));
-    const { ReviewPanel } = await import("./ReviewPanel.tsx");
-    let root: Root | null = null;
-    await act(async () => {
-      root = createRoot(container);
-      root.render(React.createElement(ReviewPanel, { cwd: "/repo", onCount: vi.fn() }));
-    });
-    await act(async () => { await flush(); });
-
-    const btn = [...container.querySelectorAll("button")].find((b) => b.textContent === "Approve");
-    expect(btn?.disabled).toBe(true);
-    act(() => root?.unmount());
-    document.body.innerHTML = "";
-    vi.doUnmock("../lib/api.ts");
-    vi.doUnmock("../store/store.ts");
   });
 });

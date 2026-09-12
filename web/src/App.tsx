@@ -4,6 +4,7 @@ import { getRunning, getInboxPending, getUsageLimits } from "./lib/api.ts";
 import { TopBar } from "./components/TopBar.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { FilePanel } from "./components/FilePanel.tsx";
+import { useReviewSession, ReviewLeft, ReviewCanvas } from "./components/ReviewWorkspace.tsx";
 import { Thread } from "./components/Thread.tsx";
 import { Composer } from "./components/Composer.tsx";
 import { BranchWindow } from "./components/BranchWindow.tsx";
@@ -27,7 +28,7 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 // gracefully; no test fails).
 import { Terminal } from "./components/Terminal.tsx";
 import { UsageStrip } from "./components/UsageStrip.tsx";
-import { IconBack, IconTerminal } from "./lib/icons.tsx";
+import { IconTerminal } from "./lib/icons.tsx";
 import { applyUnread } from "./lib/favicon.ts";
 import { isDesktopSidebarWidth } from "./lib/sidebarWidth.ts";
 import type { AgentRef } from "./types.ts";
@@ -44,11 +45,15 @@ export function App() {
   const conn = useStore((s) => s.conn);
   const review = useStore((s) => s.workspace === "review");
   const reviewSheet = useStore((s) => s.reviewSheet);
-  const setWorkspace = useStore((s) => s.setWorkspace);
   // Machine-layer facts, in one row along the bottom edge (§1.4): the
   // transport, the folder's diffstat, the context window, the account's quota
   // and the terminal. Not the agent — the crumb and the dock already name it.
   const changeStat = useStore((s) => s.changeStat);
+  // The review's own state — scope, the changed files, the unsent draft. Here
+  // rather than in either column because they are siblings, not one inside the
+  // other, and because leaving for the conversation must not throw a review
+  // away: App is the one component that outlives the switch.
+  const rv = useReviewSession(sess?.cwd || cwd, review);
   const [panel, setPanel] = useState(false);
   const [picker, setPicker] = useState(false);
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
@@ -226,15 +231,8 @@ export function App() {
       <div className="app-row">
         <Sidebar key="sidebar" open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)}
           focusSearch={searchFocus} />
-        {review && <aside key="rv-left" className={"rv-left" + (reviewSheet === "files" ? " open" : "")} />}
-        {review && (
-          <main key="canvas" className="canvas">
-            <div className="rv-bar">
-              <button className="icon-btn" title="Back to conversation" aria-label="Back to conversation"
-                onClick={() => setWorkspace("agent")}><IconBack /></button>
-            </div>
-          </main>
-        )}
+        {review && <ReviewLeft key="rv-left" rv={rv} />}
+        {review && <ReviewCanvas key="canvas" rv={rv} />}
         <div key="content" className={"content" + (review ? " comp" : "")
           + (review && reviewSheet === "companion" ? " open" : "")}>
           {!review && topBar}

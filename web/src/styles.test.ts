@@ -96,6 +96,14 @@ describe("global styles", () => {
     expect(review).toMatch(/@media \(max-width: 859px\)[\s\S]*?\.rv-left\.open, \.content\.comp\.open \{[^}]*border-radius: 0/);
   });
 
+  test("one .rv-bar rule, for both bars that use it", () => {
+    // The canvas header and the draft list's header are the same bar in two
+    // columns. A second definition of it wins on source order and silently
+    // re-styles the other one.
+    expect(styles.match(/^\s*\.rv-bar \{/gm)?.length).toBe(1);
+    expect(cssRule(".rv-bar")).toMatch(/min-height: var\(--crumb-h\)/);
+  });
+
   test("the expanded files panel fills the window instead of pinning left", () => {
     // A fixed box with inset:0 but the column rule's width still applied is
     // over-constrained: `right` is dropped and the panel lands 440px wide

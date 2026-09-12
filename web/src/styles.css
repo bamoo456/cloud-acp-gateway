@@ -1855,10 +1855,12 @@
     flex: 0 0 auto; color: var(--muted);
     font-family: var(--mono); font-size: 11.5px;
   }
-  /* back + what you are looking at, for the two screens that take over the mode */
+  /* back + what you are looking at: the canvas's own header, and the draft
+     list's. As tall as the crumb above it, so the two read as one bar across
+     the three columns. */
   .rv-bar {
-    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
-    padding: 2px 8px 8px; border-bottom: 1px solid var(--border);
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px; min-height: var(--crumb-h);
+    padding: 2px 8px; border-bottom: 1px solid var(--border);
   }
   .rv-bar .icon-btn svg { width: 18px; height: 18px; }
   .rv-title {
@@ -2373,11 +2375,6 @@
   /* The canvas is the one surface that is never a sheet — it is what the sheets
      overlay — so it takes the row at every width. */
   .canvas { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
-  .rv-bar {
-    flex: 0 0 auto; display: flex; align-items: center; gap: 4px; min-height: var(--crumb-h);
-    padding: 0 8px; border-bottom: 1px solid var(--border);
-  }
-
   @media (max-width: 859px) {
     .rv-left.open, .content.comp.open {
       top: calc(var(--crumb-h) + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0;

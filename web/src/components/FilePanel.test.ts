@@ -39,6 +39,7 @@ describe("FilePanel", () => {
   let getWorkspaceOutputs: ReturnType<typeof vi.fn>;
   let getHtmlRender: ReturnType<typeof vi.fn>;
   let saveFilePreview: ReturnType<typeof vi.fn>;
+  let getReviewDraft: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -71,6 +72,7 @@ describe("FilePanel", () => {
     saveFilePreview = vi.fn().mockResolvedValue({
       ok: true, size: 21, modifiedAt: new Date().toISOString(), hash: "after",
     });
+    getReviewDraft = vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true });
     vi.doMock("../lib/api.ts", () => ({
       getWorkspaceChanges,
       getFileDiff,
@@ -84,12 +86,10 @@ describe("FilePanel", () => {
       // composer's folder picker uses.
       listDir: vi.fn().mockResolvedValue({ root: "/", path: "/repo", parent: "/", dirs: [{ name: "other" }] }),
       rawFileUrl: (cwd: string, p: string) => `/workspace/raw?cwd=${cwd}&path=${p}`,
-      // Review mode's surface. The panel reads the draft counts alongside the
-      // change list (that is what badges the tab), so these have to exist even
-      // for the tests that never open that mode.
-      getReviewDraft: vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true }),
-      saveReviewDraft: vi.fn().mockResolvedValue(true),
-      getCommits: vi.fn().mockResolvedValue({ repo: "/repo", commits: [] }),
+      // The review draft's counts, read alongside the change list because that
+      // is what badges the Review tab — needed even by the tests that never
+      // press it.
+      getReviewDraft,
       revParam: () => "",
     }));
   });
@@ -207,7 +207,7 @@ describe("FilePanel", () => {
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
 
-    expect(getFileDiff).toHaveBeenCalledWith("/repo", "/repo/src/gateway.ts");
+    expect(getFileDiff).toHaveBeenCalledWith("/repo", "/repo/src/gateway.ts", undefined);
     expect(container.querySelector(".wf-title")?.textContent).toBe("src/gateway.ts");
     expect(container.querySelector(".udiff-row.add .code")?.textContent).toBe("new line");
     expect(container.querySelector(".udiff-row.del .code")?.textContent).toBe("old line");
@@ -827,7 +827,7 @@ describe("FilePanel", () => {
     // The next file is one click away, from the same list.
     await act(async () => { rows()[1].dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
-    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/gateway.ts");
+    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/gateway.ts", undefined);
     expect(rows()[1].classList.contains("on")).toBe(true);
     expect(rows()[0].classList.contains("on")).toBe(false);
 
@@ -888,62 +888,27 @@ describe("FilePanel", () => {
     vi.unstubAllGlobals();
   });
 
-  test("a Review file opens beside its list too, and gives the width back", async () => {
-    // Review draws its own viewer — the diff with comments written on it — so
-    // it reports the open file up rather than going through filePreview. The
-    // panel must widen for it all the same.
-    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
-      matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn(),
-    }));
-    vi.stubGlobal("innerWidth", 1600);
+  test("the Review tab is a door out of the panel, not a mode inside it", async () => {
+    // Review is a workspace of its own now: the tab hands the window over and
+    // the panel keeps the mode it was in, so nothing of the review is drawn in
+    // here — only the badge that says an unsent draft exists.
+    getReviewDraft.mockResolvedValue({ scope: "working", comments: [], counts: { working: 2 }, persisted: true });
     const { useStore } = await import("../store/store.ts");
     useStore.setState({ filesOpen: true, cwd: "/repo" });
     await render();
-    const panel = container.querySelector<HTMLElement>("#files")!;
-    const listWidth = parseInt(panel.style.width, 10);
-    await switchTo("Review");
 
-    const row = [...container.querySelectorAll<HTMLButtonElement>(FILE_ROW)]
-      .find((b) => b.textContent?.includes("gateway.ts"))!;
-    await act(async () => { row.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const tab = [...container.querySelectorAll<HTMLButtonElement>(".wf-switch button")]
+      .find((b) => b.textContent?.startsWith("Review"))!;
+    expect(tab.textContent).toContain("2");
+    await act(async () => { tab.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
 
-    // The tab is also the workspace's door; the panel keeps drawing Review
-    // until the workspace takes it over.
     expect(useStore.getState().workspace).toBe("review");
-    expect(container.querySelector(".wf-panes.split")).not.toBeNull();
-    expect(parseInt(panel.style.width, 10)).toBe(listWidth + 300);
-    // The scope chips are still there — the list did not go anywhere.
-    expect(container.querySelector(".wf-list .rv-scope")).not.toBeNull();
-    expect(container.querySelector(".wf-view .rv-bar")?.textContent).toContain("src/gateway.ts");
-    expect(row.classList.contains("on")).toBe(true);
-
-    // Closing it hands the width back.
-    const back = container.querySelector<HTMLButtonElement>(".wf-view .rv-bar .icon-btn")!;
-    await act(async () => { back.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
-    await act(async () => { await flush(); });
-    expect(container.querySelector(".wf-view")).toBeNull();
-    expect(parseInt(panel.style.width, 10)).toBe(listWidth);
-  });
-
-  test("with no room, a Review file still takes over — and the switch stays", async () => {
-    // jsdom reports no matchMedia, so this is the sheet: one pane. The mode
-    // switch is not the way out of a review file (FileReview's own Back is),
-    // but it must not vanish either — it is how you leave Review at all.
-    const { useStore } = await import("../store/store.ts");
-    useStore.setState({ filesOpen: true, cwd: "/repo" });
-    await render();
-    await switchTo("Review");
-
-    const row = [...container.querySelectorAll<HTMLButtonElement>(FILE_ROW)]
-      .find((b) => b.textContent?.includes("gateway.ts"))!;
-    await act(async () => { row.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
-    await act(async () => { await flush(); });
-
-    expect(container.querySelector(".wf-panes.split")).toBeNull();
-    expect(container.querySelector(".rv-bar")?.textContent).toContain("src/gateway.ts");
+    expect(tab.getAttribute("aria-selected")).toBe("false");
     expect(container.querySelector(".rv-scope")).toBeNull();
-    expect(container.querySelector(".wf-switch")).not.toBeNull();
+    expect(container.querySelector(".rv-foot")).toBeNull();
+    // Still on Session, which is where returning to the conversation leaves it.
+    expect(container.querySelector<HTMLButtonElement>(".wf-switch button")?.getAttribute("aria-selected")).toBe("true");
   });
 
   test("Project browses another folder without moving the conversation", async () => {
@@ -1017,7 +982,7 @@ describe("FilePanel", () => {
     const row = container.querySelector<HTMLButtonElement>(FILE_ROW);
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
-    expect(getFileDiff).toHaveBeenCalledWith("/repo", "/repo/reports/raven.sql");
+    expect(getFileDiff).toHaveBeenCalledWith("/repo", "/repo/reports/raven.sql", undefined);
   });
 
   test("an empty Outputs list is only empty when git agrees", async () => {
@@ -1053,7 +1018,7 @@ describe("FilePanel", () => {
     expect(row?.textContent).toContain("shot.png");
     await act(async () => { row?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await act(async () => { await flush(); });
-    expect(getFileDiff).toHaveBeenCalledWith("/repo", "/tmp/shot.png");
+    expect(getFileDiff).toHaveBeenCalledWith("/repo", "/tmp/shot.png", undefined);
   });
 
   test("a refused file explains itself instead of printing the server's JSON", async () => {
