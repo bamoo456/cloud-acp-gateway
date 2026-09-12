@@ -712,8 +712,12 @@ describe("review workspace", () => {
     });
     // The composer is gone, and the record is under the line it was written on.
     expect(container.querySelector(".rv-cmt textarea")).toBeNull();
-    expect(container.querySelector("main.canvas .udiff .rv-cmt.discussion")?.textContent)
-      .toContain("is this guarded?");
+    const card = container.querySelector<HTMLDetailsElement>("main.canvas .udiff .rv-cmt.discussion")!;
+    expect(card.textContent).toContain("is this guarded?");
+    // Collapsed to its one-line marker until somebody asks for it: a thread
+    // opened on every anchor buries the diff it is about.
+    expect(card.open).toBe(false);
+    expect(card.querySelector("summary")?.textContent).toBe("◆workspace.ts:405");
 
     // And findable without the line: a discussion reachable only from its own
     // row is one you cannot find.
