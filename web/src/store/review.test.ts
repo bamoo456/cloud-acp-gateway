@@ -89,6 +89,31 @@ describe("review workspace state", () => {
     expect(useStore.getState().reviewHistory).toEqual({ past: [], future: [] });
   });
 
+  test("each workspace keeps its own reading position across a switch", async () => {
+    const { useStore } = await import("./store.ts");
+
+    useStore.getState().setWorkspace("review");
+    useStore.getState().openFilePreview({ abs: "/repo/src/b.ts", path: "src/b.ts", mode: "diff" });
+
+    useStore.getState().setWorkspace("agent");
+    useStore.getState().openFilePreview({ abs: "/repo/src/a.ts", path: "src/a.ts", mode: "file" });
+
+    useStore.getState().setWorkspace("review");
+    // An Agent preview opened while away must not have taken the canvas with it.
+    expect(useStore.getState().reviewPreview?.path).toBe("src/b.ts");
+    expect(useStore.getState().filePreview?.path).toBe("src/a.ts");
+  });
+
+  test("a file opened in Review closes the sheet covering the canvas", async () => {
+    const { useStore } = await import("./store.ts");
+
+    useStore.getState().setWorkspace("review");
+    useStore.getState().toggleReviewSheet("files");
+    useStore.getState().openFilePreview({ abs: "/repo/src/b.ts", path: "src/b.ts", mode: "diff" });
+
+    expect(useStore.getState().reviewSheet).toBe("none");
+  });
+
   test("only one side sheet overlays the canvas at a time", async () => {
     const { useStore } = await import("./store.ts");
 

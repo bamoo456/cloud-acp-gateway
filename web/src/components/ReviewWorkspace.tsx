@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore } from "../store/store.ts";
+import { useStore, type PreviewMode, type ReviewLoc } from "../store/store.ts";
 import {
   getCommits, getWorkspaceChanges, getReviewDraft, saveReviewDraft,
   type ChangedFile, type ChangesResult, type CommitEntry, type ReviewComment, type RevSpec,
 } from "../lib/api.ts";
 import { buildReviewMessage, buildApprovalMessage } from "../lib/reviewPrompt.ts";
 import { basename, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
-import { IconBack, IconRefresh } from "../lib/icons.tsx";
+import { IconArrow, IconBack, IconChevrons, IconRefresh } from "../lib/icons.tsx";
 import { PathTree } from "./PathTree.tsx";
 import { FileView } from "./FilePanel.tsx";
 import { SavedComment, anchorKey } from "./ReviewComments.tsx";
 import { makeRangeFile } from "../lib/mentions.ts";
+import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import type { DiffAnchor } from "./UnifiedDiff.tsx";
 
 // The review workspace: read a diff, write comments against its lines, send
@@ -77,6 +78,7 @@ export function useReviewSession(cwd: string, active: boolean) {
   const open = useStore((s) => s.reviewPreview);
   const openFilePreview = useStore((s) => s.openFilePreview);
   const clearReviewPreview = useStore((s) => s.clearReviewPreview);
+  const clearReviewHistory = useStore((s) => s.clearReviewHistory);
   const working = useStore((s) => !!(s.activeId && s.sessions[s.activeId]?.working));
 
   const [scope, setScope] = useState<Scope>("working");
@@ -130,7 +132,14 @@ export function useReviewSession(cwd: string, active: boolean) {
     setScope("working");
     setCommit(null);
     setBaseRef("");
-  }, [cwd]);
+    // The canvas's location and the stacks behind it name paths in a checkout,
+    // so they go with it. Keyed on this hook's folder rather than the store's:
+    // an active session can point at a different one, and Back must not walk
+    // into a repo that is no longer on screen.
+    clearReviewPreview();
+    clearReviewHistory();
+    setShowDraft(false);
+  }, [cwd, clearReviewPreview, clearReviewHistory]);
 
   // The log, per folder and again on every refresh. Also supplies the branch
   // name and default base, so the Branch chip works without the Commits chip
@@ -155,16 +164,6 @@ export function useReviewSession(cwd: string, active: boolean) {
       .catch(() => { if (alive) setLog((l) => l ?? { commits: [] }); });
     return () => { alive = false; };
   }, [cwd, refreshKey, active]);
-
-  // Same split as the log: a new revision is a new thing to read, so the canvas
-  // and the draft view go with it — but a refresh is the revision already on
-  // screen, and closing the diff someone is mid-read of would be the workspace
-  // fighting them. Not keyed on `active`: leaving for the conversation and
-  // coming back lands on the file you left open.
-  useEffect(() => {
-    clearReviewPreview();
-    setShowDraft(false);
-  }, [cwd, specKey, clearReviewPreview]);
 
   // The file list and the draft for whatever revision is selected. One effect
   // for both: they are two halves of the same question, and a list that arrived
@@ -204,6 +203,35 @@ export function useReviewSession(cwd: string, active: boolean) {
   // Every change to the draft goes straight to the gateway. Saving on each edit
   // rather than on a timer is what makes "the phone discarded the tab"
   // survivable, and the payload is a handful of comments.
+  // A new revision is a new thing to read, so choosing one closes the file open
+  // against the old one. In the three actions that choose rather than in an
+  // effect on the revision: Back/Forward change it too, and a location coming
+  // back out of history brings its own revision with it — an effect could not
+  // tell the two apart, and would wipe what it had just restored.
+  function closeOpen() {
+    clearReviewPreview();
+    setShowDraft(false);
+  }
+
+  // The other direction: a restored location puts the header back on the
+  // revision it was read against, so the chips and the diff cannot disagree
+  // about what is being reviewed. A commit the log no longer reaches is still
+  // named by its sha — that is what identifies the location.
+  function restoreSpec(s?: RevSpec | null) {
+    if (s?.commit) {
+      const sha = s.commit;
+      setScope("commits");
+      setCommit(log?.commits.find((c) => c.sha === sha)
+        ?? { sha, shortSha: sha.slice(0, 7), author: "", date: "", subject: "" });
+    } else if (s?.base) {
+      setScope("branch");
+      setBaseRef(s.base);
+    } else {
+      setScope("working");
+      setCommit(null);
+    }
+  }
+
   function commitComments(next: ReviewComment[]) {
     setComments(next);
     // Only this scope's entry moves; the others are what the gateway last said
@@ -244,11 +272,17 @@ export function useReviewSession(cwd: string, active: boolean) {
     activeId, agentName, setAskFix,
     canSend: agentReady && !sending && !activeBusy,
     setShowDraft, setEditingBase,
-    pick: (s: Scope) => { setScope(s); if (s !== "commits") setCommit(null); },
-    pickCommit: setCommit,
-    setBase: (v: string) => { setBaseRef(v.trim()); setEditingBase(false); },
+    restoreSpec,
+    pick: (s: Scope) => {
+      if (s === scope) return;
+      setScope(s);
+      if (s !== "commits") setCommit(null);
+      closeOpen();
+    },
+    pickCommit: (c: CommitEntry | null) => { setCommit(c); closeOpen(); },
+    setBase: (v: string) => { setBaseRef(v.trim()); setEditingBase(false); closeOpen(); },
     openFile: (f: ChangedFile) =>
-      openFilePreview({ abs: f.abs, path: f.path, mode: "diff", cwd, spec: spec ?? undefined }),
+      openFilePreview({ abs: f.abs, path: f.path, mode: "diff", cwd, spec }),
     refresh: () => { setRefreshKey((k) => k + 1); setReloadKey((k) => k + 1); },
     addComment: (path: string, anchor: DiffAnchor, body: string) => commitComments([
       ...comments, { id: makeId(), path, side: anchor.side, line: anchor.line, code: anchor.code, body },
@@ -360,6 +394,14 @@ export function ReviewLeft({ rv }: { rv: ReviewSession }) {
 
 export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
   const setWorkspace = useStore((s) => s.setWorkspace);
+  const sheet = useStore((s) => s.reviewSheet);
+  const toggleReviewSheet = useStore((s) => s.toggleReviewSheet);
+  const companionCollapsed = useStore((s) => s.companionCollapsed);
+  const toggleCompanion = useStore((s) => s.toggleCompanion);
+  const history = useStore((s) => s.reviewHistory);
+  const pushReviewHistory = useStore((s) => s.pushReviewHistory);
+  const reviewBack = useStore((s) => s.reviewBack);
+  const reviewForward = useStore((s) => s.reviewForward);
   // The same capability the composer's "@" button is gated on: file references
   // ride on embeddedContext, and an agent without it drops them on send.
   const canAttach = useStore((s) => !!s.promptCapabilities.embeddedContext);
@@ -371,6 +413,98 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
   // comment written on a working-tree line would otherwise be saved against the
   // commit's draft, anchored to a line that commit never had.
   const onScope = revOf(loc?.spec) === revOf(spec);
+
+  // Where the reader had got to in the file they are leaving, and in which
+  // view. Refs, not state: both change on every scroll and every mode click,
+  // neither is rendered, and only the moment a location is left behind reads
+  // them.
+  const scrollTop = useRef(0);
+  const viewMode = useRef<PreviewMode>("diff");
+  const canvasRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    // Capture phase: scroll does not bubble, so React's onScroll would never
+    // see the viewer's own scroller from out here.
+    const onScroll = (e: Event) => {
+      const t = e.target;
+      if (t instanceof HTMLElement && t.classList.contains("wf-body")) scrollTop.current = t.scrollTop;
+    };
+    el.addEventListener("scroll", onScroll, true);
+    return () => el.removeEventListener("scroll", onScroll, true);
+  }, []);
+
+  // The canvas is unmounted while the Agent workspace is up, and the viewer's
+  // scroller goes with it. The location carries the offset out so returning
+  // lands where the reading was left, not at the top of the file.
+  useEffect(() => () => {
+    const { reviewPreview } = useStore.getState();
+    if (reviewPreview) {
+      useStore.setState({ reviewPreview: { ...reviewPreview, scrollTop: scrollTop.current, mode: viewMode.current } });
+    }
+  }, []);
+
+  // Every arrival records the departure. Here rather than in each of the things
+  // that navigate — a changed-file row, a CodeRef from the conversation, a
+  // scope change that closes the file — because they all land in the same slot,
+  // and only this component can measure where the reader had got to.
+  const last = useRef<ReviewLoc | null>(null);
+  const restoring = useRef(false);
+  useEffect(() => {
+    const prev = last.current;
+    const leftAt = { scrollTop: scrollTop.current, mode: viewMode.current };
+    last.current = loc;
+    scrollTop.current = loc?.scrollTop ?? 0;
+    viewMode.current = loc?.mode ?? "diff";
+    // Walking the stacks is not a new navigation; pushing here would make Back
+    // its own history.
+    if (restoring.current) { restoring.current = false; return; }
+    if (!prev) return;
+    if (loc && prev.abs === loc.abs && revOf(prev.spec) === revOf(loc.spec) && prev.line === loc.line) return;
+    pushReviewHistory({ ...prev, ...leftAt });
+  }, [loc, pushReviewHistory]);
+
+  const go = (back: boolean) => {
+    if (!(back ? history.past.length : history.future.length)) return;
+    restoring.current = true;
+    const here = loc ? { ...loc, scrollTop: scrollTop.current, mode: viewMode.current } : null;
+    const target = back ? history.past[history.past.length - 1] : history.future[0];
+    // Only a location that named its revision re-selects one. A CodeRef named
+    // none — opening it didn't change what is being reviewed, so retracing it
+    // must not either.
+    // The scope first, so React commits both in one render and the header never
+    // draws a revision the canvas isn't reading.
+    if (target.spec !== undefined) rv.restoreSpec(target.spec);
+    if (back) reviewBack(here); else reviewForward(here);
+  };
+
+  // The button that opened the sheet, so Escape can hand focus back to it.
+  const opener = useRef<HTMLButtonElement | null>(null);
+  const openSheet = (which: "files" | "companion") => (e: React.MouseEvent<HTMLButtonElement>) => {
+    opener.current = e.currentTarget;
+    toggleReviewSheet(which);
+  };
+  useEffect(() => {
+    if (sheet === "none") return;
+    // Same handoff as the floating conversation windows: the companion's own
+    // composer consumes Escape to dismiss its slash/file menu, and says so by
+    // preventing the default.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      toggleReviewSheet(sheet);
+      opener.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [sheet, toggleReviewSheet]);
+
+  // An Ask or a Fix becomes a chip on the companion's composer, which below
+  // 1100px is a sheet over the canvas: without this the reader is told to look
+  // at something they cannot see.
+  const revealCompanion = () => {
+    if (!isDesktopPanelWidth() && useStore.getState().reviewSheet !== "companion") toggleReviewSheet("companion");
+  };
 
   // Comments on the open file, bucketed by the line they hang under, so the
   // viewer's lookup is per row rather than a scan of the whole draft.
@@ -387,6 +521,7 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
 
   const askFix = (intent: "ask" | "fix", anchor: DiffAnchor) => {
     if (!loc || !rv.activeId) return;
+    revealCompanion();
     rv.setAskFix({
       intent, agentName: rv.agentName, sessionId: rv.activeId, cwd: rv.cwd, spec,
       path: loc.path, label: commit ? commit.shortSha + " " + commit.subject : undefined,
@@ -395,11 +530,31 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
   };
 
   return (
-    <main className="canvas">
+    <main className="canvas" ref={canvasRef}>
       <div className="rv-bar">
         <button className="icon-btn" title="Back to conversation" aria-label="Back to conversation"
           onClick={() => setWorkspace("agent")}><IconBack /></button>
+        {/* The canvas's own history, not the browser's: every reference opened
+            in here lands in one viewer, so retracing is this bar's job. */}
+        <button className="icon-btn" title="Back" aria-label="Back" disabled={!history.past.length}
+          onClick={() => go(true)}><IconArrow /></button>
+        <button className="icon-btn" title="Forward" aria-label="Forward" disabled={!history.future.length}
+          onClick={() => go(false)}><IconArrow right /></button>
+        {/* The path, even for a location that no longer resolves: the body says
+            what became of it, and swapping in a file that does resolve would
+            quietly move the reader somewhere they never asked to be. */}
         <span className="rv-title" title={loc?.abs}>{loc ? loc.path : "Review"}</span>
+        {/* Only below 1100px, where the two side columns overlay the canvas one
+            at a time (see the stylesheet) — above it they are columns, and a
+            button to reveal what is already on screen is noise. */}
+        <button className="btn-sm rv-sheet" aria-pressed={sheet === "files"}
+          onClick={openSheet("files")}>Files</button>
+        <button className="btn-sm rv-sheet" aria-pressed={sheet === "companion"}
+          onClick={openSheet("companion")}>Companion</button>
+        {companionCollapsed && (
+          <button className="icon-btn rv-uncollapse" title="Show companion" aria-label="Show companion"
+            onClick={toggleCompanion}><IconChevrons left /></button>
+        )}
         {/* Explicit, because nothing else here re-reads a diff: a turn ending
             refreshes the lists around it, and stops there. */}
         <button className="icon-btn" title="Refresh" onClick={rv.refresh}><IconRefresh /></button>
@@ -460,6 +615,7 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
         // Keyed on the reload: "re-read everything now" includes this diff, and
         // a fresh viewer is the whole of what that means.
         <FileView key={rv.reloadKey} cwd={loc.cwd ?? rv.cwd} target={loc} spec={loc.spec ?? null}
+          scrollTop={loc.scrollTop} onMode={(m) => { viewMode.current = m; }}
           review={onScope ? {
             comments: byLine,
             onAdd: (anchor, body) => rv.addComment(loc.path, anchor, body),
@@ -470,10 +626,10 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
           onAttach={(range, text) => attachFiles([makeRangeFile(loc.abs, basename(loc.path), range, text)])}
           // The selection is read out of the file as it is on disk, so it is
           // not the revision's — `spec: null` says so.
-          onAskFix={rv.activeId ? (intent, range, text) => rv.setAskFix({
+          onAskFix={rv.activeId ? (intent, range, text) => { revealCompanion(); rv.setAskFix({
             intent, agentName: rv.agentName, sessionId: rv.activeId!, cwd: rv.cwd, spec: null,
             path: loc.path, line: range.start, endLine: range.end, code: text,
-          }) : undefined} />
+          }); } : undefined} />
       ) : (
         <div className="wf-empty">Pick a changed file to read it here.</div>
       )}

@@ -721,7 +721,7 @@ function selectedRange(code: HTMLElement | null): LineRange | null {
 // workspace mounts it as its canvas, which is what `spec` and `review` are for:
 // a diff read against some other revision than the working tree, with the
 // comments of an unsent review written onto its lines.
-export function FileView({ cwd, target, spec, review, canAttach, onAttach, onAskFix }: {
+export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAttach, onAttach, onAskFix }: {
   cwd: string; target: FilePreviewTarget; canAttach: boolean;
   // Which revision the diff is of. Null — the panel's case — is the working
   // tree, and the only case where the File view shows the same content the
@@ -733,6 +733,12 @@ export function FileView({ cwd, target, spec, review, canAttach, onAttach, onAsk
     onDelete: (id: string) => void;
     onAskFix?: (intent: "ask" | "fix", anchor: DiffAnchor) => void;
   };
+  // Where in the body to land, and a way to tell the caller which view is on
+  // screen. Both are the Review canvas's Back/Forward: a location it returns to
+  // is only the same place if it comes back in the same view, at the same
+  // offset. The panel passes neither.
+  scrollTop?: number;
+  onMode?: (mode: PreviewMode) => void;
   onAttach: (range: LineRange, text: string) => void;
   onAskFix?: (intent: "ask" | "fix", range: LineRange, text: string) => void;
 }) {
@@ -775,6 +781,7 @@ export function FileView({ cwd, target, spec, review, canAttach, onAttach, onAsk
   // asks for the File view again even if it was switched to Diff. Not the
   // request object itself — re-clicking the open file's row stays a no-op.
   useEffect(() => { setMode(target.mode); }, [target.abs, target.mode, target.line, target.endLine]);
+  useEffect(() => { onMode?.(mode); }, [mode, onMode]);
   // A different file is a different edit. Dropping the buffer silently is safe
   // only because opening another file takes a click on the list, which is not
   // something you do mid-sentence — and the alternative, blocking navigation on
@@ -903,6 +910,14 @@ export function FileView({ cwd, target, spec, review, canAttach, onAttach, onAsk
     scrollToHit(bodyRef.current, range);
     return () => clearHits("wf-line");
   }, [target, mode, loading, file]);
+
+  // A remembered offset, once there is something to scroll. After the line
+  // landing above on purpose: a location that carries both was left at this
+  // offset, which is the more recent answer to where the reader was.
+  useEffect(() => {
+    if (!scrollTop || loading || !bodyRef.current) return;
+    bodyRef.current.scrollTop = scrollTop;
+  }, [scrollTop, loading, target.abs]);
 
   // Wraps at both ends — a search that stops dead at the last match sends you
   // back to the box to retype what you already typed.
