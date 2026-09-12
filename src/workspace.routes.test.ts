@@ -1176,16 +1176,165 @@ test("an existing .acp-review draft is imported once, and only then removed", as
 
     // A file the validator refuses is left exactly where it is rather than
     // half-imported — the same rule as a malformed POST.
-    fs.writeFileSync(path.join(dir, "drafts.json"), JSON.stringify({
+    const unreadable = JSON.stringify({
       version: 1,
       scopes: { "branch:main": { updatedAt: new Date().toISOString(), comments: [{ ...comment, side: "sideways" }] } },
-    }));
+    });
+    fs.writeFileSync(path.join(dir, "drafts.json"), unreadable);
     const refused = await (await get(q("/workspace/review", { cwd: REPO, base: "main" }))).json() as { comments: unknown[] };
     assert.deepEqual(refused.comments, []);
-    assert.ok(fs.existsSync(path.join(dir, "drafts.json")), "the checkout's copy must survive a failed import");
+    assert.equal(fs.readFileSync(path.join(dir, "drafts.json"), "utf8"), unreadable,
+      "the checkout's copy must survive a failed import byte for byte");
+    // And nothing was provisioned on the way: a read that refuses its import
+    // leaves the scope with no review at all, not an empty one.
+    assert.equal(((await (await get(q("/workspace/review/state", { cwd: REPO, base: "main" }))).json()) as { review: unknown }).review, null);
   } finally {
     await post(q("/workspace/review", { cwd: REPO }), { comments: [] });
     fs.rmSync(dir, { recursive: true, force: true });
+    await close();
+  }
+});
+
+test("a draft whose checkout copy can't be removed is still imported exactly once", async () => {
+  const { get, close } = await startHttpServer();
+  const RO = path.join(ROOT, "readonlyrepo");
+  const dir = path.join(RO, ".acp-review");
+  const comment = { path: "kept.txt", side: "new", line: 1, code: "+one", body: "written before the upgrade" };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: RO, stdio: "pipe" });
+    const onDisk = JSON.stringify({
+      version: 1, scopes: { working: { updatedAt: new Date().toISOString(), comments: [comment] } },
+    });
+    fs.writeFileSync(path.join(dir, "drafts.json"), onDisk);
+    // The import's last step is removing the scope it copied. A checkout nobody
+    // may write to costs that cleanup and nothing else: the row is what the
+    // review is read from now.
+    fs.chmodSync(dir, 0o500);
+
+    const imported = await (await get(q("/workspace/review", { cwd: RO }))).json() as { comments: unknown[] };
+    assert.deepEqual(imported.comments, [comment]);
+    assert.equal(fs.readFileSync(path.join(dir, "drafts.json"), "utf8"), onDisk);
+    // Reading again must not stack the same comment twice: the row now holds
+    // this scope, so the file's copy is never looked at again.
+    assert.deepEqual(((await (await get(q("/workspace/review", { cwd: RO }))).json()) as { comments: unknown[] }).comments, [comment]);
+  } finally {
+    fs.chmodSync(dir, 0o700);
+    fs.rmSync(RO, { recursive: true, force: true });
+    await close();
+  }
+});
+
+test("one worktree's two scopes are two reviews, and see each other as somebody else's", async () => {
+  const { get, post, close } = await startHttpServer();
+  const mine = (d: { body: string }) => d.body === "only in the commit's review";
+  try {
+    const rendered = await diffOf(get, REPO, "kept.txt", { rev: "HEAD" });
+    await post(q("/workspace/review/discussion", { cwd: REPO, rev: "HEAD" }), {
+      op: "create", anchor: { path: "kept.txt", side: "new", line: 1, code: "+one" },
+      body: "only in the commit's review", revision: rendered.revision,
+    });
+    assert.equal((await post(q("/workspace/review/reviewed", { cwd: REPO, rev: "HEAD" }), {
+      path: "kept.txt", hash: rendered.hash, revision: rendered.revision, reviewed: true,
+    })).status, 200);
+
+    type State = {
+      review: { scope: string } | null;
+      discussions: Array<{ body: string }>;
+      others: Array<{ body: string; scope: string; live: boolean }>;
+      reviewed: Array<{ path: string }>;
+    };
+    const commit = await (await get(q("/workspace/review/state", { cwd: REPO, rev: "HEAD" }))).json() as State;
+    const working = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as State;
+    assert.equal(commit.review?.scope, "commit:HEAD");
+    assert.equal(working.review?.scope, "working");
+
+    assert.equal(commit.discussions.some(mine), true);
+    assert.equal(commit.reviewed.some((f) => f.path === "kept.txt"), true);
+    // The same checkout, a different comparison: reading the working tree is a
+    // different review, so neither the thread nor the mark belongs to it.
+    assert.equal(working.discussions.some(mine), false);
+    assert.equal(working.reviewed.some((f) => f.path === "kept.txt"), false);
+    const listed = working.others.find(mine);
+    assert.equal(listed?.scope, "commit:HEAD");
+    assert.equal(listed?.live, true, "a sibling scope of a checkout that is still there");
+  } finally {
+    await post(q("/workspace/review/reviewed", { cwd: REPO, rev: "HEAD" }), { path: "kept.txt", reviewed: false });
+    await close();
+  }
+});
+
+test("a diff read before the checkout moved keeps the snapshot that was read", async () => {
+  const { get, post, close } = await startHttpServer();
+  const kept = path.join(REPO, "kept.txt");
+  const before = fs.readFileSync(kept, "utf8");
+  try {
+    const rendered = await diffOf(get, REPO, "kept.txt");
+    // The agent commits, or edits, while the reviewer is still reading. The mark
+    // that lands afterwards is about the bytes that were on screen.
+    fs.writeFileSync(kept, before + "four\n");
+    assert.deepEqual(await (await post(q("/workspace/review/reviewed", { cwd: REPO }), {
+      path: "kept.txt", hash: rendered.hash, revision: rendered.revision, reviewed: true,
+    })).json(), { ok: true });
+
+    const state = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as {
+      reviewed: Array<{ path: string; hash: string; changed: boolean }>;
+    };
+    const f = state.reviewed.find((r) => r.path === "kept.txt");
+    assert.equal(f?.hash, rendered.hash, "the identity stored is the one that was read");
+    assert.equal(f?.changed, true, "and it is flagged at once — the newer version nobody saw is not reviewed");
+  } finally {
+    fs.writeFileSync(kept, before);
+    await post(q("/workspace/review/reviewed", { cwd: REPO }), { path: "kept.txt", reviewed: false });
+    await close();
+  }
+});
+
+test("a reviewed file that is renamed, deleted or changes mode can no longer be claimed read", async () => {
+  const { get, post, close } = await startHttpServer();
+  const MOVED = path.join(ROOT, "moverepo");
+  try {
+    fs.mkdirSync(MOVED, { recursive: true });
+    const runMoved = (...args: string[]) => execFileSync("git", args, { cwd: MOVED, stdio: "pipe" });
+    runMoved("init", "-q", "-b", "main");
+    runMoved("config", "user.email", "test@example.com");
+    runMoved("config", "user.name", "Test");
+    for (const name of ["renamed.txt", "removed.txt", "mode.txt"]) fs.writeFileSync(path.join(MOVED, name), "one\n");
+    runMoved("add", "-A");
+    runMoved("commit", "-q", "-m", "initial");
+    for (const name of ["renamed.txt", "removed.txt", "mode.txt"]) fs.appendFileSync(path.join(MOVED, name), "two\n");
+
+    const marked: Record<string, string | undefined> = {};
+    for (const name of ["renamed.txt", "removed.txt", "mode.txt"]) {
+      const rendered = await diffOf(get, MOVED, name);
+      marked[name] = rendered.hash;
+      await post(q("/workspace/review/reviewed", { cwd: MOVED }), {
+        path: name, hash: rendered.hash, revision: rendered.revision, reviewed: true,
+      });
+    }
+    const read = await (await get(q("/workspace/review/state", { cwd: MOVED }))).json() as {
+      reviewed: Array<{ path: string; hash: string; changed: boolean }>;
+    };
+    assert.deepEqual(read.reviewed.map((f) => f.changed), [false, false, false]);
+
+    runMoved("mv", "renamed.txt", "newname.txt");
+    fs.rmSync(path.join(MOVED, "removed.txt"));
+    fs.chmodSync(path.join(MOVED, "mode.txt"), 0o755);
+
+    const after = await (await get(q("/workspace/review/state", { cwd: MOVED }))).json() as {
+      reviewed: Array<{ path: string; hash: string; changed: boolean }>;
+    };
+    // Three ways for the content behind a mark to stop being what was read. The
+    // rename is the interesting one: the mark stays on the path it was made on
+    // and the new path is simply unreviewed — nothing is carried across.
+    assert.deepEqual(after.reviewed.map((f) => [f.path, f.changed]),
+      [["mode.txt", true], ["removed.txt", true], ["renamed.txt", true]]);
+    assert.equal(after.reviewed.some((f) => f.path === "newname.txt"), false);
+    // Each still remembers the snapshot it was marked on, so re-marking is a
+    // deliberate act rather than a silent re-hash.
+    for (const f of after.reviewed) assert.equal(f.hash, marked[f.path]);
+  } finally {
+    fs.rmSync(MOVED, { recursive: true, force: true });
     await close();
   }
 });
