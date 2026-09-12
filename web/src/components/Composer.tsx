@@ -7,6 +7,9 @@ import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
 import { listFiles, uploadFile } from "../lib/api.ts";
+import { buildAskFixMessage, describeScope, type AskFixRequest } from "../lib/reviewPrompt.ts";
+import { formatRange } from "../lib/lineRange.ts";
+import { basename } from "../lib/format.ts";
 import type { MessageImage, MessageFile, QueuedPrompt, AgentGlyph } from "../types.ts";
 
 // Touch / coarse-pointer devices (phones, tablets) have no Shift key on their
@@ -34,6 +37,17 @@ function queuedText(q: QueuedPrompt): string {
     q.files?.length ? q.files.map((f) => f.name).join(", ") : "",
   ].filter(Boolean);
   return carried.join(" · ");
+}
+
+// The context chip's text: what the message will be about, in the order the
+// message itself says it — intent, place, diff side, scope.
+function askFixLabel(a: AskFixRequest): string {
+  return [
+    a.intent === "ask" ? "Ask" : "Fix",
+    basename(a.path) + ":" + formatRange({ start: a.line, end: a.endLine ?? a.line }),
+    a.side,
+    describeScope(a.spec, a.label).replace(/`/g, ""),
+  ].filter(Boolean).join(" · ");
 }
 
 export function Composer({ sessionId, compact }: { sessionId?: string; compact?: boolean } = {}) {
@@ -87,6 +101,14 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // window), else whichever one is on screen.
   const targetId = sessionId ?? s.activeId;
   const activeBusy = !!(targetId && s.busySessionIds[targetId]);
+  // The Ask/Fix captured in the file panel, which this message will be about.
+  // Only the main box: a branch window talks to its own conversation, and the
+  // request names the one it was taken from.
+  const ask = sessionId ? null : s.askFix;
+  // Whether the message queues or sends is decided by the conversation it
+  // GOES to — for an Ask/Fix that is the captured one, not the one on screen.
+  const sendBusy = ask ? !!s.busySessionIds[ask.sessionId] : activeBusy;
+  const askTarget = (a: AskFixRequest) => s.sessions[a.sessionId]?.title || "another conversation";
   // Messages typed into this conversation while its turn was running, waiting for
   // that turn to end (store.ts's queuedPrompts).
   const queued = (targetId && s.queuedPrompts[targetId]) || [];
@@ -143,7 +165,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   // message there is no thread, so a leading "!" is just a message.
   const shellMode = !!s.cfg.terminalEnabled && !!targetId && text.startsWith("!");
   // Mid-turn with something ready to send, the stop button becomes interrupt.
-  const cutting = activeBusy && canSend && !shellMode;
+  const cutting = activeBusy && canSend && !shellMode && !ask;
   const placeholder = `Reply to ${GLYPH_LABEL[activeAgentGlyph(s)] ?? s.agentName}…`;
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
@@ -175,6 +197,10 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
 
   // Keep the keyboard selection in range as the filtered list shrinks/grows.
   useEffect(() => { setCmdActive(0); }, [cmdQuery]);
+
+  // Pressing Ask or Fix on some code ends here: the question is typed in this
+  // box, so the box takes the focus.
+  useEffect(() => { if (ask) mi.current?.focus(); }, [ask]);
 
   // dismiss the file menu on a pointer down outside it (the editor and the "@"
   // toggle keep it open so typing / clicking them doesn't dismiss mid-pick).
@@ -390,8 +416,32 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     // Enter on an empty box mid-turn keeps its old meaning: stop. With something
     // typed, Enter QUEUES — interrupting is the button beside it, because cutting a
     // running turn should cost a deliberate tap rather than a reflex keystroke.
-    if (!t.trim() && !imgs.length && !refs.length) { if (activeBusy) stop(); return; }
+    if (!t.trim() && !imgs.length && !refs.length) { if (activeBusy && !ask) stop(); return; }
     setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
+    // An Ask/Fix goes to the conversation it was captured from, through
+    // sendPromptTo — whose `false` is the refusal sendPrompt swallows. The box
+    // was cleared above like any other send; it cannot instead wait for the
+    // answer, because sendPromptTo resolves true only once the turn ENDS
+    // (runPrompt), and the draft would sit in the box for the whole of it. A
+    // refusal is synchronous, so it comes back the next tick, and the text and
+    // the chip go back where they were.
+    if (ask) {
+      const text = buildAskFixMessage(ask, t);
+      s.setAskFix(null);
+      if (sendBusy) {
+        s.queuePrompt(ask.sessionId, { text, images: imgs, files: refs });
+        // The rail here shows THIS conversation's queue; one that went elsewhere
+        // has to say where, or the box empties and nothing else moves.
+        if (ask.sessionId !== targetId) s.setTip("Queued for " + askTarget(ask) + " — sends after its current work finishes.");
+        return;
+      }
+      void s.sendPromptTo(ask.sessionId, text, imgs, refs).then((sent) => {
+        if (sent) return;
+        setText(t); setImages(imgs); attach(refs); s.setAskFix(ask);
+        s.setTip("Couldn't send to " + askTarget(ask) + " — that conversation isn't available right now.");
+      });
+      return;
+    }
     // The box is cleared above, so from here the store holds the only copy either
     // way — queuePrompt keeps it until the running turn ends.
     if (activeBusy && targetId) s.queuePrompt(targetId, { text: t, images: imgs, files: refs });
@@ -496,7 +546,7 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
               <div className="queue-body">{queuedText(q)}</div>
             </div>
           ))}
-          <div className="queue-out">sends in order, one per turn</div>
+          <div className="queue-out">queued — sends after the current work finishes</div>
         </div>
       )}
       <div
@@ -515,8 +565,14 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
             ))}
           </div>
         )}
-        {files.length > 0 && (
+        {(files.length > 0 || ask) && (
           <div className="file-chips">
+            {ask && (
+              <span className="file-chip" title={ask.path + " · " + ask.cwd + " · " + ask.agentName}>
+                <span className="nm">{askFixLabel(ask)}{ask.sessionId !== s.activeId && " → " + askTarget(ask)}</span>
+                <button className="chip-x" title="Drop this code context" onClick={() => s.setAskFix(null)}>✕</button>
+              </span>
+            )}
             {files.map((f, i) => (
               <span className="file-chip" key={f.uri || f.name} title={f.uri || f.name}>
                 <IconFile /><span className="nm">{f.name}</span>
@@ -579,9 +635,9 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
             ? <button className="send stop" title="Interrupt and send now" onClick={interrupt}><IconStop />interrupt</button>
             : <button className="send stop" title="Stop" onClick={stop}><IconStop />stop</button>
           )}
-          <button className="send" title={activeBusy ? "Queue for after this turn" : "Send"}
+          <button className="send" title={sendBusy ? "Queue — sends after the current work finishes" : "Send"}
             disabled={!canSend} onClick={submit}>
-            {shellMode ? <>run<IconTerminal /></> : activeBusy ? <>queue<IconClock /></> : <>send<IconSend /></>}
+            {shellMode ? <>run<IconTerminal /></> : sendBusy ? <>queue<IconClock /></> : <>send<IconSend /></>}
           </button>
         </div>
       </div>

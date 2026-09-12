@@ -299,6 +299,18 @@ describe("branch conversation", () => {
     expect(useStore.getState().sessions["branch-session"].working).toBe(false);
   });
 
+  test("sendPromptTo refuses a session another agent owns", async () => {
+    // Sessions survive setAgent, so a request bound to one can be submitted after
+    // the connection underneath has changed hands; it must bounce, not go out on
+    // the wrong agent's socket.
+    const { useStore, ws } = await bootstrap();
+    expect(useStore.getState().sessions["parent-session"].agentName).toBe("claude");
+    useStore.setState({ agentName: "codex" } as any);
+    expect(await useStore.getState().sendPromptTo("parent-session", "hello")).toBe(false);
+    await flush();
+    expect(lastSent(ws, "session/prompt")).toBeUndefined();
+  });
+
   test("sendPromptTo ignores a session that isn't live", async () => {
     const { useStore, ws } = await bootstrap();
     await useStore.getState().sendPromptTo("no-such-session", "hello");
