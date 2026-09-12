@@ -38,7 +38,7 @@ import { Ledger, type LedgerEntry } from "./ledger.ts";
 import { basicAuthOk, wsAuthOk } from "./auth.ts";
 import { resolveTls } from "./tls.ts";
 import { accessUrls } from "./access.ts";
-import { Db, type InboxItem, type InboxStatus, type TranscriptMeta } from "./db.ts";
+import { Db, type InboxItem, type InboxStatus, type TranscriptMeta, type ReviewRow } from "./db.ts";
 import Database from "better-sqlite3";
 import { protobufStringsAt } from "./protobuf-strings.ts";
 import { handleLogin, getSession, registerLoginAgent } from "./login.ts";
@@ -51,10 +51,12 @@ import {
   outputFolder as workspaceOutputFolder,
   revChanges as workspaceRevChanges, commits as workspaceCommits,
   writeText as workspaceWriteText,
-  inlineImageType, repoRoot, validRev, MAX_RAW_BYTES, MAX_COMMITS, MAX_WRITE_BYTES, type RevSpec,
+  inlineImageType, repoRoot, gitCommonDir, repoFingerprints, diffIdentity, validRev, MAX_RAW_BYTES, MAX_COMMITS, MAX_WRITE_BYTES,
+  type RevSpec,
 } from "./workspace.ts";
 import {
-  readDraft, readDrafts, writeDraft, parseComments, reviewScopeKey, MAX_DRAFTS_BYTES,
+  readDrafts, writeDraft, parseComments, parseAnchor, validRepoPath, reviewScopeKey,
+  MAX_COMMENT_BYTES, MAX_DRAFTS_BYTES,
 } from "./review.ts";
 import { renderHtmlFile } from "./htmlinline.ts";
 import { buildClientConfig, type AgentKind } from "./client-config.ts";
@@ -836,6 +838,126 @@ async function allowedOutputFolder(dir: string, cwd: string): Promise<string | n
     .filter((b): b is string => !!b && b !== path.parse(b).root);
   if (boundaries.includes(abs)) return null;
   return boundaries.some((b) => abs.startsWith(b + path.sep)) ? abs : null;
+}
+
+// ---- durable review state helpers (see /workspace/review below) ----
+
+// What every review route needs before it can name a review: the worktree it is
+// about, which repository that worktree belongs to, and which comparison. Null
+// for a folder git knows nothing about — the routes answer with empty state
+// rather than an error, the way the draft route always has.
+interface ReviewContext { cwd: string; root: string; commonDir: string; scope: string }
+
+async function reviewContext(cwd: string, spec: RevSpec | null): Promise<ReviewContext | null> {
+  const root = await repoRoot(cwd);
+  if (!root) return null;
+  const commonDir = await gitCommonDir(cwd);
+  return commonDir ? { cwd, root, commonDir, scope: reviewScopeKey(spec) } : null;
+}
+
+// The review every write addresses, created if this is the first thing worth
+// keeping about it. The fingerprints are read ONLY when the repository row does
+// not exist yet: they are written at creation and never read back, and
+// `rev-list --max-parents=0` is a whole-history walk nobody should pay for on a
+// refresh.
+async function provisionReview(
+  ctx: ReviewContext, companion?: { agentName: string; sessionId: string } | null,
+): Promise<ReviewRow> {
+  const known = db().repositoryId(ctx.commonDir);
+  const fingerprints = known ? { rootCommit: null, remote: null } : await repoFingerprints(ctx.cwd);
+  return db().provisionReview({ commonDir: ctx.commonDir, ...fingerprints }, ctx.root, ctx.scope, companion);
+}
+
+// The review a READ may see. A read never provisions — otherwise the tables
+// would fill with a row for every folder anyone ever opened Review mode on — so
+// the only way a row appears here is the one-time import of a draft the checkout
+// is still carrying in `.acp-review/drafts.json`.
+async function reviewForRead(ctx: ReviewContext): Promise<{ repositoryId: string | null; review: ReviewRow | null }> {
+  const repositoryId = db().repositoryId(ctx.commonDir);
+  const review = repositoryId ? db().review(repositoryId, ctx.root, ctx.scope) : null;
+  const legacy = readDrafts(ctx.root)[ctx.scope];
+  if (!legacy || (review && db().reviewDraft(review.id).length)) return { repositoryId, review };
+  // Validated on the way in, not trusted because it came off disk: the file is
+  // in a checkout, and this is the moment its contents become rows. A file that
+  // does not parse is left exactly where it is rather than half-imported.
+  const comments = parseComments(legacy.comments);
+  if (!comments?.length) return { repositoryId, review };
+  const imported = review ?? await provisionReview(ctx);
+  db().setReviewDraft(imported.id, comments);
+  // Only now. A draft removed before its row existed is a review someone loses
+  // to a crash between the two writes. Still a DRAFT, never a discussion —
+  // importing must not silently post comments nobody has sent.
+  writeDraft(ctx.root, ctx.scope, []);
+  return { repositoryId: imported.repositoryId, review: imported };
+}
+
+// Which of this review's marked-read files still hold what was read. One `git
+// diff` per reviewed file — ponytail: fine while a review is dozens of files,
+// and the honest alternative (caching diffs server-side) is the whole
+// between-reviews comparison feature this phase deliberately does not build.
+//
+// No hash means the current diff is binary or past MAX_DIFF_BYTES, so there is
+// nothing to compare: `changed` says so rather than quietly reporting "still the
+// same" about bytes nobody can see.
+async function reviewedState(
+  ctx: ReviewContext, spec: RevSpec | null, review: ReviewRow,
+): Promise<Array<{ path: string; hash: string; revision: string; reviewedAt: string; changed: boolean; reason?: string }>> {
+  const out = [];
+  for (const f of db().reviewedFiles(review.id)) {
+    if (!validRepoPath(f.path)) continue;
+    const diff = await workspaceFileDiff(ctx.cwd, path.join(ctx.root, f.path), spec);
+    const { hash } = await diffIdentity(ctx.cwd, diff, spec);
+    out.push(hash ? { ...f, changed: hash !== f.hash } : { ...f, changed: true, reason: "unhashable" });
+  }
+  return out;
+}
+
+// Who was driving when this review first got something worth keeping. Optional
+// on every write and ignored when malformed rather than refused: a draft save
+// that fails because the client sent a half-built session handle would lose the
+// review, and the companion is a record, not a permission.
+function parseCompanion(v: unknown): { agentName: string; sessionId: string } | null {
+  if (!v || typeof v !== "object") return null;
+  const c = v as Record<string, unknown>;
+  const agentName = c.agentName;
+  const sessionId = c.sessionId;
+  if (typeof agentName !== "string" || !agentName || agentName.length > 128) return null;
+  if (typeof sessionId !== "string" || !sessionId || sessionId.length > 256) return null;
+  return { agentName, sessionId };
+}
+
+function parseBody(v: unknown): string | null {
+  return typeof v === "string" && v.trim() && Buffer.byteLength(v) <= MAX_COMMENT_BYTES ? v : null;
+}
+
+// A revision as diffIdentity spells one, echoed back by the client from the diff
+// it rendered. Bounded and newline-free because it is stored and later shown.
+function parseRevision(v: unknown): string | null {
+  return typeof v === "string" && v && v.length <= 256 && !/[\0\n]/.test(v) ? v : null;
+}
+
+// A sha256 from the same source. Null is "present but not one", which the
+// callers distinguish from absent.
+function parseHash(v: unknown): string | null {
+  return typeof v === "string" && /^[0-9a-f]{64}$/.test(v) ? v : null;
+}
+
+function isDir(p: string): boolean {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+// readJsonBody rejects with exactly two things a client caused — a body over the
+// cap, and one that isn't JSON — and anything else is ours. Folding them all
+// into 500 would tell a client its own malformed request was a server fault.
+function sendError(res: http.ServerResponse, e: Error, tooBigMessage: string): void {
+  const status = e.message === "too-large" ? 413 : e.message === "bad-json" ? 400 : 500;
+  res.writeHead(status);
+  res.end(JSON.stringify({ error: status === 413 ? tooBigMessage : status === 400 ? "bad request" : String(e) }));
+}
+
+function sendJson(res: http.ServerResponse, body: unknown, noStore = false): void {
+  res.writeHead(200, { "content-type": "application/json", ...(noStore ? { "cache-control": "no-store" } : {}) });
+  res.end(JSON.stringify(body));
 }
 
 // Which revision a /workspace request is about: null for the working tree (the
@@ -5010,15 +5132,17 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   //                       preview (and a downloaded copy) actually shows them
   //   /workspace/raw      one file's bytes (the <img> source, and downloads)
   //   /workspace/commits  the checkout's recent history, to review what landed
-  //   /workspace/review   the review draft for one diff — the one route here
-  //                       that writes, and only ever into .acp-review/
+  //   /workspace/review   one review's durable state — its draft, plus
+  //                       /review/state, /review/discussion and
+  //                       /review/reviewed. The routes here that write, and
+  //                       only ever into the gateway's own database (db.ts)
   // changes and diff take an optional ?rev= (one commit) or ?base= (a branch
   // against where it diverged), which is what makes reviewing history the same
   // screen as reviewing the working tree.
   // What each may read is allowedPreviewPath's decision: the conversation's cwd,
   // its repo, and ACPG_PREVIEW_ROOTS — or anything at all, when a deployment
   // sets ACPG_PREVIEW_FILTER_ENABLED=0. They stay read-only apart from the
-  // review draft: nothing here stages, reverts, or touches a checkout's files.
+  // review state: nothing here stages, reverts, or touches a checkout's files.
   if (consoleEnabled && pathname === "/workspace/changes") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
     const cwd = resolveWithinRoot(q.get("cwd") ?? "");
@@ -5040,10 +5164,14 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     resolveWorkspaceTarget(q)
       .then((target) => {
         if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
-        return workspaceFileDiff(target.cwd, target.abs, spec).then((r) => {
-          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-          res.end(JSON.stringify(r));
-        });
+        // hash + revision identify the bytes this response is about, so a
+        // reviewer can later be told whether what they read still holds. They
+        // ride along rather than being a second route: the client has to record
+        // the identity of the diff it RENDERED, and a separate fetch could
+        // answer about a different one.
+        return workspaceFileDiff(target.cwd, target.abs, spec)
+          .then(async (r) => ({ ...r, ...(await diffIdentity(target.cwd, r, spec)) }))
+          .then((r) => sendJson(res, r, true));
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
@@ -5248,19 +5376,27 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
       .catch(() => { res.writeHead(500); res.end(); });
     return;
   }
-  // The review draft for one diff. GET returns that scope's comments plus the
-  // per-scope counts (what puts a badge on the Review tab before anything is
-  // opened); POST replaces that scope's comments wholesale.
+  // The durable state of one review: its unsent draft, its discussions, and the
+  // files somebody has marked as read.
   //
-  // The ONE write in the whole /workspace surface, so what it may touch is
-  // narrowed on every axis available:
+  // These used to be one write into `<repo root>/.acp-review/`. They are now
+  // rows in the gateway's own database (db.ts), because two of the three cannot
+  // live in a checkout at all: a discussion has to still read after the worktree
+  // it was written in is deleted, and it has to be findable from the SIBLING
+  // worktrees of the same clone. A file inside one of them is neither.
+  //
+  // What the client may reach is still narrowed on every axis:
   //   - the same cwd → FS_ROOT check every read here makes, first
-  //   - the path is derived entirely server-side from `repoRoot(cwd)`; the
-  //     client names a folder and a revision, never a file
-  //   - review.ts refuses a `.acp-review` that is a symlink, so a hostile
-  //     checkout cannot redirect the write out of the repo
-  //   - a folder that is not a checkout gets no persistence rather than a
-  //     hidden directory planted in it
+  //   - the review a request addresses is derived server-side from
+  //     repoIdentity(cwd) + repoRoot(cwd) + the revision; the client names a
+  //     folder and a revision, never a review id
+  //   - every path stored (a comment's, a discussion's anchor, a reviewed file)
+  //     passes validRepoPath, because the state route joins one onto the repo
+  //     root and hands it to git
+  //   - a folder that is not a checkout gets no rows rather than an error
+  // The only thing still written INTO a checkout is the legacy import, which
+  // removes the scope it just copied out of `.acp-review/drafts.json` — and only
+  // after the row is stored.
   // POST rather than PUT to match the rest of this server, which has no PUT.
   if (consoleEnabled && pathname === "/workspace/review") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
@@ -5269,47 +5405,144 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
     const spec = revSpecFrom(q);
     if (spec === false) { res.writeHead(400); res.end(JSON.stringify({ error: "bad revision", code: "bad-revision" })); return; }
     const scope = reviewScopeKey(spec);
-    repoRoot(cwd)
-      .then((root) => {
-        // No checkout, no drafts. Review mode has nothing to show in a folder
-        // git knows nothing about, so there is nothing to persist — and the
-        // gateway does not plant a hidden directory in an arbitrary folder.
-        if (!root) {
-          if (req.method === "POST") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ saved: false, reason: "not-a-repo" })); return; }
-          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-          res.end(JSON.stringify({ scope, comments: [], counts: {}, persisted: false }));
+    reviewContext(cwd, spec)
+      .then(async (ctx) => {
+        // No checkout, no rows. Review mode has nothing to show in a folder git
+        // knows nothing about, so there is nothing to persist.
+        if (!ctx) {
+          if (req.method === "POST") { sendJson(res, { saved: false, reason: "not-a-repo" }); return; }
+          sendJson(res, { scope, comments: [], counts: {}, persisted: false }, true);
           return;
         }
         if (req.method !== "POST") {
-          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-          res.end(JSON.stringify({
+          const { repositoryId, review } = await reviewForRead(ctx);
+          sendJson(res, {
             scope,
-            comments: readDraft(root, scope),
-            counts: Object.fromEntries(
-              Object.entries(readDrafts(root)).map(([k, d]) => [k, d.comments.length]),
-            ),
+            comments: review ? db().reviewDraft(review.id) : [],
+            // Scopes still sitting in the checkout's file count too: they are
+            // real drafts, they just have not been opened (and so imported) yet.
+            counts: {
+              ...Object.fromEntries(Object.entries(readDrafts(ctx.root)).map(([k, d]) => [k, d.comments.length])),
+              ...(repositoryId ? db().draftCounts(repositoryId, ctx.root) : {}),
+            },
             persisted: true,
-          }));
+          }, true);
           return;
         }
-        readJsonBody(req, MAX_DRAFTS_BYTES)
-          .then((parsed) => {
-            const comments = parseComments((parsed as { comments?: unknown } | null)?.comments);
-            if (!comments) { res.writeHead(400); res.end(JSON.stringify({ error: "bad comments", code: "bad-comments" })); return; }
-            // A failed write is reported, not thrown: the comments are in the
-            // client's hands either way, and a read-only checkout should cost
-            // the persistence rather than the review.
-            const saved = writeDraft(root, scope, comments);
-            res.writeHead(200, { "content-type": "application/json" });
-            res.end(JSON.stringify({ saved, ...(saved ? {} : { reason: "write-failed" }) }));
-          })
-          .catch((e: Error) => {
-            const tooBig = e.message === "too-large";
-            res.writeHead(tooBig ? 413 : 400);
-            res.end(JSON.stringify({ error: tooBig ? "draft too large" : "bad request" }));
-          });
+        const parsed = await readJsonBody(req, MAX_DRAFTS_BYTES) as Record<string, unknown> | null;
+        const comments = parseComments(parsed?.comments);
+        if (!comments) { res.writeHead(400); res.end(JSON.stringify({ error: "bad comments", code: "bad-comments" })); return; }
+        const review = await provisionReview(ctx, parseCompanion(parsed?.companion));
+        db().setReviewDraft(review.id, comments);
+        sendJson(res, { saved: true });
+      })
+      .catch((e: Error) => sendError(res, e, "draft too large"));
+    return;
+  }
+  // Everything the workspace has remembered about this review, in one read: the
+  // discussions anchored in it, the ones its SIBLING reviews hold (another
+  // worktree of the same clone, or another comparison of this one), and which
+  // files were marked read together with whether they still hold what was read.
+  if (consoleEnabled && pathname === "/workspace/review/state") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
+    const spec = revSpecFrom(q);
+    if (spec === false) { res.writeHead(400); res.end(JSON.stringify({ error: "bad revision", code: "bad-revision" })); return; }
+    reviewContext(cwd, spec)
+      .then(async (ctx) => {
+        if (!ctx) { sendJson(res, { review: null, discussions: [], others: [], reviewed: [] }, true); return; }
+        const { repositoryId, review } = await reviewForRead(ctx);
+        const repoId = review?.repositoryId ?? repositoryId;
+        sendJson(res, {
+          review: review && {
+            id: review.id, repositoryId: review.repositoryId, scope: review.scope, worktree: review.worktree,
+            worktreeExists: isDir(review.worktree), companion: review.companion,
+          },
+          discussions: review ? db().discussions(review.id) : [],
+          others: (repoId ? db().repositoryDiscussions(repoId, review?.id ?? null) : [])
+            .map((d) => ({ ...d, live: isDir(d.worktree) })),
+          reviewed: review ? await reviewedState(ctx, spec, review) : [],
+        }, true);
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // One discussion's lifecycle. `create` needs a live checkout — it is about
+  // code somebody is looking at. `reply`, `resolve` and `reopen` address a
+  // record by id and deliberately do NOT: a discussion outlives its worktree,
+  // and being unable to close one because the branch was deleted is how a
+  // review ends up with permanently open threads about code that shipped.
+  if (consoleEnabled && req.method === "POST" && pathname === "/workspace/review/discussion") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
+    const spec = revSpecFrom(q);
+    if (spec === false) { res.writeHead(400); res.end(JSON.stringify({ error: "bad revision", code: "bad-revision" })); return; }
+    readJsonBody(req, MAX_DRAFTS_BYTES)
+      .then(async (raw) => {
+        const b = (raw ?? {}) as Record<string, unknown>;
+        const op = b.op;
+        if (op === "reply" || op === "resolve" || op === "reopen") {
+          const id = typeof b.id === "string" && b.id.length <= 64 ? b.id : "";
+          if (!id) { res.writeHead(400); res.end(JSON.stringify({ error: "bad discussion", code: "bad-discussion" })); return; }
+          if (op !== "reply") {
+            if (!db().setDiscussionStatus(id, op === "resolve" ? "resolved" : "open")) { res.writeHead(404); res.end(JSON.stringify({ error: "no such discussion" })); return; }
+            sendJson(res, { ok: true });
+            return;
+          }
+          const body = parseBody(b.body);
+          if (!body) { res.writeHead(400); res.end(JSON.stringify({ error: "bad body", code: "bad-discussion" })); return; }
+          const reply = db().addDiscussionReply(id, body);
+          if (!reply) { res.writeHead(404); res.end(JSON.stringify({ error: "no such discussion" })); return; }
+          sendJson(res, { ok: true, reply });
+          return;
+        }
+        if (op !== "create") { res.writeHead(400); res.end(JSON.stringify({ error: "bad op", code: "bad-discussion" })); return; }
+        const anchor = parseAnchor(b.anchor);
+        const body = parseBody(b.body);
+        const revision = parseRevision(b.revision);
+        const diffHash = b.diffHash === undefined ? undefined : parseHash(b.diffHash);
+        if (!anchor || !body || !revision || diffHash === null) { res.writeHead(400); res.end(JSON.stringify({ error: "bad discussion", code: "bad-discussion" })); return; }
+        const ctx = await reviewContext(cwd, spec);
+        // A discussion is started ON a diff. Without a checkout there is no diff
+        // to have been looking at, and the honest reason differs: a folder that
+        // is simply not a repo, versus a worktree that has been deleted since
+        // the client last loaded (its records stay readable, see above).
+        if (!ctx) { sendJson(res, { ok: false, reason: isDir(cwd) ? "not-a-repo" : "worktree-gone" }); return; }
+        const review = await provisionReview(ctx, parseCompanion(b.companion));
+        sendJson(res, { ok: true, discussion: db().createDiscussion(review.id, { ...anchor, body, revision, ...(diffHash ? { diffHash } : {}) }) });
+      })
+      .catch((e: Error) => sendError(res, e, "discussion too large"));
+    return;
+  }
+  // Mark one file read, or unmark it. `hash`/`revision` are the client's — they
+  // identify the diff that was ON SCREEN. The server deliberately does not
+  // re-read the file here: a checkout that advanced while somebody was reading
+  // would otherwise be recorded as reviewed, which is the one thing this feature
+  // exists to prevent.
+  if (consoleEnabled && req.method === "POST" && pathname === "/workspace/review/reviewed") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "cwd outside root", code: "outside-root" })); return; }
+    const spec = revSpecFrom(q);
+    if (spec === false) { res.writeHead(400); res.end(JSON.stringify({ error: "bad revision", code: "bad-revision" })); return; }
+    readJsonBody(req, MAX_DRAFTS_BYTES)
+      .then(async (raw) => {
+        const b = (raw ?? {}) as Record<string, unknown>;
+        const filePath = typeof b.path === "string" && validRepoPath(b.path) ? b.path : "";
+        const reviewed = b.reviewed !== false;
+        const hash = parseHash(b.hash);
+        const revision = parseRevision(b.revision);
+        if (!filePath || (reviewed && (!hash || !revision))) { res.writeHead(400); res.end(JSON.stringify({ error: "bad reviewed", code: "bad-reviewed" })); return; }
+        const ctx = await reviewContext(cwd, spec);
+        if (!ctx) { sendJson(res, { ok: false, reason: "not-a-repo" }); return; }
+        const review = await provisionReview(ctx, parseCompanion(b.companion));
+        if (reviewed) db().setReviewedFile(review.id, { path: filePath, hash: hash as string, revision: revision as string });
+        else db().deleteReviewedFile(review.id, filePath);
+        sendJson(res, { ok: true });
+      })
+      .catch((e: Error) => sendError(res, e, "request too large"));
     return;
   }
   // Pinned ("favorite") folders, persisted server-side so they survive a client

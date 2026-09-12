@@ -24,6 +24,7 @@ const CHANGES: ChangesResult = {
 const DIFF: FileDiffResult = {
   path: "src/gateway.ts",
   status: "modified",
+  revision: "abc1234:working",
   binary: false,
   truncated: false,
   diff: ["@@ -1,3 +1,3 @@", " keep", "-old line", "+new line"].join("\n"),
