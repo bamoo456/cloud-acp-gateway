@@ -5388,7 +5388,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // What the client may reach is still narrowed on every axis:
   //   - the same cwd → FS_ROOT check every read here makes, first
   //   - the review a request addresses is derived server-side from
-  //     repoIdentity(cwd) + repoRoot(cwd) + the revision; the client names a
+  //     gitCommonDir(cwd) + repoRoot(cwd) + the revision; the client names a
   //     folder and a revision, never a review id
   //   - every path stored (a comment's, a discussion's anchor, a reviewed file)
   //     passes validRepoPath, because the state route joins one onto the repo

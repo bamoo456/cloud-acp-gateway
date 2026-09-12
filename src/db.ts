@@ -267,7 +267,7 @@ export class Db {
     )`);
     // ---- durable review state ----
     // A repository, keyed on its git COMMON dir (see workspace.ts's
-    // repoIdentity): every `git worktree` of one clone shares that path, which
+    // gitCommonDir): every `git worktree` of one clone shares that path, which
     // is what lets a discussion written in one worktree be listed while
     // reviewing another. root_commit/remote are written at creation and never
     // read by any query here — they are evidence for a future reassociation, not
