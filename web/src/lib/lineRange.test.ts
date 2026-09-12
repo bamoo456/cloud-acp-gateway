@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";
 import {
-  rangeFromOffsets, sliceLines, formatRange, rangeFragment, parseRangeFragment,
+  rangeFromOffsets, offsetsOfLines, sliceLines, formatRange, rangeFragment, parseRangeFragment,
 } from "./lineRange.ts";
 
 const FILE = ["one", "two", "three", "four"].join("\n");
@@ -33,6 +33,24 @@ describe("rangeFromOffsets", () => {
   test("offsets beyond the text clamp to it rather than inventing lines", () => {
     expect(rangeFromOffsets(FILE, 0, 9_999)).toEqual({ start: 1, end: 4 });
     expect(rangeFromOffsets(FILE, -5, 3)).toEqual({ start: 1, end: 1 });
+  });
+});
+
+describe("offsetsOfLines", () => {
+  test("covers the named lines, newline included, and inverts rangeFromOffsets", () => {
+    expect(offsetsOfLines(FILE, { start: 2, end: 3 })).toEqual([4, 14]);
+    expect(FILE.slice(4, 14)).toBe("two\nthree\n");
+    expect(rangeFromOffsets(FILE, 4, 14)).toEqual({ start: 2, end: 3 });
+    // The last line has no newline to include.
+    expect(offsetsOfLines(FILE, { start: 4, end: 4 })).toEqual([14, 18]);
+    // A range past the end stops at the end rather than failing.
+    expect(offsetsOfLines(FILE, { start: 3, end: 9 })).toEqual([8, 18]);
+  });
+
+  test("a line the text does not reach is nowhere, not the last line", () => {
+    expect(offsetsOfLines(FILE, { start: 5, end: 5 })).toBeNull();
+    expect(offsetsOfLines("one\ntwo\n", { start: 3, end: 3 })).toBeNull();
+    expect(offsetsOfLines("", { start: 1, end: 1 })).toBeNull();
   });
 });
 
