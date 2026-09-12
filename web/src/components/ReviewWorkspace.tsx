@@ -480,6 +480,7 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
 
   // The button that opened the sheet, so Escape can hand focus back to it.
   const opener = useRef<HTMLButtonElement | null>(null);
+  const compBtn = useRef<HTMLButtonElement>(null);
   const openSheet = (which: "files" | "companion") => (e: React.MouseEvent<HTMLButtonElement>) => {
     opener.current = e.currentTarget;
     toggleReviewSheet(which);
@@ -499,11 +500,21 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
     return () => document.removeEventListener("keydown", onKey);
   }, [sheet, toggleReviewSheet]);
 
-  // An Ask or a Fix becomes a chip on the companion's composer, which below
-  // 1100px is a sheet over the canvas: without this the reader is told to look
-  // at something they cannot see.
+  // An Ask or a Fix becomes a chip on the companion's composer, which is a
+  // sheet over the canvas below 1100px and foldable away above it: without
+  // this the reader is told to look at something they cannot see. Both are
+  // cleared whichever width this is, so widening the window later cannot
+  // uncover a companion that is still folded shut.
   const revealCompanion = () => {
-    if (!isDesktopPanelWidth() && useStore.getState().reviewSheet !== "companion") toggleReviewSheet("companion");
+    const st = useStore.getState();
+    if (st.companionCollapsed) toggleCompanion();
+    if (!isDesktopPanelWidth() && st.reviewSheet !== "companion") {
+      // Nothing was clicked to raise this sheet, so Escape has no button to
+      // hand focus back to — the one that would have raised it is the closest
+      // thing, and it is on screen at every width this branch runs at.
+      opener.current = compBtn.current;
+      toggleReviewSheet("companion");
+    }
   };
 
   // Comments on the open file, bucketed by the line they hang under, so the
@@ -549,7 +560,7 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
             button to reveal what is already on screen is noise. */}
         <button className="btn-sm rv-sheet" aria-pressed={sheet === "files"}
           onClick={openSheet("files")}>Files</button>
-        <button className="btn-sm rv-sheet" aria-pressed={sheet === "companion"}
+        <button className="btn-sm rv-sheet" ref={compBtn} aria-pressed={sheet === "companion"}
           onClick={openSheet("companion")}>Companion</button>
         {companionCollapsed && (
           <button className="icon-btn rv-uncollapse" title="Show companion" aria-label="Show companion"
