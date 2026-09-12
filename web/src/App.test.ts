@@ -45,6 +45,7 @@ describe("App running-task polling", () => {
       // The review workspace's own reads, which start the moment Review opens.
       getCommits: vi.fn().mockResolvedValue({ repo: null, commits: [] }),
       getReviewDraft: vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true }),
+      getReviewState: vi.fn().mockResolvedValue({ review: null, discussions: [], others: [], reviewed: [] }),
     }));
   });
 
