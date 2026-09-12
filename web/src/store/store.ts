@@ -389,6 +389,9 @@ interface State {
     abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number; spec?: RevSpec;
   }) => void;
   clearFilePreview: () => void;
+  // The Review slot's own. A workspace clears the location it owns and no
+  // other: the two slots exist precisely so one can't close the other's file.
+  clearReviewPreview: () => void;
   setWorkspace: (ws: Workspace) => void;
   // Called by the canvas as it leaves a location, with the scroll offset read
   // off the body — the store cannot measure that for itself.
@@ -2685,6 +2688,10 @@ export const useStore = create<State>((set, get) => {
 
     clearFilePreview() {
       set({ filePreview: null });
+    },
+
+    clearReviewPreview() {
+      set({ reviewPreview: null });
     },
 
     setWorkspace(ws) {

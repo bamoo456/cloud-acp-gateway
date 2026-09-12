@@ -42,6 +42,9 @@ describe("App running-task polling", () => {
       // The status bar's diffstat: the file panel reads the checkout even
       // while it is shut, so App-level renders touch this route too.
       getWorkspaceChanges: vi.fn().mockResolvedValue({ repo: null, files: [], truncated: false }),
+      // The review workspace's own reads, which start the moment Review opens.
+      getCommits: vi.fn().mockResolvedValue({ repo: null, commits: [] }),
+      getReviewDraft: vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true }),
     }));
   });
 
