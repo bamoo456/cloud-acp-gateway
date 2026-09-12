@@ -723,7 +723,7 @@ function selectedRange(code: HTMLElement | null): LineRange | null {
 // workspace mounts it as its canvas, which is what `spec` and `review` are for:
 // a diff read against some other revision than the working tree, with the
 // comments of an unsent review written onto its lines.
-export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAttach, onAttach, onAskFix }: {
+export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff, canAttach, onAttach, onAskFix }: {
   cwd: string; target: FilePreviewTarget; canAttach: boolean;
   // Which revision the diff is of. Null — the panel's case — is the working
   // tree, and the only case where the File view shows the same content the
@@ -752,6 +752,10 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAtta
   // offset. The panel passes neither.
   scrollTop?: number;
   onMode?: (mode: PreviewMode) => void;
+  // The diff response on screen, or null while there is none — a file view, a
+  // load in flight, a read that failed. Only the viewer knows which response is
+  // rendered, and the review canvas marks THAT one read.
+  onDiff?: (d: FileDiffResult | null) => void;
   onAttach: (range: LineRange, text: string) => void;
   onAskFix?: (intent: "ask" | "fix", range: LineRange, text: string) => void;
 }) {
@@ -852,12 +856,16 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAtta
     let alive = true;
     setErr(null);
     setLoading(true);
+    // Nothing is on screen until this lands, whichever way it goes: a file
+    // view, a failure, and the moment between two files all report none.
+    onDiff?.(null);
     const done = () => { if (alive) setLoading(false); };
     if (mode === "diff") {
       getFileDiff(cwd, target.abs, spec)
         .then((d) => {
           if (!alive) return;
           setDiff(d);
+          onDiff?.(d);
           // Nothing to render as a diff — a binary blob, an image, or a file
           // the agent only read. Show the file itself instead of an empty pane.
           //

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useStore, branchGate, type PreviewMode, type ReviewLoc } from "../store/store.ts";
 import {
   getCommits, getWorkspaceChanges, getReviewDraft, saveReviewDraft,
-  getReviewState, postReviewDiscussion,
-  type ChangedFile, type ChangesResult, type CommitEntry, type Discussion, type OtherDiscussion,
-  type ReviewComment, type ReviewIdentity, type RevSpec,
+  getReviewState, postReviewDiscussion, setFileReviewed,
+  type ChangedFile, type ChangesResult, type CommitEntry, type Discussion, type FileDiffResult,
+  type OtherDiscussion, type ReviewComment, type ReviewedFile, type ReviewIdentity, type RevSpec,
 } from "../lib/api.ts";
 import { buildReviewMessage, buildApprovalMessage, buildDiscussionMessage } from "../lib/reviewPrompt.ts";
 import { basename, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
@@ -125,6 +125,10 @@ export function useReviewSession(cwd: string, active: boolean) {
   const [review, setReview] = useState<ReviewIdentity | null>(null);
   const [discussions, setDiscussions] = useState<Discussion[]>([]);
   const [others, setOthers] = useState<OtherDiscussion[]>([]);
+  // Which files have been read, and whether they still say what they said when
+  // they were. `changed` is the gateway's comparison, not ours: the hash it
+  // holds is the one that was on screen at the moment somebody marked it.
+  const [reviewed, setReviewed] = useState<ReviewedFile[]>([]);
   const [tab, setTab] = useState<"changed" | "discussions">("changed");
   // Its own refresh counter. A reply is one row on the gateway; riding
   // refreshKey would re-run git status and the log to learn it.
@@ -217,7 +221,7 @@ export function useReviewSession(cwd: string, active: boolean) {
   const stateGen = useRef(0);
   useEffect(() => {
     if (!active) return;
-    if (pending) { setReview(null); setDiscussions([]); setOthers([]); return; }
+    if (pending) { setReview(null); setDiscussions([]); setOthers([]); setReviewed([]); return; }
     const mine = ++stateGen.current;
     getReviewState(cwd, spec)
       .then((st) => {
@@ -225,8 +229,9 @@ export function useReviewSession(cwd: string, active: boolean) {
         setReview(st.review);
         setDiscussions(st.discussions);
         setOthers(st.others);
+        setReviewed(st.reviewed);
       })
-      .catch(() => { if (mine === stateGen.current) { setDiscussions([]); setOthers([]); } });
+      .catch(() => { if (mine === stateGen.current) { setDiscussions([]); setOthers([]); setReviewed([]); } });
     return () => { stateGen.current++; };
   }, [cwd, specKey, pending, refreshKey, active, stateKey]);
 
@@ -352,6 +357,10 @@ export function useReviewSession(cwd: string, active: boolean) {
     openFile: (f: ChangedFile) =>
       openFilePreview({ abs: f.abs, path: f.path, mode: "diff", cwd, spec }),
     refresh: () => { setRefreshKey((k) => k + 1); setReloadKey((k) => k + 1); },
+    // The diff on screen and nothing else. What "changed since you reviewed it"
+    // offers is a re-read of this one file — re-running the lists around it
+    // would move the reader off it to answer a question about it.
+    reload: () => setReloadKey((k) => k + 1),
     addComment: (path: string, anchor: DiffAnchor, body: string) => commitComments([
       ...comments, { id: makeId(), path, side: anchor.side, line: anchor.line, code: anchor.code, body },
     ]),
@@ -359,7 +368,7 @@ export function useReviewSession(cwd: string, active: boolean) {
     send,
 
     // ---- durable state ----
-    review, discussions, others, tab, setTab,
+    review, discussions, others, reviewed, tab, setTab,
     // Every count the tab shows is of THIS review's open threads: a resolved one
     // is done, and a sibling worktree's is not this reviewer's to clear.
     openCount: discussions.filter((d) => d.status === "open").length,
@@ -379,6 +388,14 @@ export function useReviewSession(cwd: string, active: boolean) {
       onBranch: branchShow ? (d: Discussion) => { void branchSession({ text: buildDiscussionMessage(d) }); } : undefined,
       branchDisabled, branchWhy,
     },
+    // `hash` and `revision` are the diff that was RENDERED, handed straight
+    // through. Not optimistic, unlike a reply: a tick that appears before the
+    // gateway has it is a claim that a file was read, which is the one thing
+    // this is here to keep honest.
+    markReviewed: (path: string, hash: string, revision: string, next: boolean) => {
+      void setFileReviewed(cwd, spec, { path, hash, revision, reviewed: next, companion: companion() })
+        .then(() => setStateKey((k) => k + 1));
+    },
     // The same slot a CodeRef opens, so the canvas history works the same way.
     // Rooted at the review's worktree rather than at `cwd`: a discussion's path
     // is repo-root-relative, and `cwd` may be a folder inside the checkout. The
@@ -397,6 +414,19 @@ export function ReviewLeft({ rv }: { rv: ReviewSession }) {
   const { changes, comments, scope, pending, loading, err, spec } = rv;
   const files = changes?.files ?? [];
   const countFor = (path: string) => comments.filter((c) => c.path === path).length;
+  // Read, and still what was read. A muted tick rather than a green one: green
+  // means a diff `+`, and a column of green ticks buries the files nobody has
+  // opened yet. The changed mark says the opposite — this row is work again.
+  const markFor = (path: string) => {
+    const r = rv.reviewed.find((f) => f.path === path);
+    if (!r) return null;
+    if (!r.changed) return <span className="wf-reviewed" title="You marked this reviewed">✓</span>;
+    return (
+      <span className="wf-reviewed changed" title={r.reason === "unhashable"
+        ? "Changed after you reviewed it — this diff can no longer be read whole"
+        : "Changed after you reviewed it"}>●</span>
+    );
+  };
   return (
     <aside className={"rv-left" + (sheet ? " open" : "")} aria-label="Changed files">
       {rv.showDraft ? (
@@ -476,6 +506,7 @@ export function ReviewLeft({ rv }: { rv: ReviewSession }) {
                       <span className="wf-name">
                         <span className="wf-nm">{basename(f.path)}</span>
                       </span>
+                      {markFor(f.path)}
                       {countFor(f.path) > 0 && <span className="rv-badge">{countFor(f.path)}</span>}
                       <span className="wf-counts">
                         {f.binary
@@ -573,6 +604,10 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
   // them.
   const scrollTop = useRef(0);
   const viewMode = useRef<PreviewMode>("diff");
+  // The FileDiffResult the viewer has on screen, reported up as it lands. The
+  // header's Reviewed toggle marks THAT — re-fetching the diff at click time is
+  // how a checkout that moved on gets recorded as read.
+  const [diff, setDiff] = useState<FileDiffResult | null>(null);
   const canvasRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const el = canvasRef.current;
@@ -683,6 +718,12 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
     }
   }
 
+  // Three states from one row: unread, read, and read-then-changed. The last
+  // reads as unpressed on purpose — the next click re-marks it against the diff
+  // now on screen rather than dropping the mark.
+  const readEntry = loc ? rv.reviewed.find((f) => f.path === loc.path) : undefined;
+  const markedRead = !!readEntry && !readEntry.changed;
+
   const askFix = (intent: "ask" | "fix", anchor: DiffAnchor) => {
     if (!loc || !rv.activeId) return;
     revealCompanion();
@@ -719,6 +760,18 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
           <button className="icon-btn rv-uncollapse" title="Show companion" aria-label="Show companion"
             onClick={toggleCompanion}><IconChevrons left /></button>
         )}
+        {/* Only for a diff of the revision being reviewed: a CodeRef opened at
+            another one is not part of this review, and a file whose diff has no
+            digest has nothing to identify what was read. */}
+        {loc && onScope && diff && (
+          <button className="btn-sm" aria-pressed={markedRead} disabled={!diff.hash}
+            title={diff.hash ? undefined : diff.binary
+              ? "A binary file has no diff to have read."
+              : "This diff was too large to send whole, so there's nothing to mark."}
+            onClick={() => rv.markReviewed(loc.path, diff.hash!, diff.revision, !markedRead)}>
+            {markedRead ? "Reviewed" : "Mark reviewed"}
+          </button>
+        )}
         {/* Explicit, because nothing else here re-reads a diff: a turn ending
             refreshes the lists around it, and stops there. */}
         <button className="icon-btn" title="Refresh" onClick={rv.refresh}><IconRefresh /></button>
@@ -750,6 +803,16 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
         <BaseEditor value={rv.baseRef} branch={log?.branch} onDone={rv.setBase} />
       )}
 
+      {/* What the reviewer read is no longer what the file says. It flags and
+          reoffers the diff; it clears nothing, because only a reader can say
+          they have read something. */}
+      {loc && onScope && readEntry?.changed && (
+        <div className="rv-warn rv-changed">
+          <span>Changed since you reviewed it</span>
+          <button className="btn-sm" onClick={rv.reload}>Review new changes</button>
+        </div>
+      )}
+
       {/* Commits: the log, until one is picked. Picking re-asks every read above
           with ?rev=, which is why there is no separate detail screen. */}
       {scope === "commits" && !commit ? (
@@ -779,7 +842,7 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
         // Keyed on the reload: "re-read everything now" includes this diff, and
         // a fresh viewer is the whole of what that means.
         <FileView key={rv.reloadKey} cwd={loc.cwd ?? rv.cwd} target={loc} spec={loc.spec ?? null}
-          scrollTop={loc.scrollTop} onMode={(m) => { viewMode.current = m; }}
+          scrollTop={loc.scrollTop} onMode={(m) => { viewMode.current = m; }} onDiff={setDiff}
           review={onScope ? {
             comments: byLine,
             onAdd: (anchor, body) => rv.addComment(loc.path, anchor, body),
