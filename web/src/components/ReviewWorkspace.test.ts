@@ -35,6 +35,7 @@ const CHANGES: ChangesResult = {
 const DIFF: FileDiffResult = {
   path: "src/workspace.ts",
   status: "modified",
+  revision: "abc1234:working",
   binary: false,
   truncated: false,
   diff: ["@@ -404,3 +404,4 @@", " keep", "-old line", "+new line"].join("\n"),
