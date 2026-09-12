@@ -2724,12 +2724,15 @@ export const useStore = create<State>((set, get) => {
       set({ reviewHistory: { past: [], future: [] } });
     },
 
+    // Retracing reveals the canvas for the same reason opening a file does: the
+    // header these buttons live in stays clear of the sheet, so Back under an
+    // open sheet would move the reader somewhere they cannot see.
     reviewBack(current) {
       const { past, future } = get().reviewHistory;
       const prev = past[past.length - 1];
       if (!prev) return;
       set({
-        reviewPreview: prev,
+        reviewPreview: prev, reviewSheet: "none",
         reviewHistory: { past: past.slice(0, -1), future: current ? [current, ...future] : future },
       });
     },
@@ -2739,7 +2742,7 @@ export const useStore = create<State>((set, get) => {
       const next = future[0];
       if (!next) return;
       set({
-        reviewPreview: next,
+        reviewPreview: next, reviewSheet: "none",
         reviewHistory: { past: current ? [...past, current] : past, future: future.slice(1) },
       });
     },

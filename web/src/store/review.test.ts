@@ -78,6 +78,20 @@ describe("review workspace state", () => {
     expect(useStore.getState().reviewPreview).toEqual(a);
   });
 
+  test("retracing reveals the canvas the sheet was covering", async () => {
+    const { useStore } = await import("./store.ts");
+    const a = { abs: "/repo/a.ts", path: "a.ts", mode: "diff" as const };
+    const b = { abs: "/repo/b.ts", path: "b.ts", mode: "diff" as const };
+
+    useStore.setState({ reviewPreview: b, reviewHistory: { past: [a], future: [] }, reviewSheet: "files" });
+    useStore.getState().reviewBack(b);
+    expect(useStore.getState().reviewSheet).toBe("none");
+
+    useStore.setState({ reviewSheet: "companion" });
+    useStore.getState().reviewForward(b);
+    expect(useStore.getState().reviewSheet).toBe("none");
+  });
+
   test("changing folder clears the canvas and its history", async () => {
     const { useStore } = await import("./store.ts");
     const a = { abs: "/repo/a.ts", path: "a.ts", mode: "diff" as const };
