@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import { installFakeSse } from "./test/fakeSse.ts";
+import { EditorView } from "@codemirror/view";
 
 function setVisibility(state: "visible" | "hidden") {
   Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
@@ -155,5 +156,40 @@ describe("App running-task polling", () => {
     });
 
     expect(container.querySelector(".statusbar")?.textContent).toContain("7 files");
+  });
+
+  test("Review re-deals the row around the same conversation element", async () => {
+    await render();
+    const { useStore } = await import("./store/store.ts");
+
+    const content = container.querySelector(".content")!;
+    const sidebar = container.querySelector("#panel")!;
+    const view = EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!;
+    await act(async () => {
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "half a thought" } });
+    });
+
+    await act(async () => { useStore.getState().setWorkspace("review"); });
+
+    // The same element, moved — which is what keeps the draft, the thread's
+    // scroll and the queue rail alive across the switch.
+    expect(container.querySelector(".content")).toBe(content);
+    expect(content.classList.contains("comp")).toBe(true);
+    expect(container.querySelector("#panel")).toBe(sidebar);
+    expect(container.querySelector("#files")).toBeNull();
+    expect(container.querySelector("aside.rv-left")).not.toBeNull();
+    expect(container.querySelector("main.canvas .rv-bar")).not.toBeNull();
+    expect(EditorView.findFromDOM(container.querySelector<HTMLElement>(".cm-editor")!)!.state.doc.toString())
+      .toBe("half a thought");
+
+    const back = [...container.querySelectorAll<HTMLButtonElement>("main.canvas .rv-bar button")]
+      .find((b) => b.title === "Back to conversation")!;
+    await act(async () => { back.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    expect(useStore.getState().workspace).toBe("agent");
+    expect(container.querySelector(".content")).toBe(content);
+    expect(content.classList.contains("comp")).toBe(false);
+    expect(container.querySelector("main.canvas")).toBeNull();
+    expect(container.querySelector("#files")).not.toBeNull();
   });
 });

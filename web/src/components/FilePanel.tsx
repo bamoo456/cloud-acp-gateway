@@ -204,6 +204,7 @@ export function FilePanel() {
   const openFilePreview = useStore((s) => s.openFilePreview);
   const attachFiles = useStore((s) => s.attachFiles);
   const setAskFix = useStore((s) => s.setAskFix);
+  const setWorkspace = useStore((s) => s.setWorkspace);
   const agentName = useStore((s) => s.agentName);
   const setChangeStat = useStore((s) => s.setChangeStat);
   // The same capability the composer's "@" button is gated on: file references
@@ -511,8 +512,12 @@ export function FilePanel() {
                 while you are looking at something else. It counts every scope's
                 draft, not the open one's: "you have comments waiting" is the
                 claim, and which revision they are on is the mode's own business. */}
+            {/* The tab is an entry point now: Review is a workspace, and this
+                panel is not mounted inside it. setMode still runs for the panel
+                rendered on its own (tests, and the moment before the switch
+                takes the panel off screen). */}
             <button role="tab" aria-selected={mode === "review"} className={mode === "review" ? "active" : ""}
-              onClick={() => setMode("review")}>
+              onClick={() => { setMode("review"); setWorkspace("review"); }}>
               Review{reviewCount > 0 && <span className="wf-badge">{reviewCount}</span>}
             </button>
           </div>

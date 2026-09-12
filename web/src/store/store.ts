@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, postAttention, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, postAttention, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem, type RevSpec } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
@@ -46,6 +46,16 @@ export type PreviewMode = "diff" | "file" | "render";
 export interface FilePreviewTarget {
   abs: string; path: string; mode: PreviewMode; cwd?: string; line?: number; endLine?: number;
 }
+
+// One location of the Review canvas. A file alone doesn't identify it: the same
+// path reads differently against the working tree and against a commit, and
+// Back is only honest if it returns to the scroll offset it was left at.
+export interface ReviewLoc extends FilePreviewTarget { spec?: RevSpec; scrollTop?: number }
+
+export type Workspace = "agent" | "review";
+// Which of the two side columns is overlaying the canvas below 1100px, where
+// there is only room for one at a time. The enum IS the exclusivity rule.
+export type ReviewSheet = "none" | "files" | "companion";
 
 // One floating conversation window (see State's `sideWindows`).
 // `slot` is which default corner offset the card is born at, so several open at
@@ -235,6 +245,18 @@ interface State {
   sidebarOpen: boolean;
   // Which file the preview pane is showing; null means the file list.
   filePreview: FilePreviewTarget | null;
+  // ---- review workspace ----
+  // Which workspace the window is in. Review replaces the chat/file-panel
+  // layout rather than growing inside it, so it is one flag, not a panel mode.
+  workspace: Workspace;
+  // The canvas's own preview slot. Separate from `filePreview` so that opening
+  // a file in either workspace leaves the other one's reading position alone.
+  reviewPreview: ReviewLoc | null;
+  // Canvas Back/Forward. `past` is where you came from, newest last.
+  reviewHistory: { past: ReviewLoc[]; future: ReviewLoc[] };
+  // Whether the companion column is folded away and the canvas has its width.
+  companionCollapsed: boolean;
+  reviewSheet: ReviewSheet;
   // The Ask/Fix the composer is about to send (its context chip), captured
   // when the button was pressed. Set from the file panel and Review, which is
   // why it is not the composer's own state.
@@ -364,9 +386,17 @@ interface State {
   // Opens the panel *and* the file — the one entry point for "show me this
   // file", wherever the path was clicked.
   openFilePreview: (file: {
-    abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number;
+    abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number; spec?: RevSpec;
   }) => void;
   clearFilePreview: () => void;
+  setWorkspace: (ws: Workspace) => void;
+  // Called by the canvas as it leaves a location, with the scroll offset read
+  // off the body — the store cannot measure that for itself.
+  pushReviewHistory: (loc: ReviewLoc) => void;
+  reviewBack: (current: ReviewLoc | null) => void;
+  reviewForward: (current: ReviewLoc | null) => void;
+  toggleCompanion: () => void;
+  toggleReviewSheet: (which: ReviewSheet) => void;
   setAskFix: (req: AskFixRequest | null) => void;
   attachFiles: (files: MessageFile[]) => void;
   removeAttachedFile: (index: number) => void;
@@ -471,6 +501,10 @@ function activeAgentColor(state: SkinState): string {
 
 let acp: Acp = undefined as unknown as Acp;
 let sessionInit: Promise<unknown> | null = null;
+
+// What `sidebarOpen` was before Review took the column's width, so leaving can
+// put it back. Nothing renders it, so it is a closure variable, not a field.
+let sidebarBeforeReview = false;
 let creatingSession = false; // a "+" / New chat round-trip is in flight — ignore repeat clicks
 let pendingResyncId: string | null = null;
 // Command lists that named a session before this tab had it, keyed by that
@@ -1571,6 +1605,11 @@ export const useStore = create<State>((set, get) => {
     // Same shape for the left column, at its own (860px) breakpoint.
     sidebarOpen: isDesktopSidebarWidth(),
     filePreview: null,
+    workspace: "agent",
+    reviewPreview: null,
+    reviewHistory: { past: [], future: [] },
+    companionCollapsed: false,
+    reviewSheet: "none",
     askFix: null,
     attachedFiles: [],
 
@@ -2633,17 +2672,64 @@ export const useStore = create<State>((set, get) => {
 
     openFilePreview(file) {
       if (!file.abs) return;
-      set({
-        filesOpen: true,
-        filePreview: {
-          abs: file.abs, path: file.path || basename(file.abs), mode: file.mode ?? "diff", cwd: file.cwd,
-          line: file.line, endLine: file.endLine,
-        },
-      });
+      const target: FilePreviewTarget = {
+        abs: file.abs, path: file.path || basename(file.abs), mode: file.mode ?? "diff", cwd: file.cwd,
+        line: file.line, endLine: file.endLine,
+      };
+      // In Review the canvas IS the viewer, so a file opened there must land on
+      // it and nowhere else — opening the file panel behind it would show the
+      // same file twice and overwrite the Agent workspace's own position.
+      if (get().workspace === "review") set({ reviewPreview: { ...target, spec: file.spec } });
+      else set({ filesOpen: true, filePreview: target });
     },
 
     clearFilePreview() {
       set({ filePreview: null });
+    },
+
+    setWorkspace(ws) {
+      const st = get();
+      if (st.workspace === ws) return; // re-entering Review must not remember its own collapse
+      if (ws === "review") {
+        sidebarBeforeReview = st.sidebarOpen;
+        // Review's three columns need the width. The sessions button still
+        // works in here; leaving is what puts the column back as it was.
+        set({ workspace: ws, sidebarOpen: false });
+      } else {
+        set({ workspace: ws, sidebarOpen: sidebarBeforeReview });
+      }
+    },
+
+    pushReviewHistory(loc) {
+      set((st) => ({ reviewHistory: { past: [...st.reviewHistory.past, loc], future: [] } }));
+    },
+
+    reviewBack(current) {
+      const { past, future } = get().reviewHistory;
+      const prev = past[past.length - 1];
+      if (!prev) return;
+      set({
+        reviewPreview: prev,
+        reviewHistory: { past: past.slice(0, -1), future: current ? [current, ...future] : future },
+      });
+    },
+
+    reviewForward(current) {
+      const { past, future } = get().reviewHistory;
+      const next = future[0];
+      if (!next) return;
+      set({
+        reviewPreview: next,
+        reviewHistory: { past: current ? [...past, current] : past, future: future.slice(1) },
+      });
+    },
+
+    toggleCompanion() {
+      set((st) => ({ companionCollapsed: !st.companionCollapsed }));
+    },
+
+    toggleReviewSheet(which) {
+      set((st) => ({ reviewSheet: st.reviewSheet === which ? "none" : which }));
     },
 
     setAskFix(req) {
@@ -2700,6 +2786,15 @@ useStore.subscribe((state, prev) => {
   const fullUrl = new URL(shareUrl(id, session?.cwd || state.cwd, state.agentName));
   const url = fullUrl.pathname + fullUrl.search + fullUrl.hash;
   if (location.pathname + location.search + location.hash !== url) history.replaceState(null, "", url);
+});
+
+// A review location names a path in a checkout, so neither the canvas's file
+// nor its Back/Forward stacks survive a folder change. Here rather than inside
+// setCwd() because five paths assign `cwd` — restoring a session's own folder
+// and opening a deep link among them.
+useStore.subscribe((state, prev) => {
+  if (state.cwd === prev.cwd) return;
+  useStore.setState({ reviewPreview: null, reviewHistory: { past: [], future: [] } });
 });
 
 applyAgentSkin(activeAgentSkin(useStore.getState()));
