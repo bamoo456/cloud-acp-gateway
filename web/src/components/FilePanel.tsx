@@ -203,6 +203,8 @@ export function FilePanel() {
   const clearFilePreview = useStore((s) => s.clearFilePreview);
   const openFilePreview = useStore((s) => s.openFilePreview);
   const attachFiles = useStore((s) => s.attachFiles);
+  const setAskFix = useStore((s) => s.setAskFix);
+  const agentName = useStore((s) => s.agentName);
   const setChangeStat = useStore((s) => s.setChangeStat);
   // The same capability the composer's "@" button is gated on: file references
   // ride on embeddedContext, and an agent without it drops them on send.
@@ -684,7 +686,16 @@ export function FilePanel() {
               <FileView cwd={target.cwd ?? cwd} target={target} canAttach={canAttach}
                 onAttach={(range, text) => attach([
                   makeRangeFile(target.abs, basename(target.path), range, text),
-                ])} />
+                ])}
+                // Bound to the conversation on screen NOW: the request can be
+                // sent after switching to another one, and must still land here.
+                onAskFix={session && !session.viewOnly ? (intent, range, text) => {
+                  setAskFix({
+                    intent, agentName: session.agentName || agentName, sessionId: session.id, cwd: target.cwd ?? cwd, spec: null,
+                    path: target.path, line: range.start, endLine: range.end, code: text,
+                  });
+                  if (!desktop) closeFiles();
+                } : undefined} />
             </div>
           )}
         </div>
@@ -731,9 +742,10 @@ function selectedRange(code: HTMLElement | null): LineRange | null {
   return rangeFromOffsets(code.textContent ?? "", from, from + picked.toString().length);
 }
 
-function FileView({ cwd, target, canAttach, onAttach }: {
+function FileView({ cwd, target, canAttach, onAttach, onAskFix }: {
   cwd: string; target: FilePreviewTarget; canAttach: boolean;
   onAttach: (range: LineRange, text: string) => void;
+  onAskFix?: (intent: "ask" | "fix", range: LineRange, text: string) => void;
 }) {
   const [mode, setMode] = useState<PreviewMode>(target.mode);
   const [diff, setDiff] = useState<FileDiffResult | null>(null);
@@ -802,7 +814,7 @@ function FileView({ cwd, target, canAttach, onAttach }: {
     };
     document.addEventListener("selectionchange", sync);
     return () => document.removeEventListener("selectionchange", sync);
-  }, [mode, target.abs, edit]);
+  }, [mode, target.abs, edit, file?.hash]);
 
   function addSelection() {
     const text = codeRef.current?.textContent;
@@ -813,6 +825,14 @@ function FileView({ cwd, target, canAttach, onAttach }: {
     // being added twice by a second click.
     window.getSelection()?.removeAllRanges();
     setRange(null);
+  }
+
+  // The selection stays: the lines are still what the question is about, and
+  // the composer's chip is the acknowledgement here.
+  function askSelection(intent: "ask" | "fix") {
+    const text = codeRef.current?.textContent;
+    if (!range || !text || !onAskFix) return;
+    onAskFix(intent, range, sliceLines(text, range));
   }
 
   useEffect(() => {
@@ -1027,6 +1047,19 @@ function FileView({ cwd, target, canAttach, onAttach }: {
               <IconAddToChat />{range && <span className="lines">{formatRange(range)}</span>}
             </button>
           )}
+          {/* Ask about the selected lines, or have them fixed. Text rather than
+              glyphs: the two differ only in what the agent is allowed to do,
+              which no icon says. */}
+          {onAskFix && mode === "file" && file?.kind === "text" && (["ask", "fix"] as const).map((intent) => (
+            <button key={intent} type="button" className="icon-btn wf-add wf-ask" disabled={!range}
+              onClick={() => askSelection(intent)}
+              onMouseDown={(e) => e.preventDefault()}
+              title={range
+                ? (intent === "ask" ? "Ask about lines " : "Request a fix for lines ") + formatRange(range)
+                : "Select lines in the file first"}>
+              {intent === "ask" ? "Ask" : "Fix"}
+            </button>
+          ))}
           {!(mode === "render" && isHtml) && (
             // Off while editing for the same reason it is closed on the way in:
             // the search reads the rendered body, and a textarea's value is not

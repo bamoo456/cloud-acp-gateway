@@ -12,6 +12,7 @@ import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { execCommand, shellContext, shellNote } from "../lib/terminal.ts";
 import { buildHandoffMessage } from "../lib/handoffPrompt.ts";
+import type { AskFixRequest } from "../lib/reviewPrompt.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
   EMPTY_ENGINE,
@@ -234,6 +235,10 @@ interface State {
   sidebarOpen: boolean;
   // Which file the preview pane is showing; null means the file list.
   filePreview: FilePreviewTarget | null;
+  // The Ask/Fix the composer is about to send (its context chip), captured
+  // when the button was pressed. Set from the file panel and Review, which is
+  // why it is not the composer's own state.
+  askFix: AskFixRequest | null;
   // Files staged on the composer, waiting to be sent with the next message —
   // the chips above the input. In the store for the same reason the preview
   // panel is: they are added from the file panel as well as from the composer's
@@ -362,6 +367,7 @@ interface State {
     abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number;
   }) => void;
   clearFilePreview: () => void;
+  setAskFix: (req: AskFixRequest | null) => void;
   attachFiles: (files: MessageFile[]) => void;
   removeAttachedFile: (index: number) => void;
   clearAttachedFiles: () => void;
@@ -849,7 +855,7 @@ export const useStore = create<State>((set, get) => {
     acp?.close();
     set({
       agentReady: false, tip: "Reconnecting…",
-      sessions: {}, activeId: null, sideWindows: [],
+      sessions: {}, activeId: null, sideWindows: [], askFix: null,
       // rateLimits is deliberately untouched: it's polled per account,
       // independent of this connection, and a restart shouldn't blank it.
       promptCapabilities: {}, pendingPermissions: [],
@@ -1376,7 +1382,7 @@ export const useStore = create<State>((set, get) => {
       conn: "connecting", agentReady: false, tip,
       // rateLimits carries over: it's keyed by account and polled independent
       // of which agent is active, so a different provider's quota is still valid.
-      sessions: {}, activeId: null,
+      sessions: {}, activeId: null, askFix: null,
       promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
@@ -1565,6 +1571,7 @@ export const useStore = create<State>((set, get) => {
     // Same shape for the left column, at its own (860px) breakpoint.
     sidebarOpen: isDesktopSidebarWidth(),
     filePreview: null,
+    askFix: null,
     attachedFiles: [],
 
     bootstrap() {
@@ -2172,6 +2179,11 @@ export const useStore = create<State>((set, get) => {
       // shows a waiting strip instead of a composer; this is the belt to that
       // braces, for any other caller.
       if (!target || target.viewOnly || sessionId.startsWith("pending-") || !get().agentReady) return false;
+      // The connection belongs to get().agentName; a session another agent owns
+      // (kept across setAgent) would be prompted on a socket that has never
+      // heard of it, and the error would land as a note in that off-screen
+      // conversation while this resolved true.
+      if (target.agentName && target.agentName !== get().agentName) return false;
       if (get().busySessionIds[sessionId]) return false;
       const imgs = get().promptCapabilities.image ? (images || []) : [];
       const refs = get().promptCapabilities.embeddedContext ? (files || []) : [];
@@ -2632,6 +2644,10 @@ export const useStore = create<State>((set, get) => {
 
     clearFilePreview() {
       set({ filePreview: null });
+    },
+
+    setAskFix(req) {
+      set({ askFix: req });
     },
 
     // De-duplicated on the URI, which carries the line range: two ranges of one

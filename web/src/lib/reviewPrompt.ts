@@ -30,7 +30,7 @@ function ordered(comments: ReviewComment[]): ReviewComment[] {
   return [...comments].sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
 }
 
-function anchor(c: ReviewComment): string {
+function anchor(c: { path: string; line: number; endLine?: number; side?: string }): string {
   const range = c.endLine && c.endLine > c.line ? c.line + "-" + c.endLine : String(c.line);
   // The side is only worth naming when it is the deleted one: "old" changes what
   // the line number means, and a comment about removed code reads as a comment
@@ -79,4 +79,32 @@ export function buildReviewMessage(
 // leaves the agent guessing whether you read the branch or one file of it.
 export function buildApprovalMessage(spec: RevSpec | null, commitLabel?: string): string {
   return `Reviewed ${describeScope(spec, commitLabel)} — looks good to me, no comments.`;
+}
+
+// A question about, or a fix for, one stretch of code — captured when the
+// reviewer pressed the button, and sent as text for the same reasons the review
+// above is. `sessionId`/`agentName` bind it to the conversation it came from,
+// whatever is on screen by the time it is sent.
+export interface AskFixRequest {
+  intent: "ask" | "fix";
+  agentName: string;
+  sessionId: string;
+  cwd: string;
+  spec: RevSpec | null;
+  // How the commit reads in Review (short sha + subject); the spec only has the sha.
+  label?: string;
+  path: string;
+  side?: "new" | "old";
+  line: number;
+  endLine?: number;
+  code: string;
+}
+
+export function buildAskFixMessage(r: AskFixRequest, body: string): string {
+  const head = r.intent === "ask"
+    ? "Question about selected code — explain it; do not edit anything."
+    : "Fix request for selected code — make the change described below.";
+  const f = fence(r.code);
+  const quote = r.code.trim() ? `\n${f}\n${r.code}\n${f}` : "";
+  return `${head}\n\nIn checkout \`${r.cwd}\` (${describeScope(r.spec, r.label)}):\n\n### ${anchor(r)}${quote}\n\n${body.trim()}`;
 }

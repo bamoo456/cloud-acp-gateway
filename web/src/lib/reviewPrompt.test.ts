@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildReviewMessage, buildApprovalMessage, describeScope } from "./reviewPrompt.ts";
+import { buildReviewMessage, buildApprovalMessage, buildAskFixMessage, describeScope, type AskFixRequest } from "./reviewPrompt.ts";
 import type { ReviewComment } from "./api.ts";
 
 const c = (over: Partial<ReviewComment> = {}): ReviewComment => ({
@@ -82,5 +82,34 @@ describe("buildApprovalMessage", () => {
     // file of it.
     expect(buildApprovalMessage({ base: "main" }))
       .toBe("Reviewed `main...HEAD` — looks good to me, no comments.");
+  });
+});
+
+describe("buildAskFixMessage", () => {
+  const r = (over: Partial<AskFixRequest> = {}): AskFixRequest => ({
+    intent: "ask", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null,
+    path: "src/workspace.ts", line: 408, code: "const args = rev;", ...over,
+  });
+
+  test("Ask says explain and forbids edits; Fix asks for the described change", () => {
+    expect(buildAskFixMessage(r(), "why?").split("\n")[0])
+      .toBe("Question about selected code — explain it; do not edit anything.");
+    expect(buildAskFixMessage(r({ intent: "fix" }), "guard it").split("\n")[0])
+      .toBe("Fix request for selected code — make the change described below.");
+  });
+
+  test("names the checkout, the scope, the place, and quotes the code as selected", () => {
+    const text = buildAskFixMessage(r({ spec: { base: "main" }, endLine: 411 }), "  why?  ");
+    expect(text).toContain("In checkout `/repo` (`main...HEAD`):");
+    expect(text).toContain("### src/workspace.ts:408-411\n```\nconst args = rev;\n```\n\nwhy?");
+  });
+
+  test("a removed diff line says so — its number belongs to the old side", () => {
+    expect(buildAskFixMessage(r({ side: "old" }), "gone?")).toContain("### src/workspace.ts:408 (removed line)");
+  });
+
+  test("a commit is named the way Review names it, not by its full sha", () => {
+    const spec = { commit: "3f2a9c0d3f2a9c0d3f2a9c0d3f2a9c0d3f2a9c0d" };
+    expect(buildAskFixMessage(r({ spec, label: "3f2a9c0 fix: guard it" }), "why?")).toContain("(commit `3f2a9c0 fix: guard it`):");
   });
 });

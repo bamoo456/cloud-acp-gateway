@@ -978,6 +978,8 @@ describe("Composer session busy state", () => {
     expect(items).toHaveLength(2);
     expect(items.map((n) => n.querySelector(".queue-body")!.textContent)).toEqual(["second", "third"]);
     expect(items[0].querySelector(".queue-meta")!.textContent).toContain("next 1");
+    // Review-facing copy: what happens, not how many agent turns it takes.
+    expect(container.querySelector(".queue-out")!.textContent).toBe("queued — sends after the current work finishes");
 
     await act(async () => { items[1].querySelector<HTMLButtonElement>("button.x")!.click(); });
     expect(unqueuePrompt).toHaveBeenCalledWith("s1", "q2");
@@ -986,6 +988,98 @@ describe("Composer session busy state", () => {
   test("another conversation's queue is not drawn here", async () => {
     await mountBusy({}, { queuedPrompts: { "other-session": [{ id: "q1", text: "not mine" }] } });
     expect(container.querySelector(".queue-rail")).toBeNull();
+  });
+
+  // ---- an Ask/Fix captured in the file panel ----
+
+  const ASK = {
+    intent: "ask" as const, agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null,
+    path: "src/x.ts", side: "new" as const, line: 41, code: "const x = 1;",
+  };
+
+  test("a busy target enqueues the built message and clears both the box and the chip", async () => {
+    const { useStore, queuePrompt, sendPromptTo } = await mountBusy({}, { askFix: ASK });
+    expect(container.querySelector(".file-chip .nm")!.textContent).toBe("Ask · x.ts:41 · new · the working tree");
+
+    await act(async () => { cmSet(cmView(container), "why?"); });
+    expect(primary().textContent).toContain("queue");
+    await act(async () => { primary().click(); });
+
+    expect(queuePrompt).toHaveBeenCalledTimes(1);
+    const [sid, item] = queuePrompt.mock.calls[0] as [string, { text: string }];
+    expect(sid).toBe("s1");
+    expect(item.text).toMatch(/^Question about selected code/);
+    expect(item.text).toContain("### src/x.ts:41\n```\nconst x = 1;\n```\n\nwhy?");
+    expect(sendPromptTo).not.toHaveBeenCalled();
+    // Accepted: the queue owns it now.
+    expect(useStore.getState().askFix).toBeNull();
+    expect(container.querySelector(".file-chip")).toBeNull();
+    expect(cmView(container).state.doc.toString()).toBe("");
+  });
+
+  test("an idle target is sent through sendPromptTo to the captured conversation, not the active one", async () => {
+    const sendPromptTo = vi.fn().mockResolvedValue(true);
+    const { useStore, sendPrompt, queuePrompt } = await mountBusy({}, {
+      askFix: { ...ASK, intent: "fix" }, sendPromptTo, busySessionIds: {},
+    });
+    // The reviewer wandered off to another conversation before pressing send.
+    await act(async () => { useStore.setState({ activeId: "s2" }); });
+
+    await act(async () => { cmSet(cmView(container), "guard it"); });
+    await act(async () => { primary().click(); });
+
+    expect(sendPromptTo).toHaveBeenCalledTimes(1);
+    expect(sendPromptTo.mock.calls[0][0]).toBe("s1");
+    expect(sendPromptTo.mock.calls[0][1]).toMatch(/^Fix request for selected code/);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(queuePrompt).not.toHaveBeenCalled();
+    expect(useStore.getState().askFix).toBeNull();
+  });
+
+  test("a refused send puts the draft and the chip back", async () => {
+    // sendPromptTo's false is the refusal sendPrompt would have swallowed; the
+    // reviewer still holds the only copy of the question, so it comes back.
+    const sendPromptTo = vi.fn().mockResolvedValue(false);
+    const { useStore } = await mountBusy({}, { askFix: ASK, sendPromptTo, busySessionIds: {} });
+
+    await act(async () => { cmSet(cmView(container), "why?"); });
+    await act(async () => { primary().click(); await Promise.resolve(); });
+
+    expect(cmView(container).state.doc.toString()).toBe("why?");
+    expect(useStore.getState().askFix).toEqual(ASK);
+    expect(container.querySelector(".file-chip .nm")!.textContent).toContain("Ask · x.ts:41");
+    // A silent bounce looks like a send that lost the text on the way.
+    expect(useStore.getState().tip).toMatch(/^Couldn't send to/);
+  });
+
+  test("queued into a conversation other than the one on screen, it says where it went", async () => {
+    const { useStore, queuePrompt } = await mountBusy({}, {
+      askFix: ASK, activeId: "s2", sessions: { s1: { title: "Refactor auth" } },
+    });
+    // The chip is the only thing on this screen that knows the target.
+    expect(container.querySelector(".file-chip .nm")!.textContent).toContain(" → Refactor auth");
+    expect(primary().title).toBe("Queue — sends after the current work finishes");
+
+    await act(async () => { cmSet(cmView(container), "why?"); });
+    await act(async () => { primary().click(); });
+
+    expect(queuePrompt.mock.calls[0][0]).toBe("s1");
+    // s1's rail is not on screen (s2 is), so the acknowledgement is the tip.
+    expect(container.querySelector(".queue-rail")).toBeNull();
+    expect(useStore.getState().tip).toBe("Queued for Refactor auth — sends after its current work finishes.");
+  });
+
+  test("the chip's ✕ drops the context; an empty box with a chip does not stop the turn", async () => {
+    // Enter, not the button: the button is disabled on an empty box, so a click
+    // there never reaches submit (see the Enter test above for the touch flag).
+    delete (window as any).ontouchstart;
+    const { useStore, cancel } = await mountBusy({}, { askFix: ASK });
+    await act(async () => { cmKey(cmView(container), "Enter"); });
+    expect(cancel).not.toHaveBeenCalled();
+
+    await act(async () => { container.querySelector<HTMLButtonElement>(".file-chip .chip-x")!.click(); });
+    expect(useStore.getState().askFix).toBeNull();
+    expect(container.querySelector(".file-chip")).toBeNull();
   });
 
   test("a queued message carrying only attachments says what it holds", async () => {
