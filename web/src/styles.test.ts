@@ -96,6 +96,29 @@ describe("global styles", () => {
     expect(review).toMatch(/@media \(max-width: 859px\)[\s\S]*?\.rv-left\.open, \.content\.comp\.open \{[^}]*border-radius: 0/);
   });
 
+  test("the review sheets clear the canvas header that raises them", () => {
+    // #panel and #files slide out from under the top bar; these have the canvas
+    // header under it as well, and a card over that header would cover the
+    // buttons that open and close it.
+    const review = styles.slice(styles.indexOf("---- review workspace ----"));
+
+    expect(cssRule(".rv-left, .content.comp")).toMatch(/top: calc\(var\(--crumb-h\) \* 2/);
+    expect(review).toMatch(/@media \(max-width: 859px\)[\s\S]*?top: calc\(var\(--crumb-h\) \* 2/);
+  });
+
+  test("the companion collapses only where it is a column", () => {
+    const review = styles.slice(styles.indexOf("---- review workspace ----"));
+    const desktop = review.match(/@media \(min-width: 1100px\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+
+    // Folded away, never unmounted: the draft and the thread's scroll are in it.
+    expect(desktop).toMatch(/\.content\.comp\.collapsed \{[^}]*display: none/);
+    // And the two halves of the gate: the collapse control exists only above it,
+    // the sheet toggles only below it.
+    expect(cssRule(".comp-h")).toMatch(/display: none/);
+    expect(desktop).toMatch(/\.comp-h \{[^}]*display: flex/);
+    expect(desktop).toMatch(/\.rv-sheet \{[^}]*display: none/);
+  });
+
   test("one .rv-bar rule, for both bars that use it", () => {
     // The canvas header and the draft list's header are the same bar in two
     // columns. A second definition of it wins on source order and silently

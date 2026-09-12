@@ -50,7 +50,11 @@ export interface FilePreviewTarget {
 // One location of the Review canvas. A file alone doesn't identify it: the same
 // path reads differently against the working tree and against a commit, and
 // Back is only honest if it returns to the scroll offset it was left at.
-export interface ReviewLoc extends FilePreviewTarget { spec?: RevSpec; scrollTop?: number }
+// `spec` absent and `spec: null` are the same revision but not the same
+// location: null is "the working tree, and I said so" (a changed-file row),
+// absent is "whatever is being reviewed" (a CodeRef, which names a line in the
+// file on disk). Only the first re-selects a scope on Back/Forward.
+export interface ReviewLoc extends FilePreviewTarget { spec?: RevSpec | null; scrollTop?: number }
 
 export type Workspace = "agent" | "review";
 // Which of the two side columns is overlaying the canvas below 1100px, where
@@ -386,7 +390,8 @@ interface State {
   // Opens the panel *and* the file — the one entry point for "show me this
   // file", wherever the path was clicked.
   openFilePreview: (file: {
-    abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number; spec?: RevSpec;
+    abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number;
+    spec?: RevSpec | null;
   }) => void;
   clearFilePreview: () => void;
   // The Review slot's own. A workspace clears the location it owns and no
@@ -396,6 +401,7 @@ interface State {
   // Called by the canvas as it leaves a location, with the scroll offset read
   // off the body — the store cannot measure that for itself.
   pushReviewHistory: (loc: ReviewLoc) => void;
+  clearReviewHistory: () => void;
   reviewBack: (current: ReviewLoc | null) => void;
   reviewForward: (current: ReviewLoc | null) => void;
   toggleCompanion: () => void;
@@ -2682,7 +2688,10 @@ export const useStore = create<State>((set, get) => {
       // In Review the canvas IS the viewer, so a file opened there must land on
       // it and nowhere else — opening the file panel behind it would show the
       // same file twice and overwrite the Agent workspace's own position.
-      if (get().workspace === "review") set({ reviewPreview: { ...target, spec: file.spec } });
+      // Navigating also reveals the canvas: below 1100px a side column overlays
+      // it, and a CodeRef that opened a file behind the sheet covering it has
+      // navigated nowhere the reader can see.
+      if (get().workspace === "review") set({ reviewPreview: { ...target, spec: file.spec }, reviewSheet: "none" });
       else set({ filesOpen: true, filePreview: target });
     },
 
@@ -2709,6 +2718,10 @@ export const useStore = create<State>((set, get) => {
 
     pushReviewHistory(loc) {
       set((st) => ({ reviewHistory: { past: [...st.reviewHistory.past, loc], future: [] } }));
+    },
+
+    clearReviewHistory() {
+      set({ reviewHistory: { past: [], future: [] } });
     },
 
     reviewBack(current) {

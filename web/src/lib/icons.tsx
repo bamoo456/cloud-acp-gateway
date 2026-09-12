@@ -226,6 +226,18 @@ export function IconReview() {
   );
 }
 
+// The canvas's own Back/Forward. A tailed arrow rather than a bare chevron:
+// IconBack's chevron is already in the same bar, on the button that leaves the
+// workspace entirely, and two chevrons a few pixels apart would read as one
+// pair of history controls.
+export function IconArrow({ right = false }: { right?: boolean } = {}) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d={right ? "M5 12h14M13 6l6 6-6 6" : "M19 12H5M11 18l-6-6 6-6"} />
+    </svg>
+  );
+}
+
 // A double chevron pointing the way the thing it folds will travel. The file
 // panel's list toggle wore IconPanel's divided rect, which is also the top
 // bar's button for opening this whole panel — two near-identical glyphs a few

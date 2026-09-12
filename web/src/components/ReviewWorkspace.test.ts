@@ -133,6 +133,9 @@ describe("review workspace", () => {
     [...container.querySelectorAll("button")].find((b) => b.textContent === label);
   const refresh = () => container.querySelector<HTMLButtonElement>('.rv-bar button[title="Refresh"]');
   const rows = () => [...container.querySelectorAll<HTMLElement>(".udiff-row")];
+  const nav = (label: string) =>
+    container.querySelector<HTMLButtonElement>(`main.canvas .rv-bar button[aria-label="${label}"]`);
+  const canvasBody = () => container.querySelector<HTMLElement>("main.canvas .wf-body")!;
 
   test("opens on the working tree — the scope that needs no picking", async () => {
     await setup();
@@ -389,6 +392,9 @@ describe("review workspace", () => {
     const useStore = await setup();
     await click(chip("Commits"));
     await click([...container.querySelectorAll(".rv-commit")][0]);
+    // From a changed file of that commit, so the CodeRef has somewhere to
+    // retrace to below.
+    await click(container.querySelector(FILE_ROW));
     await act(async () => {
       useStore.getState().openFilePreview({ abs: "/repo/src/gateway.ts", path: "src/gateway.ts", mode: "diff" });
     });
@@ -397,6 +403,25 @@ describe("review workspace", () => {
     expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/gateway.ts", null);
     expect(rows().length).toBeGreaterThan(0);
     expect(rows().some((r) => r.tagName === "BUTTON")).toBe(false);
+
+    // And retracing it doesn't change the review either: opening a file that
+    // named no revision left the scope alone, so Back and Forward must too.
+    await click(nav("Back"));
+    await click(nav("Forward"));
+    expect(chip("Commits")?.className).toContain("on");
+    expect(getWorkspaceChanges).toHaveBeenLastCalledWith("/repo", { commit: "aaaa111bbbb" });
+  });
+
+  test("leaving for the conversation keeps the offset the canvas was left at", async () => {
+    const useStore = await setup();
+    await click(container.querySelector(FILE_ROW));
+    canvasBody().scrollTop = 80;
+    await act(async () => { canvasBody().dispatchEvent(new Event("scroll")); });
+
+    // The canvas is unmounted while the Agent workspace is up, and its scroller
+    // goes with it — the location has to carry the offset out.
+    await act(async () => { root?.unmount(); root = null; });
+    expect(useStore.getState().reviewPreview).toMatchObject({ abs: "/repo/src/workspace.ts", scrollTop: 80 });
   });
 
   test("Send builds one message from the whole draft and clears it", async () => {
@@ -487,5 +512,87 @@ describe("review workspace", () => {
     await setup();
     expect(container.textContent).toContain("git couldn't read");
     expect(container.textContent).not.toContain("Nothing uncommitted");
+  });
+  test("Back returns to the file, the view and the offset it was left at", async () => {
+    const useStore = await setup();
+    expect(nav("Back")?.disabled).toBe(true);
+    await click(container.querySelector(FILE_ROW));
+
+    // Where the reader had got to, off the viewer's own scroller — scroll does
+    // not bubble, so the canvas listens for it in the capture phase.
+    canvasBody().scrollTop = 120;
+    await act(async () => { canvasBody().dispatchEvent(new Event("scroll")); });
+    // And in which view: a location is only the same place if it comes back the
+    // way it was being read.
+    await click(button("File"));
+
+    await act(async () => {
+      useStore.getState().openFilePreview({ abs: "/repo/src/gateway.ts", path: "src/gateway.ts", mode: "diff" });
+    });
+    await act(async () => { await flush(); });
+    expect(container.querySelector("main.canvas .rv-title")?.textContent).toBe("src/gateway.ts");
+    // The viewer is the same element across a navigation, so it still carries
+    // the offset of the file it was showing — the restore below has to be what
+    // puts it back, not what is left over.
+    canvasBody().scrollTop = 0;
+
+    await click(nav("Back"));
+    expect(useStore.getState().reviewPreview).toMatchObject({
+      abs: "/repo/src/workspace.ts", mode: "file", scrollTop: 120,
+    });
+    expect(canvasBody().scrollTop).toBe(120);
+
+    await click(nav("Forward"));
+    expect(container.querySelector("main.canvas .rv-title")?.textContent).toBe("src/gateway.ts");
+    expect(nav("Forward")?.disabled).toBe(true);
+  });
+
+  test("Back out of a scope change brings the revision with it", async () => {
+    // Choosing a revision closes the file read against the old one. Back has to
+    // put the chips back too, or the header would name a revision the canvas
+    // isn't reading.
+    const useStore = await setup();
+    await click(chip("Commits"));
+    await click([...container.querySelectorAll(".rv-commit")][0]);
+    await click(container.querySelector(FILE_ROW));
+    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/workspace.ts", { commit: "aaaa111bbbb" });
+
+    await click(chip("Working"));
+    expect(useStore.getState().reviewPreview).toBeNull();
+
+    await click(nav("Back"));
+    expect(chip("Commits")?.className).toContain("on");
+    expect(container.querySelector(".rv-ref")?.textContent).toContain("aaaa111");
+    expect(getFileDiff).toHaveBeenLastCalledWith("/repo", "/repo/src/workspace.ts", { commit: "aaaa111bbbb" });
+  });
+
+  test("one sheet at a time, and opening a file reveals the canvas", async () => {
+    const useStore = await setup();
+    await click(button("Files"));
+    expect(useStore.getState().reviewSheet).toBe("files");
+    expect(container.querySelector("aside.rv-left")?.className).toContain("open");
+
+    await click(button("Companion"));
+    expect(useStore.getState().reviewSheet).toBe("companion");
+    expect(container.querySelector("aside.rv-left")?.className).not.toContain("open");
+
+    await click(button("Files"));
+    await click(container.querySelector(FILE_ROW));
+    // A row tapped through the sheet has navigated nowhere the reader can see
+    // until the sheet is out of the way.
+    expect(useStore.getState().reviewSheet).toBe("none");
+  });
+
+  test("Escape closes the sheet and hands focus back to the button that opened it", async () => {
+    const useStore = await setup();
+    const files = button("Files")!;
+    await click(files);
+    expect(useStore.getState().reviewSheet).toBe("files");
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(useStore.getState().reviewSheet).toBe("none");
+    expect(document.activeElement).toBe(files);
   });
 });

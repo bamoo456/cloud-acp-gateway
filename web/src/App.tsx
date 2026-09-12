@@ -28,7 +28,7 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 // gracefully; no test fails).
 import { Terminal } from "./components/Terminal.tsx";
 import { UsageStrip } from "./components/UsageStrip.tsx";
-import { IconTerminal } from "./lib/icons.tsx";
+import { IconChevrons, IconTerminal } from "./lib/icons.tsx";
 import { applyUnread } from "./lib/favicon.ts";
 import { isDesktopSidebarWidth } from "./lib/sidebarWidth.ts";
 import type { AgentRef } from "./types.ts";
@@ -45,6 +45,8 @@ export function App() {
   const conn = useStore((s) => s.conn);
   const review = useStore((s) => s.workspace === "review");
   const reviewSheet = useStore((s) => s.reviewSheet);
+  const companionCollapsed = useStore((s) => s.companionCollapsed);
+  const toggleCompanion = useStore((s) => s.toggleCompanion);
   // Machine-layer facts, in one row along the bottom edge (§1.4): the
   // transport, the folder's diffstat, the context window, the account's quota
   // and the terminal. Not the agent — the crumb and the dock already name it.
@@ -234,8 +236,19 @@ export function App() {
         {review && <ReviewLeft key="rv-left" rv={rv} />}
         {review && <ReviewCanvas key="canvas" rv={rv} />}
         <div key="content" className={"content" + (review ? " comp" : "")
+          + (review && companionCollapsed ? " collapsed" : "")
           + (review && reviewSheet === "companion" ? " open" : "")}>
           {!review && topBar}
+          {/* The column's own header, and the only thing in Review that is not
+              already part of the conversation: folding it away is what gives
+              the canvas the width (the canvas header holds the way back). */}
+          {review && (
+            <div className="rv-bar comp-h">
+              <span className="rv-title">Review companion</span>
+              <button className="icon-btn" title="Hide companion" aria-label="Hide companion"
+                onClick={toggleCompanion}><IconChevrons /></button>
+            </div>
+          )}
           <main id="main">
             <Thread session={sess} agentReady={agentReady} loading={joining}
               findOpen={findOpen} focusFind={findFocus} onCloseFind={() => setFindOpen(false)} />

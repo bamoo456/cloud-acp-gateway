@@ -2356,12 +2356,15 @@
      their own, and below 1100px they borrow the whole floating-card recipe:
      three columns need more room than the 860px sidebar breakpoint promises,
      so under it the canvas has the row and these overlay it one at a time. */
+  /* Two crumb heights down, where #panel and #files use one: those slide out
+     from under the top bar, and these have the canvas header under it as well.
+     A card over that header would cover the buttons that close it. */
   .rv-left, .content.comp {
-    position: absolute; top: calc(var(--crumb-h) + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
+    position: absolute; top: calc(var(--crumb-h) * 2 + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--radius); box-shadow: var(--shadow); z-index: 25;
     transform-origin: top center; display: none; flex-direction: column;
-    max-height: calc(100vh - var(--crumb-h) - env(safe-area-inset-top) - 14px);
+    max-height: calc(100vh - var(--crumb-h) * 2 - env(safe-area-inset-top) - 14px);
   }
   /* No `overflow: hidden` with the rest of the recipe: the engine dock's menu
      is absolutely positioned and opens upward out of .dock, so clipping the
@@ -2369,15 +2372,19 @@
   .rv-left { max-width: 460px; }
   .content.comp { max-width: 560px; margin-left: auto; }
   @supports (height: 100dvh) {
-    .rv-left, .content.comp { max-height: calc(100dvh - var(--crumb-h) - env(safe-area-inset-top) - 14px); }
+    .rv-left, .content.comp { max-height: calc(100dvh - var(--crumb-h) * 2 - env(safe-area-inset-top) - 14px); }
   }
   .rv-left.open, .content.comp.open { display: flex; animation: pop .14s ease-out; }
+  /* The companion's own header, and the two canvas-header buttons that raise
+     the sheets: each belongs to one side of the 1100px gate and is off on the
+     other, so neither offers to reveal a column already on screen. */
+  .comp-h { display: none; }
   /* The canvas is the one surface that is never a sheet — it is what the sheets
      overlay — so it takes the row at every width. */
   .canvas { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
   @media (max-width: 859px) {
     .rv-left.open, .content.comp.open {
-      top: calc(var(--crumb-h) + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0;
+      top: calc(var(--crumb-h) * 2 + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0;
       max-width: none; max-height: none; margin: 0;
       border: none; border-radius: 0; box-shadow: none; animation: none;
     }
@@ -2395,6 +2402,12 @@
       border: none; border-left: 1px solid var(--border); border-radius: 0;
       box-shadow: none; animation: none;
     }
+    /* Folded away rather than unmounted — the same trick #panel.collapsed
+       plays, and what keeps the draft and the thread's scroll alive while the
+       canvas has the width. */
+    .content.comp.collapsed { display: none; }
+    .comp-h { display: flex; }
+    .rv-sheet { display: none; }
   }
 
   /* ---- 16px floor for anything a phone can focus ----

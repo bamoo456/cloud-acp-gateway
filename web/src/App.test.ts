@@ -195,4 +195,22 @@ describe("App running-task polling", () => {
     expect(container.querySelector("main.canvas")).toBeNull();
     expect(container.querySelector("#files")).not.toBeNull();
   });
+
+  test("collapsing the companion folds it away without unmounting it", async () => {
+    await render();
+    const { useStore } = await import("./store/store.ts");
+    await act(async () => { useStore.getState().setWorkspace("review"); });
+    const content = container.querySelector(".content")!;
+
+    const hide = container.querySelector<HTMLButtonElement>('.comp-h button[aria-label="Hide companion"]')!;
+    await act(async () => { hide.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    // Still the same element — the thread's scroll and the draft are in it, and
+    // the canvas takes the width through CSS alone.
+    expect(container.querySelector(".content")).toBe(content);
+    expect(content.classList.contains("collapsed")).toBe(true);
+
+    const show = container.querySelector<HTMLButtonElement>('main.canvas button[aria-label="Show companion"]')!;
+    await act(async () => { show.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(content.classList.contains("collapsed")).toBe(false);
+  });
 });
