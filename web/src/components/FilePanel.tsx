@@ -914,10 +914,16 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, canAtta
   // A remembered offset, once there is something to scroll. After the line
   // landing above on purpose: a location that carries both was left at this
   // offset, which is the more recent answer to where the reader was.
+  //
+  // Once per arrival: a Diff/File toggle cycles `loading`, and re-applying
+  // there would drag the reader back to where they landed rather than leave
+  // them where they have since read to.
+  const restored = useRef<FilePreviewTarget | null>(null);
   useEffect(() => {
-    if (!scrollTop || loading || !bodyRef.current) return;
+    if (!scrollTop || loading || !bodyRef.current || restored.current === target) return;
+    restored.current = target;
     bodyRef.current.scrollTop = scrollTop;
-  }, [scrollTop, loading, target.abs]);
+  }, [scrollTop, loading, target]);
 
   // Wraps at both ends — a search that stops dead at the last match sends you
   // back to the box to retype what you already typed.
