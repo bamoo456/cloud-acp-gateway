@@ -1082,6 +1082,26 @@ describe("Composer session busy state", () => {
     expect(container.querySelector(".file-chip")).toBeNull();
   });
 
+  test("a Trace needs no draft: it dispatches through the same queue and target", async () => {
+    // The button is in the diff, not in this box — the excerpt is the whole
+    // question, so it goes out with an empty body. What it must NOT get is its
+    // own copy of the busy/refusal rules.
+    const { useStore, queuePrompt, sendPromptTo } = await mountBusy();
+
+    const queued = await useStore.getState().dispatchAskFix({ ...ASK, intent: "trace" }, "");
+
+    expect(queued).toBe("queued");
+    expect(queuePrompt.mock.calls[0][0]).toBe("s1");
+    expect((queuePrompt.mock.calls[0][1] as { text: string }).text).toMatch(/^Trace request for selected code/);
+    expect((queuePrompt.mock.calls[0][1] as { text: string }).text).toContain("`acp-trace`");
+    expect(sendPromptTo).not.toHaveBeenCalled();
+
+    sendPromptTo.mockResolvedValue(true);
+    await act(async () => { useStore.setState({ busySessionIds: {} }); });
+    expect(await useStore.getState().dispatchAskFix({ ...ASK, intent: "trace" }, "")).toBe("sent");
+    expect(sendPromptTo.mock.calls[0][0]).toBe("s1");
+  });
+
   test("a queued message carrying only attachments says what it holds", async () => {
     // Rendering its (empty) text would look like a broken row.
     await mountBusy({}, {

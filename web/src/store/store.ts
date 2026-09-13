@@ -12,7 +12,10 @@ import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { execCommand, shellContext, shellNote } from "../lib/terminal.ts";
 import { buildHandoffMessage } from "../lib/handoffPrompt.ts";
-import type { AskFixRequest } from "../lib/reviewPrompt.ts";
+import {
+  buildAskFixMessage, buildDiagramMessage, buildGuideMessage,
+  type AskFixRequest, type GuideRequest,
+} from "../lib/reviewPrompt.ts";
 import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
   EMPTY_ENGINE,
@@ -23,6 +26,13 @@ import type {
   SlashCommand, AgentRef, AgentGlyph,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
+
+// Every review request that goes to an agent: one anchored to a selection
+// (Ask/Fix/Trace) or one about the whole change (Review guide, Diagram).
+export type DispatchRequest = AskFixRequest | GuideRequest;
+// What became of it. `false` is a refusal the caller must recover from — it
+// still holds the only copy of what the reviewer typed.
+export type DispatchResult = "sent" | "queued" | false;
 
 type ConnState = "connecting" | "connected" | "offline";
 export type TextSize = "small" | "default" | "large" | "xl";
@@ -407,6 +417,11 @@ interface State {
   toggleCompanion: () => void;
   toggleReviewSheet: (which: ReviewSheet) => void;
   setAskFix: (req: AskFixRequest | null) => void;
+  // Send a captured review request to the conversation it names. Lives here and
+  // not in the composer because Trace, Review guide and Diagram have no draft to
+  // ride on, and a second copy of the queue/refusal rules is how the two
+  // routes end up disagreeing about where a request went.
+  dispatchAskFix: (req: DispatchRequest, body: string, images?: MessageImage[], files?: MessageFile[]) => Promise<DispatchResult>;
   attachFiles: (files: MessageFile[]) => void;
   removeAttachedFile: (index: number) => void;
   clearAttachedFiles: () => void;
@@ -2757,6 +2772,31 @@ export const useStore = create<State>((set, get) => {
 
     setAskFix(req) {
       set({ askFix: req });
+    },
+
+    async dispatchAskFix(req, body, images, files) {
+      const text = "kind" in req
+        ? (req.kind === "guide" ? buildGuideMessage(req) : buildDiagramMessage(req, req.kind))
+        : buildAskFixMessage(req, body);
+      const where = () => get().sessions[req.sessionId]?.title || "another conversation";
+      // Busy is read against the CAPTURED conversation, not the one on screen:
+      // the request goes where it was taken from, whatever is being looked at
+      // by the time it is sent.
+      if (get().busySessionIds[req.sessionId]) {
+        get().queuePrompt(req.sessionId, { text, images, files });
+        // The composer's rail shows the on-screen conversation's queue; one that
+        // went elsewhere has to say where, or nothing visibly moves.
+        if (req.sessionId !== get().activeId) {
+          get().setTip("Queued for " + where() + " — sends after its current work finishes.");
+        }
+        return "queued";
+      }
+      const sent = await get().sendPromptTo(req.sessionId, text, images, files);
+      if (sent) return "sent";
+      // sendPromptTo's false is the refusal sendPrompt swallows. A silent bounce
+      // looks like a send that lost the message on the way.
+      get().setTip("Couldn't send to " + where() + " — that conversation isn't available right now.");
+      return false;
     },
 
     // De-duplicated on the URI, which carries the line range: two ranges of one
