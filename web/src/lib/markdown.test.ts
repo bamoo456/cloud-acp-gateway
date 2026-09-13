@@ -15,6 +15,15 @@ describe("renderMarkdown", () => {
     expect(html).toContain('<pre><code class="language-mermaid">');
     expect(html).not.toContain("md-copy");
   });
+
+  // The node metadata that follows a diagram is addressed to Markdown.tsx, not
+  // to the reader: it travels as an attribute, and the block stays hidden until
+  // the JSON turns out to be unreadable.
+  it("hides a diagram's node metadata and carries it as an attribute", () => {
+    const html = renderMarkdown('```acp-nodes\n{"A": {"path": "src/app.ts"}}\n```');
+    expect(html).toContain('<div class="acp-nodes" hidden data-json="{&quot;A&quot;: {&quot;path&quot;: &quot;src/app.ts&quot;}}');
+    expect(html).toContain('<div class="md-pre">');
+  });
 });
 
 // Code references are marked at the token level (see the coderef rule): an
