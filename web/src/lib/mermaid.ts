@@ -83,6 +83,17 @@ export function themeVariables(el: Element): Record<string, string> {
   };
 }
 
+// A `click` directive in the source survives securityLevel "strict": the URL of a
+// `click X callback` is dropped, but `click X href "https://…"` still comes back
+// as an <a xlink:href> wrapped around the node, and both mark it .clickable. That
+// is the agent choosing where a reviewer's click goes, and a pointer cursor on a
+// node nothing here made navigable. The link is unwrapped and the class dropped,
+// so the metadata block stays the only thing that opens anything.
+function unclick(figure: HTMLElement): void {
+  for (const a of figure.querySelectorAll("a")) a.replaceWith(...a.childNodes);
+  for (const node of figure.querySelectorAll(".clickable")) node.classList.remove("clickable");
+}
+
 // Undo mermaid's own fit-to-container sizing. It emits width="100%" with an
 // inline `max-width: <natural>px`, which shrinks a wide diagram to whatever box
 // it lands in — the panel is 440px, so that is the difference between a sequence
@@ -168,6 +179,7 @@ export async function renderMermaid(root: HTMLElement, alive: () => boolean = ()
       const figure = document.createElement("div");
       figure.className = "md-mermaid";
       figure.innerHTML = svg;
+      unclick(figure);
       naturalSize(figure.querySelector("svg"));
       pre.replaceWith(figure);
       drawn.push({ figure, src });

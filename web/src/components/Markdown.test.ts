@@ -285,6 +285,13 @@ describe("Markdown diagram nodes", () => {
   const SVG = '<svg viewBox="0 0 100 100">'
     + '<g class="node" id="mmd-7-flowchart-A-0"><rect></rect><text>Start</text></g>'
     + '<g class="node" id="mmd-7-flowchart-B-1"><rect></rect><text>src/app.ts</text></g></svg>';
+  // The same drawing after a `click` directive: node A's href sanitized away, B's
+  // kept, both marked .clickable.
+  const LINKED_SVG = SVG
+    .replace('<g class="node" id="mmd-7-flowchart-A-0">', '<a data-look="classic"><g class="node clickable" id="mmd-7-flowchart-A-0">')
+    .replace('<text>Start</text></g>', '<text>Start</text></g></a>')
+    .replace('<g class="node" id="mmd-7-flowchart-B-1">', '<a xlink:href="https://evil.example/"><g class="node clickable" id="mmd-7-flowchart-B-1">')
+    .replace('<text>src/app.ts</text></g>', '<text>src/app.ts</text></g></a>');
   const source = (extra = "") =>
     ["```mermaid", "flowchart TD", "  A[Start] --> B[src/app.ts]", extra, "```"].join("\n");
   const reply = (meta: string, extra = "") =>
@@ -398,16 +405,65 @@ describe("Markdown diagram nodes", () => {
   });
 
   test("a source that scripts its own nodes draws under strict, and binds nothing", async () => {
+    // What mermaid 11 really hands back for a `click` directive under strict: the
+    // callback's URL is gone, a plain href is NOT, and both nodes are .clickable
+    // (confirmed in tests/e2e/mermaid-nodes.spec.ts, which is the only place a
+    // diagram is drawn for real).
+    draw.mockResolvedValueOnce({ svg: LINKED_SVG, bindFunctions });
     await render(reply(JSON.stringify({ A: { path: "src/app.ts" } }),
-      '  click A href "javascript:alert(1)"\n  click A callback "steal"'));
+      '  click A href "javascript:alert(1)"\n  click B href "https://evil.example"'));
     await vi.waitFor(() => expect(container.querySelector(".acp-node.resolved")).not.toBeNull());
 
     expect(initialize.mock.calls[0][0].securityLevel).toBe("strict");
     // The source went to mermaid as written; what never happens is the bridge
     // that would turn its click directives into handlers.
-    expect(draw.mock.calls[0][1]).toContain("click A callback");
+    expect(draw.mock.calls[0][1]).toContain('click B href "https://evil.example"');
     expect(bindFunctions).not.toHaveBeenCalled();
+    // The <a> is unwrapped rather than left inert: an agent's href is the one
+    // navigation on this diagram nobody validated.
     expect(container.querySelector(".md-mermaid a")).toBeNull();
     expect(container.querySelector(".md-mermaid [href]")).toBeNull();
+    expect(container.querySelector(".md-mermaid .clickable")).toBeNull();
+    // Unwrapping kept the node it wrapped, mapping and all.
+    expect(node("flowchart-A-0").dataset.path).toBe("src/app.ts");
+  });
+
+  // A diagram that would not draw keeps its source; what it must not lose is
+  // where that source said the code was.
+  test("a diagram that won't draw still says what it pointed at", async () => {
+    draw.mockRejectedValueOnce(new Error("boom"));
+    await render(reply(JSON.stringify({ A: { path: "src/app.ts", line: 7 } })));
+    await vi.waitFor(() => expect(container.querySelector(".acp-node-list .md-ref.resolved")).not.toBeNull());
+
+    expect(container.querySelector("pre.md-mermaid-failed")).not.toBeNull();
+    expect(container.querySelector(".acp-node")).toBeNull();
+    // Under the note that says why, not between it and the source it explains.
+    expect(container.querySelector(".md-mermaid-error")!.nextElementSibling!.className).toBe("acp-node-list");
+    expect(container.querySelector(".acp-node-list .md-ref")!.textContent).toBe("src/app.ts:7");
+  });
+
+  // The metadata is the only thing that makes a node navigable, so a reply
+  // re-rendered with different metadata must not leave a node pointing where the
+  // last one said.
+  test("metadata replaced mid-resolve leaves nothing navigating to the old place", async () => {
+    await render(reply(JSON.stringify({ A: { path: "src/app.ts", line: 12 } })));
+    await vi.waitFor(() => expect(container.querySelector(".acp-node.resolved")).not.toBeNull());
+    const stale = node("flowchart-A-0");
+
+    // Not awaited between the two: the second pass starts while the first is
+    // still resolving, which is the race the `alive` guard is there for.
+    await render(reply(JSON.stringify({ A: { path: "gone.ts" }, B: { path: "src/app.ts" } })));
+    await vi.waitFor(() => expect(container.querySelector(".acp-node.resolved")).not.toBeNull());
+
+    expect(stale.isConnected).toBe(false);
+    const now = node("flowchart-A-0");
+    expect(now.dataset.path).toBe("gone.ts");
+    expect(now.dataset.line).toBeUndefined();
+    expect(now.classList.contains("resolved")).toBe(false);
+    expect(container.querySelectorAll(".acp-node-list")).toHaveLength(1);
+
+    const openFilePreview = await watchPreview();
+    await act(async () => { now.querySelector("rect")!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(openFilePreview).not.toHaveBeenCalled();
   });
 });
