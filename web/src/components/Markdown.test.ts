@@ -445,13 +445,11 @@ describe("Markdown diagram nodes", () => {
   // The metadata is the only thing that makes a node navigable, so a reply
   // re-rendered with different metadata must not leave a node pointing where the
   // last one said.
-  test("metadata replaced mid-resolve leaves nothing navigating to the old place", async () => {
+  test("metadata replaced by a re-render leaves nothing navigating to the old place", async () => {
     await render(reply(JSON.stringify({ A: { path: "src/app.ts", line: 12 } })));
     await vi.waitFor(() => expect(container.querySelector(".acp-node.resolved")).not.toBeNull());
     const stale = node("flowchart-A-0");
 
-    // Not awaited between the two: the second pass starts while the first is
-    // still resolving, which is the race the `alive` guard is there for.
     await render(reply(JSON.stringify({ A: { path: "gone.ts" }, B: { path: "src/app.ts" } })));
     await vi.waitFor(() => expect(container.querySelector(".acp-node.resolved")).not.toBeNull());
 

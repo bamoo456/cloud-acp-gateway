@@ -449,6 +449,35 @@ describe("review workspace", () => {
     expect(useStore.getState().companionCollapsed).toBe(false);
   });
 
+  // The end of a Trace: the reference in the card is clicked, and what
+  // Markdown.tsx emits for it (see Markdown.test.ts) is this call. From here the
+  // canvas is the only thing that moves — no second viewer, and Back still works.
+  test("opening a traced line moves the canvas, joins Back/Forward and uncovers it", async () => {
+    const useStore = await setup();
+    await click(container.querySelector(FILE_ROW));
+    // A phone: the companion is over the canvas when the answer is read.
+    await act(async () => { useStore.getState().toggleReviewSheet("companion"); });
+
+    await act(async () => {
+      useStore.getState().openFilePreview({
+        abs: "/repo/src/workspace.ts", path: "src/workspace.ts", mode: "file", cwd: "/repo", line: 12, endLine: 20,
+      });
+    });
+    await act(async () => { await flush(); });
+
+    // The sheet is out of the way and the file is on the canvas, not beside it.
+    expect(useStore.getState().reviewSheet).toBe("none");
+    expect(useStore.getState().filePreview).toBeNull();
+    expect(useStore.getState().reviewPreview).toMatchObject({ path: "src/workspace.ts", mode: "file", line: 12 });
+    expect(container.querySelector("main.canvas .udiff")).toBeNull();
+
+    // And the diff it was read from is one Back away.
+    expect(nav("Back")?.disabled).toBe(false);
+    await click(nav("Back"));
+    expect(container.querySelector("main.canvas .udiff")).not.toBeNull();
+    expect(nav("Forward")?.disabled).toBe(false);
+  });
+
   test("Review guide and Diagram ask about the whole change, and wait for a conversation", async () => {
     const { makeSession } = await import("../store/reducers.ts");
     const dispatchAskFix = vi.fn().mockResolvedValue("sent");
