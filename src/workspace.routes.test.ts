@@ -901,8 +901,9 @@ test("a file over the write cap is handed no digest to save with", async () => {
 
 // ---- durable review state: /workspace/review/{state,discussion,reviewed} ----
 //
-// Every test in this file shares one gateway load and so one database, so each
-// of these leaves REPO's review empty again.
+// Every test in this file shares one gateway load and so one database, and a
+// discussion has no delete route by design, so each of these either leaves
+// REPO's review as it found it or asserts only about the records it made.
 
 // Whatever the client rendered is what gets stored, so the tests read the
 // identity out of the diff route rather than computing one.
@@ -973,29 +974,31 @@ test("a discussion is created, replied to, resolved and reopened", async () => {
     const state = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as {
       review: { scope: string; worktreeExists: boolean; companion: unknown };
       discussions: Array<{ id: string; code: string; revision: string; diffHash: string; status: string; replies: unknown[] }>;
-      others: unknown[];
+      others: Array<{ id: string }>;
     };
+    const stored = state.discussions.find((d) => d.id === created.discussion.id);
+    assert.ok(stored);
     assert.equal(state.review.scope, "working");
     assert.equal(state.review.worktreeExists, true);
     assert.deepEqual(state.review.companion, { agentName: "claude", sessionId: "s1" });
-    assert.equal(state.discussions.length, 1);
     // Stored exactly as displayed: the excerpt and the diff it came from.
-    assert.equal(state.discussions[0].code, "+three");
-    assert.equal(state.discussions[0].revision, rendered.revision);
-    assert.equal(state.discussions[0].diffHash, rendered.hash);
-    assert.equal(state.discussions[0].replies.length, 1);
-    assert.deepEqual(state.others, []);
+    assert.equal(stored.code, "+three");
+    assert.equal(stored.revision, rendered.revision);
+    assert.equal(stored.diffHash, rendered.hash);
+    assert.equal(stored.replies.length, 1);
+    assert.equal(state.others.some((d) => d.id === created.discussion.id), false,
+      "this review's own discussion is never also somebody else's");
 
     for (const [op, expected] of [["resolve", "resolved"], ["reopen", "open"]] as const) {
       assert.equal((await post(q("/workspace/review/discussion", { cwd: REPO }), { op, id: created.discussion.id })).status, 200);
-      const after = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as { discussions: Array<{ status: string }> };
-      assert.equal(after.discussions[0].status, expected, op);
+      const after = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as { discussions: Array<{ id: string; status: string }> };
+      assert.equal(after.discussions.find((d) => d.id === created.discussion.id)?.status, expected, op);
     }
 
     // Sending a draft never touches discussions, and neither does clearing one.
     await post(q("/workspace/review", { cwd: REPO }), { comments: [] });
-    const survived = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as { discussions: unknown[] };
-    assert.equal(survived.discussions.length, 1);
+    const survived = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as { discussions: Array<{ id: string }> };
+    assert.equal(survived.discussions.some((d) => d.id === created.discussion.id), true);
   } finally {
     await close();
   }
