@@ -1,7 +1,9 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
-import type { ChangesResult, CommitEntry, FileDiffResult, ReviewComment } from "../lib/api.ts";
+import type {
+  ChangesResult, CommitEntry, Discussion, FileDiffResult, OtherDiscussion, ReviewComment, ReviewedFile,
+} from "../lib/api.ts";
 
 // A file row, not a folder row: the changed files are a folder tree, so
 // ".wf-row" also matches the folder headers the tree draws.
@@ -35,10 +37,42 @@ const CHANGES: ChangesResult = {
 const DIFF: FileDiffResult = {
   path: "src/workspace.ts",
   status: "modified",
+  revision: "abc1234:working",
+  // The digest of these exact bytes. Its absence is the answer to "can this be
+  // marked reviewed", so the fixture that can be marked carries one.
+  hash: "h1",
   binary: false,
   truncated: false,
   diff: ["@@ -404,3 +404,4 @@", " keep", "-old line", "+new line"].join("\n"),
 };
+
+// One durable discussion on the added line of DIFF, as the gateway hands it
+// back: anchored exactly as it was displayed, with its own id.
+const DISCUSSION: Discussion = {
+  id: "d1", path: "src/workspace.ts", side: "new", line: 405, code: "new line",
+  body: "is this guarded?", revision: "abc1234:working", status: "open",
+  createdAt: "2026-09-01T10:00:00Z", updatedAt: "2026-09-01T10:00:00Z", replies: [],
+};
+
+const OTHER: OtherDiscussion = {
+  ...DISCUSSION, id: "d9", body: "left over from the other checkout",
+  worktree: "/repo-wt", scope: "working", live: false,
+};
+
+const READ: ReviewedFile = {
+  path: "src/workspace.ts", hash: "h1", revision: "abc1234:working",
+  reviewedAt: "2026-09-01T10:00:00Z", changed: false,
+};
+
+const state = (
+  over: Partial<{ discussions: Discussion[]; others: OtherDiscussion[]; reviewed: ReviewedFile[] }> = {},
+) => ({
+  review: {
+    id: "r1", repositoryId: "p1", scope: "working", worktree: "/repo",
+    worktreeExists: true, companion: null,
+  },
+  discussions: [], others: [], reviewed: [], ...over,
+});
 
 describe("review workspace", () => {
   let root: Root | null = null;
@@ -49,6 +83,9 @@ describe("review workspace", () => {
   let getFilePreview: ReturnType<typeof vi.fn>;
   let getReviewDraft: ReturnType<typeof vi.fn>;
   let saveReviewDraft: ReturnType<typeof vi.fn>;
+  let getReviewState: ReturnType<typeof vi.fn>;
+  let postReviewDiscussion: ReturnType<typeof vi.fn>;
+  let setFileReviewed: ReturnType<typeof vi.fn>;
   let sendPrompt: ReturnType<typeof vi.fn>;
   let Harness: React.FunctionComponent<{ active?: boolean }>;
 
@@ -71,10 +108,14 @@ describe("review workspace", () => {
     });
     getReviewDraft = vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true });
     saveReviewDraft = vi.fn().mockResolvedValue(true);
+    getReviewState = vi.fn().mockResolvedValue({ review: null, discussions: [], others: [], reviewed: [] });
+    postReviewDiscussion = vi.fn().mockResolvedValue({ ok: true, discussion: DISCUSSION });
+    setFileReviewed = vi.fn().mockResolvedValue(true);
     sendPrompt = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("../lib/api.ts", () => ({
       getCommits, getWorkspaceChanges, getFileDiff, getFilePreview, getReviewDraft, saveReviewDraft,
+      getReviewState, postReviewDiscussion, setFileReviewed,
       // The viewer builds a download link as it renders, so this one is read
       // even by a test that never opens a file.
       rawFileUrl: () => "/raw",
@@ -136,6 +177,17 @@ describe("review workspace", () => {
   const nav = (label: string) =>
     container.querySelector<HTMLButtonElement>(`main.canvas .rv-bar button[aria-label="${label}"]`);
   const canvasBody = () => container.querySelector<HTMLElement>("main.canvas .wf-body")!;
+  // The left column's two readings of the review. By prefix, because the
+  // Discussions tab carries its open count inside the button.
+  const tab = (label: string) =>
+    [...container.querySelectorAll<HTMLButtonElement>(".rv-tab")].find((b) => b.textContent?.startsWith(label));
+  const acts = () => [...container.querySelectorAll(".rv-cmt .rv-acts button")].map((b) => b.textContent);
+  const type = async (el: HTMLTextAreaElement, text: string) => {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, text);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
 
   test("opens on the working tree — the scope that needs no picking", async () => {
     await setup();
@@ -346,8 +398,10 @@ describe("review workspace", () => {
       intent: "ask", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null, label: undefined,
       path: "src/workspace.ts", side: "old", line: 405, code: "old line",
     });
-    // Nothing became a comment, and the diff under the picked row stays put.
+    // Nothing became a comment, the reader is still on the file they asked
+    // about, and the diff under the picked row stays put.
     expect(saveReviewDraft).not.toHaveBeenCalled();
+    expect(useStore.getState().reviewPreview?.path).toBe("src/workspace.ts");
     expect(getFileDiff).toHaveBeenCalledTimes(1);
     expect(container.querySelector(".rv-cmt textarea")).toBeTruthy();
   });
@@ -634,5 +688,279 @@ describe("review workspace", () => {
     });
     expect(useStore.getState().reviewSheet).toBe("none");
     expect(document.activeElement).toBe(files);
+  });
+  test("Discuss records the line as displayed, and the card reads back on it and in the index", async () => {
+    const { makeSession } = await import("../store/reducers.ts");
+    await setup({ activeId: "s1", sessions: { s1: { ...makeSession("s1"), agentName: "claude" } } });
+    // The gateway's answer once the record exists — the create's own return is
+    // only half of it, the refetch is what the rest of the screen reads.
+    getReviewState.mockResolvedValue(state({ discussions: [DISCUSSION] }));
+
+    await click(container.querySelector(FILE_ROW));
+    await click(rows().find((r) => r.className.includes("add")));
+    await type(container.querySelector<HTMLTextAreaElement>(".rv-cmt textarea")!, "is this guarded?");
+    await click(button("Discuss"));
+
+    expect(postReviewDiscussion).toHaveBeenCalledWith("/repo", null, {
+      op: "create",
+      anchor: { path: "src/workspace.ts", side: "new", line: 405, code: "new line" },
+      body: "is this guarded?",
+      // The identity of the diff that rendered the anchor, not of whatever the
+      // file says by the time this lands.
+      revision: "abc1234:working", diffHash: "h1",
+      companion: { agentName: "claude", sessionId: "s1" },
+    });
+    // The composer is gone, and the record is under the line it was written on.
+    expect(container.querySelector(".rv-cmt textarea")).toBeNull();
+    const card = container.querySelector<HTMLDetailsElement>("main.canvas .udiff .rv-cmt.discussion")!;
+    expect(card.textContent).toContain("is this guarded?");
+    // Collapsed to its one-line marker until somebody asks for it: a thread
+    // opened on every anchor buries the diff it is about.
+    expect(card.open).toBe(false);
+    expect(card.querySelector("summary")?.textContent).toBe("◆workspace.ts:405");
+
+    // And findable without the line: a discussion reachable only from its own
+    // row is one you cannot find.
+    expect(tab("Discussions")?.querySelector(".rv-tab-n")?.textContent).toBe("1");
+    await click(tab("Discussions"));
+    expect(container.querySelector("aside.rv-left .wf-group")?.textContent).toBe("src/workspace.ts");
+    expect(container.querySelector("aside.rv-left .rv-open")?.textContent).toBe("workspace.ts:405");
+  });
+
+  test("an index entry navigates the canvas, and the canvas keeps its comment layer", async () => {
+    // The same slot a CodeRef opens, so Back works — and with the revision on
+    // it, or the canvas would read the file as a CodeRef's and drop the layer
+    // the discussion is drawn in.
+    getReviewState.mockResolvedValue(state({ discussions: [DISCUSSION] }));
+    const useStore = await setup();
+    await click(container.querySelector(FILE_ROW));
+    await click(tab("Discussions"));
+    await click(container.querySelector(".rv-open"));
+
+    expect(useStore.getState().reviewPreview).toMatchObject({
+      abs: "/repo/src/workspace.ts", path: "src/workspace.ts", line: 405, spec: null,
+    });
+    expect(container.querySelector("main.canvas .udiff .rv-cmt.discussion")).not.toBeNull();
+    expect(nav("Back")?.disabled).toBe(false);
+  });
+
+  test("Discuss is offered on a changed line only", async () => {
+    // A discussion is a record against the change. Context rows are there to
+    // read it by, and have no anchor semantics of their own.
+    await setup();
+    await click(container.querySelector(FILE_ROW));
+    await click(rows().find((r) => r.className.includes("ctx")));
+    expect(acts()).toContain("Add comment");
+    expect(acts()).not.toContain("Discuss");
+
+    await click(rows().find((r) => r.className.includes("del")));
+    expect(acts()).toContain("Discuss");
+  });
+
+  test("a line that no longer reads the way it did keeps its discussion off it", async () => {
+    // The anchor is never moved: line 405 is still in the diff, but it says
+    // something else now, so the card would be quoting one line while sitting
+    // under another.
+    getReviewState.mockResolvedValue(state({
+      discussions: [{ ...DISCUSSION, code: "the line it used to be" }],
+    }));
+    await setup();
+    await click(container.querySelector(FILE_ROW));
+
+    expect(container.querySelector(".udiff .rv-cmt.discussion")).toBeNull();
+    const stale = container.querySelector("main.canvas .rv-stale");
+    expect(stale?.textContent).toContain("Not on a current line");
+    expect(stale?.querySelector(".rv-quote")?.textContent).toBe("the line it used to be");
+  });
+
+  test("a reply and a resolve show at once, and the gateway is asked for the truth after", async () => {
+    getReviewState.mockResolvedValue(state({ discussions: [DISCUSSION] }));
+    await setup();
+    await click(tab("Discussions"));
+    const reads = getReviewState.mock.calls.length;
+
+    // Held open, so what is on screen between the click and the answer is the
+    // optimistic copy and nothing else.
+    let answer: (v: unknown) => void = () => {};
+    postReviewDiscussion.mockReturnValue(new Promise((r) => { answer = r; }));
+    await click(button("Reply"));
+    await type(container.querySelector<HTMLTextAreaElement>(".rv-cmt textarea")!, "only on the happy path");
+    await click(button("Send reply"));
+    expect(postReviewDiscussion).toHaveBeenLastCalledWith("/repo", null,
+      { op: "reply", id: "d1", body: "only on the happy path" });
+    expect(container.querySelector(".rv-reply")?.textContent).toBe("only on the happy path");
+
+    const replied = { ...DISCUSSION, replies: [{ id: "p1", body: "only on the happy path", createdAt: "2026-09-01T11:00:00Z" }] };
+    getReviewState.mockResolvedValue(state({ discussions: [replied] }));
+    await act(async () => { answer({ ok: true }); await flush(); });
+    expect(container.querySelector(".rv-reply")?.textContent).toBe("only on the happy path");
+
+    postReviewDiscussion.mockResolvedValue({ ok: true });
+    getReviewState.mockResolvedValue(state({ discussions: [{ ...replied, status: "resolved" }] }));
+    await click(button("Resolve"));
+    expect(postReviewDiscussion).toHaveBeenLastCalledWith("/repo", null, { op: "resolve", id: "d1" });
+    expect(container.querySelector(".rv-cmt.discussion")?.className).toContain("resolved");
+
+    // And back: resolved is a state, not a deletion.
+    getReviewState.mockResolvedValue(state({ discussions: [replied] }));
+    await click(button("Reopen"));
+    expect(postReviewDiscussion).toHaveBeenLastCalledWith("/repo", null, { op: "reopen", id: "d1" });
+    expect(container.querySelector(".rv-cmt.discussion")?.className).not.toContain("resolved");
+    // Both wrote, and both re-read — the refetch is also the undo for a write
+    // the gateway refused.
+    expect(getReviewState.mock.calls.length).toBeGreaterThan(reads + 1);
+  });
+
+  test("Branch hands the fork the whole thread and the way back to it", async () => {
+    const { makeSession } = await import("../store/reducers.ts");
+    const branchSession = vi.fn().mockResolvedValue(true);
+    getReviewState.mockResolvedValue(state({
+      discussions: [{ ...DISCUSSION, replies: [{ id: "r1", body: "only when x is set", createdAt: "2026-09-01T11:00:00Z" }] }],
+    }));
+    const useStore = await setup({ activeId: "s1", sessions: { s1: makeSession("s1") }, branchSession });
+    await act(async () => {
+      useStore.setState({
+        cfg: { ...useStore.getState().cfg, agents: [{ name: "claude", cwd: "/repo", sessionFork: true }] },
+      } as never);
+    });
+    await click(tab("Discussions"));
+    await click(button("Branch"));
+
+    const text = branchSession.mock.calls[0][0].text as string;
+    expect(text).toContain("### src/workspace.ts:405");
+    expect(text).toContain("new line");
+    expect(text).toContain("is this guarded?");
+    expect(text).toContain("only when x is set");
+    // The reference back: a fork is a new conversation with no other way to say
+    // which record asked for it.
+    expect(text).toContain("Discussion d1 at src/workspace.ts:405");
+  });
+
+  test("Send review clears the draft and leaves the discussions standing", async () => {
+    // Two lifecycles, not one: a comment goes out with the review and is gone,
+    // a discussion is a record that outlives it.
+    getReviewDraft.mockResolvedValue({
+      scope: "working", persisted: true, counts: { working: 1 },
+      comments: [{ id: "x1", path: "src/workspace.ts", side: "new", line: 405, code: "new line", body: "nit" }],
+    });
+    getReviewState.mockResolvedValue(state({ discussions: [DISCUSSION] }));
+    await setup();
+    await click(button("Send review"));
+
+    expect(saveReviewDraft).toHaveBeenLastCalledWith("/repo", null, []);
+    expect(postReviewDiscussion).not.toHaveBeenCalled();
+    await click(tab("Discussions"));
+    expect(container.querySelector("aside.rv-left .rv-cmt.discussion")?.textContent).toContain("is this guarded?");
+  });
+
+  test("a sibling review whose worktree is gone reads, and offers nothing to do", async () => {
+    getReviewState.mockResolvedValue(state({ others: [OTHER] }));
+    await setup();
+    await click(tab("Discussions"));
+
+    expect(container.textContent).toContain("Other reviews of this repository");
+    expect(container.querySelector(".rv-gone")?.textContent).toContain("worktree is gone");
+    // No Reply, no Resolve, no Branch — and no Open either: the path it names
+    // is in a checkout this canvas is not reading.
+    expect(acts()).toEqual([]);
+    expect(container.querySelector(".rv-open")).toBeNull();
+  });
+
+  test("marking a file read records the diff on screen, and moves nothing", async () => {
+    const useStore = await setup();
+    await click(container.querySelector(FILE_ROW));
+    const toggle = () => container.querySelector<HTMLButtonElement>('main.canvas .rv-bar button[aria-pressed]:not(.rv-sheet)');
+    expect(toggle()?.textContent).toBe("Mark reviewed");
+    expect(toggle()?.getAttribute("aria-pressed")).toBe("false");
+    // One file at a time, on purpose: a button that claims a whole review read
+    // in one press is a button for not reading it.
+    expect([...container.querySelectorAll("button")].some((b) => /mark all/i.test(b.textContent ?? ""))).toBe(false);
+
+    const diffs = getFileDiff.mock.calls.length;
+    getReviewState.mockResolvedValue(state({ reviewed: [READ] }));
+    await click(toggle());
+
+    // The identity of the diff that was rendered, not one fetched at click
+    // time: a checkout that moved on while it was being read must not be the
+    // thing recorded as reviewed.
+    expect(setFileReviewed).toHaveBeenCalledWith("/repo", null, {
+      path: "src/workspace.ts", hash: "h1", revision: "abc1234:working",
+      reviewed: true, companion: undefined,
+    });
+    expect(getFileDiff.mock.calls.length).toBe(diffs);
+    expect(toggle()?.textContent).toBe("Reviewed");
+    expect(toggle()?.getAttribute("aria-pressed")).toBe("true");
+    // A muted tick on the row, and the reader is still where they were.
+    expect(container.querySelector("aside.rv-left .wf-reviewed")?.textContent).toBe("✓");
+    expect(useStore.getState().reviewPreview?.path).toBe("src/workspace.ts");
+    expect(useStore.getState().reviewHistory.past.length).toBe(0);
+
+    // And back off again: the mark is the reader's to withdraw.
+    getReviewState.mockResolvedValue(state({ reviewed: [] }));
+    await click(toggle());
+    expect(setFileReviewed).toHaveBeenLastCalledWith("/repo", null,
+      { path: "src/workspace.ts", hash: "h1", revision: "abc1234:working", reviewed: false, companion: undefined });
+    expect(container.querySelector("aside.rv-left .wf-reviewed")).toBeNull();
+  });
+
+  test("a diff with no digest cannot be claimed read, and says why", async () => {
+    // Nothing identifies what was on screen, so there is nothing to compare
+    // against later — claiming it read would be a mark that can never go stale.
+    getFileDiff.mockResolvedValue({ ...DIFF, hash: undefined, truncated: true });
+    getReviewState.mockResolvedValue(state({
+      reviewed: [{ ...READ, changed: true, reason: "unhashable" }],
+    }));
+    await setup();
+    await click(container.querySelector(FILE_ROW));
+    const toggle = () => container.querySelector<HTMLButtonElement>('main.canvas .rv-bar button[aria-pressed]:not(.rv-sheet)');
+    expect(toggle()?.disabled).toBe(true);
+    expect(toggle()?.title).toContain("too large");
+    // The gateway reports a reviewed file it can no longer hash as changed, and
+    // the row says so rather than keeping a tick it cannot stand behind.
+    expect(container.querySelector("aside.rv-left .wf-reviewed")?.textContent).toBe("●");
+    expect(container.querySelector("aside.rv-left .wf-reviewed")?.getAttribute("title"))
+      .toContain("can no longer be read whole");
+
+    // A binary file under a revision, where the viewer stays on the diff pane
+    // rather than falling through to the file as it is on disk now.
+    getFileDiff.mockResolvedValue({ ...DIFF, hash: undefined, binary: true, diff: "" });
+    await click(chip("Commits"));
+    await click([...container.querySelectorAll(".rv-commit")][0]);
+    await click(container.querySelector(FILE_ROW));
+    expect(toggle()?.disabled).toBe(true);
+    expect(toggle()?.title).toContain("binary");
+  });
+
+  test("a file that changed after it was read is flagged, and its diff reoffered", async () => {
+    getReviewState.mockResolvedValue(state({ reviewed: [{ ...READ, changed: true }] }));
+    await setup();
+    await click(container.querySelector(FILE_ROW));
+    expect(container.querySelector("aside.rv-left .wf-reviewed")?.getAttribute("title"))
+      .toBe("Changed after you reviewed it");
+    expect(container.querySelector("main.canvas .rv-changed")?.textContent)
+      .toContain("Changed since you reviewed it");
+    // Unpressed, not pressed: the next press re-marks against what is on screen
+    // now. Reoffering the diff clears nothing — only a reader can say they read.
+    const toggle = () => container.querySelector<HTMLButtonElement>('main.canvas .rv-bar button[aria-pressed]:not(.rv-sheet)');
+    expect(toggle()?.textContent).toBe("Mark reviewed");
+
+    const diffs = getFileDiff.mock.calls.length;
+    const lists = getWorkspaceChanges.mock.calls.length;
+    getFileDiff.mockResolvedValue({ ...DIFF, hash: "h2" });
+    await click(button("Review new changes"));
+    // This one file, and not the lists around it: a re-read of the diff must
+    // not move the reader off the file they asked about.
+    expect(getFileDiff.mock.calls.length).toBe(diffs + 1);
+    expect(getWorkspaceChanges.mock.calls.length).toBe(lists);
+    // Reoffering is not approving: the flag stands until a reader presses the
+    // toggle again.
+    expect(setFileReviewed).not.toHaveBeenCalled();
+    expect(container.querySelector("main.canvas .rv-changed")).not.toBeNull();
+
+    getReviewState.mockResolvedValue(state({ reviewed: [{ ...READ, hash: "h2" }] }));
+    await click(toggle());
+    expect(setFileReviewed).toHaveBeenLastCalledWith("/repo", null,
+      { path: "src/workspace.ts", hash: "h2", revision: "abc1234:working", reviewed: true, companion: undefined });
+    expect(container.querySelector("main.canvas .rv-changed")).toBeNull();
   });
 });
