@@ -658,6 +658,88 @@ export async function fileDiff(cwd: string, abs: string, spec?: RevSpec | null):
   return finishDiff(rel, exists ? "modified" : "deleted", r.stdout);
 }
 
+// Which repository a checkout belongs to. The COMMON dir is the identity: a
+// `git worktree` shares it with the checkout it was added from, so two worktrees
+// of one repo answer the same string while two clones of the same upstream do
+// not — which is what "same repository" has to mean for a review whose
+// discussions must not leak between unrelated clones.
+export async function gitCommonDir(cwd: string): Promise<string | null> {
+  // --path-format=absolute arrived in git 2.31; older git exits non-zero on the
+  // flag and prints the common dir relative to cwd instead, which resolves to
+  // the same place.
+  let dir = (await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
+  if (!dir) {
+    const rel = await git(cwd, ["rev-parse", "--git-common-dir"]);
+    if (rel.code !== 0) return null;
+    dir = rel.stdout.trim();
+    if (!dir) return null;
+    dir = path.resolve(cwd, dir);
+  }
+  // realpath for the same reason repoRoot does it: this string is a primary key.
+  try { return fs.realpathSync(dir); } catch { return dir; }
+}
+
+// Evidence, never the key: recorded once so a future reassociation (the common
+// dir moved) has something to match on. A repository with several root commits
+// reports all of them, sorted and newline joined, because picking one of an
+// unordered set is a coin toss.
+//
+// Separate from the common dir because it is read exactly once per repository,
+// when its row is created. `rev-list --max-parents=0` walks the whole history,
+// which is not a thing to do on every refresh of a review — and re-deriving the
+// evidence later would quietly rewrite what it exists to be.
+export async function repoFingerprints(cwd: string): Promise<{ rootCommit: string | null; remote: string | null }> {
+  const roots = await git(cwd, ["rev-list", "--max-parents=0", "HEAD"]);
+  const remote = await git(cwd, ["remote", "get-url", "origin"]);
+  return {
+    rootCommit: roots.code === 0 && roots.stdout.trim()
+      ? roots.stdout.trim().split("\n").map((l) => l.trim()).sort().join("\n")
+      : null,
+    remote: remote.code === 0 && remote.stdout.trim() ? remote.stdout.trim() : null,
+  };
+}
+
+// What identifies the bytes a reviewer was shown, and which comparison produced
+// them. Both halves are stored against a discussion or a reviewed file, so the
+// same function answers for the diff route AND for the "has it changed since?"
+// check — computing them in two places is how the two end up disagreeing about
+// rename detection or which revision `spec` really named.
+//
+// `hash` is absent exactly when the diff on screen was not the whole diff:
+// binary blobs and anything past MAX_DIFF_BYTES. A reviewer cannot claim to have
+// read what was never rendered, so its absence is the client's "you can't mark
+// this" and the state check's "assume it changed".
+export async function diffIdentity(
+  cwd: string, diff: FileDiff, spec?: RevSpec | null,
+): Promise<{ hash?: string; revision: string }> {
+  return {
+    hash: diff.binary || diff.truncated ? undefined : sha256(Buffer.from(diff.diff, "utf8")),
+    revision: await revisionOf(cwd, spec),
+  };
+}
+
+// The comparison a diff came from, as one string:
+//   working    <HEAD sha>:working — the HEAD it is dirty against, plus the mark
+//              that says the other side is a working tree and so is not content
+//              addressable on its own
+//   commit     the resolved sha, never the spelling the client sent: "HEAD~2"
+//              means something else tomorrow
+//   branch     <merge base>..<HEAD sha>, i.e. the two ends of `base...HEAD`
+async function revisionOf(cwd: string, spec?: RevSpec | null): Promise<string> {
+  const sha = async (rev: string): Promise<string> => {
+    const r = await git(cwd, ["rev-parse", "--verify", "--quiet", rev]);
+    return r.code === 0 ? r.stdout.trim() : "";
+  };
+  if (spec?.commit) return (await sha(spec.commit)) || spec.commit;
+  const head = (await sha("HEAD")) || "none";
+  if (spec?.base) {
+    const mb = await git(cwd, ["merge-base", spec.base, "HEAD"]);
+    const from = mb.code === 0 && mb.stdout.trim() ? mb.stdout.trim() : (await sha(spec.base)) || spec.base;
+    return from + ".." + head;
+  }
+  return head + ":working";
+}
+
 // What a committed diff did to the file, read off git's own extended header
 // rather than from a second call. "modified" is the fallback because it is what
 // a header carrying none of these markers means.

@@ -269,6 +269,14 @@ describe("global styles", () => {
     expect(offenders).toEqual([]);
   });
 
+  test("reviewed is a muted tick, and changed-after-review wears the accent", () => {
+    // The one mark this workspace adds to a file row, and the reason the green
+    // rule above has no new entry: a column of green ticks buries the files
+    // nobody has opened, which is the opposite of what the mark is for.
+    expect(cssRule(".wf-reviewed")).toMatch(/color:\s*var\(--muted\)/);
+    expect(cssRule(".wf-reviewed.changed")).toMatch(/color:\s*var\(--accent\)/);
+  });
+
   test("your message reads as a tinted block, not as the reply", () => {
     const rule = cssRule(".turn.user");
 

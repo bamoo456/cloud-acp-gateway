@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore, type PreviewMode, type ReviewLoc } from "../store/store.ts";
+import { useStore, branchGate, type PreviewMode, type ReviewLoc } from "../store/store.ts";
 import {
   getCommits, getWorkspaceChanges, getReviewDraft, saveReviewDraft,
-  type ChangedFile, type ChangesResult, type CommitEntry, type ReviewComment, type RevSpec,
+  getReviewState, postReviewDiscussion, setFileReviewed,
+  type ChangedFile, type ChangesResult, type CommitEntry, type Discussion, type FileDiffResult,
+  type OtherDiscussion, type ReviewComment, type ReviewedFile, type ReviewIdentity, type RevSpec,
 } from "../lib/api.ts";
-import { buildReviewMessage, buildApprovalMessage } from "../lib/reviewPrompt.ts";
+import { buildReviewMessage, buildApprovalMessage, buildDiscussionMessage } from "../lib/reviewPrompt.ts";
 import { basename, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
 import { IconArrow, IconBack, IconChevrons, IconRefresh } from "../lib/icons.tsx";
 import { PathTree } from "./PathTree.tsx";
 import { FileView } from "./FilePanel.tsx";
-import { SavedComment, anchorKey } from "./ReviewComments.tsx";
+import { SavedComment, DiscussionCard, anchorKey } from "./ReviewComments.tsx";
 import { makeRangeFile } from "../lib/mentions.ts";
 import { isDesktopPanelWidth } from "../lib/panelWidth.ts";
 import type { DiffAnchor } from "./UnifiedDiff.tsx";
@@ -80,6 +82,13 @@ export function useReviewSession(cwd: string, active: boolean) {
   const clearReviewPreview = useStore((s) => s.clearReviewPreview);
   const clearReviewHistory = useStore((s) => s.clearReviewHistory);
   const working = useStore((s) => !!(s.activeId && s.sessions[s.activeId]?.working));
+  const branchSession = useStore((s) => s.branchSession);
+  // branchGate builds a fresh object every call, which a selector may not
+  // return — the store would see a new value on every change and re-render
+  // forever. Three primitives, three comparisons.
+  const branchShow = useStore((s) => branchGate(s).show);
+  const branchDisabled = useStore((s) => branchGate(s).disabled);
+  const branchWhy = useStore((s) => branchGate(s).why);
 
   const [scope, setScope] = useState<Scope>("working");
   const [log, setLog] = useState<{ commits: CommitEntry[]; branch?: string; defaultBase?: string } | null>(null);
@@ -109,6 +118,21 @@ export function useReviewSession(cwd: string, active: boolean) {
   // is the workspace fighting them.
   const [refreshKey, setRefreshKey] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
+  // The durable half of the review: the discussions on it, the ones sibling
+  // reviews of the same repository hold, and the identity they all hang off.
+  // `review` is null until something has been written — reading never creates
+  // it, which is why an untouched folder shows no state and no error.
+  const [review, setReview] = useState<ReviewIdentity | null>(null);
+  const [discussions, setDiscussions] = useState<Discussion[]>([]);
+  const [others, setOthers] = useState<OtherDiscussion[]>([]);
+  // Which files have been read, and whether they still say what they said when
+  // they were. `changed` is the gateway's comparison, not ours: the hash it
+  // holds is the one that was on screen at the moment somebody marked it.
+  const [reviewed, setReviewed] = useState<ReviewedFile[]>([]);
+  const [tab, setTab] = useState<"changed" | "discussions">("changed");
+  // Its own refresh counter. A reply is one row on the gateway; riding
+  // refreshKey would re-run git status and the log to learn it.
+  const [stateKey, setStateKey] = useState(0);
 
   // Which revision everything on screen is about. Every read — the file list,
   // each diff, the draft — takes this same value, so they cannot disagree about
@@ -191,6 +215,26 @@ export function useReviewSession(cwd: string, active: boolean) {
     return () => { gen.current++; };
   }, [cwd, specKey, pending, refreshKey, active]);
 
+  // Discussions, on the same refresh path as the lists above and on its own key
+  // besides. Separate from the draft fetch because the two have different
+  // reasons to re-run, not because they answer different questions.
+  const stateGen = useRef(0);
+  useEffect(() => {
+    if (!active) return;
+    if (pending) { setReview(null); setDiscussions([]); setOthers([]); setReviewed([]); return; }
+    const mine = ++stateGen.current;
+    getReviewState(cwd, spec)
+      .then((st) => {
+        if (mine !== stateGen.current) return;
+        setReview(st.review);
+        setDiscussions(st.discussions);
+        setOthers(st.others);
+        setReviewed(st.reviewed);
+      })
+      .catch(() => { if (mine === stateGen.current) { setDiscussions([]); setOthers([]); setReviewed([]); } });
+    return () => { stateGen.current++; };
+  }, [cwd, specKey, pending, refreshKey, active, stateKey]);
+
   // A turn ending is the moment the list is most likely wrong: the agent just
   // finished writing. The lists around the diff only — see reloadKey.
   const wasWorking = useRef(working);
@@ -244,6 +288,35 @@ export function useReviewSession(cwd: string, active: boolean) {
     void saveReviewDraft(cwd, spec, next).then(setPersisted);
   }
 
+  // ---- discussions ----
+  // The session that was open when this review first wrote something, as the
+  // gateway records it. Optional on every write: a review can be read and
+  // discussed with no conversation on screen at all.
+  const companion = () => (activeId ? { agentName, sessionId: activeId } : undefined);
+
+  // A reply or a status change lands in whichever list holds that id — this
+  // review's, or the read-only column of a sibling one.
+  function patch(id: string, f: (d: Discussion) => Partial<Discussion>) {
+    setDiscussions((ds) => ds.map((d) => (d.id === id ? { ...d, ...f(d) } : d)));
+    setOthers((ds) => ds.map((d) => (d.id === id ? { ...d, ...f(d) } : d)));
+  }
+
+  async function createDiscussion(path: string, a: DiffAnchor, body: string, revision: string, diffHash?: string) {
+    // Not optimistic, unlike the two below: a discussion has no id until the
+    // gateway gives it one, and a refusal (the worktree is gone, the folder is
+    // not a checkout) has to leave the composer and its text exactly where they
+    // are rather than flash a card that never existed.
+    const r = await postReviewDiscussion(cwd, spec, {
+      op: "create",
+      anchor: { path, side: a.side, line: a.line, code: a.code },
+      body, revision, diffHash, companion: companion(),
+    });
+    if (!r.ok || !r.discussion) return false;
+    setDiscussions((ds) => [...ds, r.discussion!]);
+    setStateKey((k) => k + 1);
+    return true;
+  }
+
   async function send(approve: boolean) {
     if (sending) return;
     setSending(true);
@@ -284,11 +357,53 @@ export function useReviewSession(cwd: string, active: boolean) {
     openFile: (f: ChangedFile) =>
       openFilePreview({ abs: f.abs, path: f.path, mode: "diff", cwd, spec }),
     refresh: () => { setRefreshKey((k) => k + 1); setReloadKey((k) => k + 1); },
+    // The diff on screen and nothing else. What "changed since you reviewed it"
+    // offers is a re-read of this one file — re-running the lists around it
+    // would move the reader off it to answer a question about it.
+    reload: () => setReloadKey((k) => k + 1),
     addComment: (path: string, anchor: DiffAnchor, body: string) => commitComments([
       ...comments, { id: makeId(), path, side: anchor.side, line: anchor.line, code: anchor.code, body },
     ]),
     deleteComment: (id: string) => commitComments(comments.filter((c) => c.id !== id)),
     send,
+
+    // ---- durable state ----
+    review, discussions, others, reviewed, tab, setTab,
+    // Every count the tab shows is of THIS review's open threads: a resolved one
+    // is done, and a sibling worktree's is not this reviewer's to clear.
+    openCount: discussions.filter((d) => d.status === "open").length,
+    createDiscussion,
+    discussionActs: {
+      onReply: (id: string, body: string) => {
+        const at = new Date().toISOString();
+        patch(id, (d) => ({ replies: [...d.replies, { id: "pending:" + at, body, createdAt: at }] }));
+        // The refetch is also the undo: a write that failed comes back absent.
+        void postReviewDiscussion(cwd, spec, { op: "reply", id, body })
+          .then(() => setStateKey((k) => k + 1));
+      },
+      onStatus: (id: string, op: "resolve" | "reopen") => {
+        patch(id, () => ({ status: op === "resolve" ? "resolved" : "open" }));
+        void postReviewDiscussion(cwd, spec, { op, id }).then(() => setStateKey((k) => k + 1));
+      },
+      onBranch: branchShow ? (d: Discussion) => { void branchSession({ text: buildDiscussionMessage(d) }); } : undefined,
+      branchDisabled, branchWhy,
+    },
+    // `hash` and `revision` are the diff that was RENDERED, handed straight
+    // through. Not optimistic, unlike a reply: a tick that appears before the
+    // gateway has it is a claim that a file was read, which is the one thing
+    // this is here to keep honest.
+    markReviewed: (path: string, hash: string, revision: string, next: boolean) => {
+      void setFileReviewed(cwd, spec, { path, hash, revision, reviewed: next, companion: companion() })
+        .then(() => setStateKey((k) => k + 1));
+    },
+    // The same slot a CodeRef opens, so the canvas history works the same way.
+    // Rooted at the review's worktree rather than at `cwd`: a discussion's path
+    // is repo-root-relative, and `cwd` may be a folder inside the checkout. The
+    // revision rides along, or the canvas would read the file as a CodeRef's —
+    // and drop the comment layer the discussion is drawn in.
+    openDiscussion: (d: Discussion) => openFilePreview({
+      abs: (review?.worktree ?? cwd) + "/" + d.path, path: d.path, mode: "diff", cwd, spec, line: d.line,
+    }),
   };
 }
 
@@ -299,6 +414,19 @@ export function ReviewLeft({ rv }: { rv: ReviewSession }) {
   const { changes, comments, scope, pending, loading, err, spec } = rv;
   const files = changes?.files ?? [];
   const countFor = (path: string) => comments.filter((c) => c.path === path).length;
+  // Read, and still what was read. A muted tick rather than a green one: green
+  // means a diff `+`, and a column of green ticks buries the files nobody has
+  // opened yet. The changed mark says the opposite — this row is work again.
+  const markFor = (path: string) => {
+    const r = rv.reviewed.find((f) => f.path === path);
+    if (!r) return null;
+    if (!r.changed) return <span className="wf-reviewed" title="You marked this reviewed">✓</span>;
+    return (
+      <span className="wf-reviewed changed" title={r.reason === "unhashable"
+        ? "Changed after you reviewed it — this diff can no longer be read whole"
+        : "Changed after you reviewed it"}>●</span>
+    );
+  };
   return (
     <aside className={"rv-left" + (sheet ? " open" : "")} aria-label="Changed files">
       {rv.showDraft ? (
@@ -323,6 +451,21 @@ export function ReviewLeft({ rv }: { rv: ReviewSession }) {
         </>
       ) : (
         <>
+          {/* Two readings of the same review: the change, and what has been said
+              about it. A tab rather than a section under the files, because a
+              discussion is cross-file and the tree is not. */}
+          <div className="rv-tabs" role="tablist" aria-label="Review">
+            <button role="tab" aria-selected={rv.tab === "changed"}
+              className={"rv-tab" + (rv.tab === "changed" ? " on" : "")}
+              onClick={() => rv.setTab("changed")}>Changed</button>
+            <button role="tab" aria-selected={rv.tab === "discussions"}
+              className={"rv-tab" + (rv.tab === "discussions" ? " on" : "")}
+              onClick={() => rv.setTab("discussions")}>
+              Discussions
+              {rv.openCount > 0 && <span className="rv-tab-n">{rv.openCount}</span>}
+            </button>
+          </div>
+          {rv.tab === "discussions" ? <DiscussionIndex rv={rv} /> : (
           <div className="wf-body">
             {/* The canvas is where a commit is picked and a base is typed, so
                 this column says what it is waiting for rather than repeating
@@ -363,6 +506,7 @@ export function ReviewLeft({ rv }: { rv: ReviewSession }) {
                       <span className="wf-name">
                         <span className="wf-nm">{basename(f.path)}</span>
                       </span>
+                      {markFor(f.path)}
                       {countFor(f.path) > 0 && <span className="rv-badge">{countFor(f.path)}</span>}
                       <span className="wf-counts">
                         {f.binary
@@ -377,6 +521,7 @@ export function ReviewLeft({ rv }: { rv: ReviewSession }) {
               </>
             )}
           </div>
+          )}
 
           {/* The footer only exists once there is something to do with it: an empty
               review offers Approve, a written one offers Send. Before either, the
@@ -387,6 +532,45 @@ export function ReviewLeft({ rv }: { rv: ReviewSession }) {
         </>
       )}
     </aside>
+  );
+}
+
+// Every discussion of this review, grouped by file, and below them the ones
+// sibling reviews of the same repository hold. Cross-file because a discussion
+// reachable only from its own line is one you cannot find.
+function DiscussionIndex({ rv }: { rv: ReviewSession }) {
+  const { discussions, others } = rv;
+  const paths = [...new Set(discussions.map((d) => d.path))].sort();
+  return (
+    <div className="wf-body">
+      {discussions.length === 0 && others.length === 0 && (
+        <div className="wf-empty">
+          No discussions yet. Pick a changed line in the diff and press Discuss to start one.
+        </div>
+      )}
+      {paths.map((path) => (
+        <div key={path}>
+          <div className="wf-group">{path}</div>
+          {discussions.filter((d) => d.path === path).sort((a, b) => a.line - b.line).map((d) => (
+            <DiscussionCard key={d.id} d={d} inList acts={rv.discussionActs}
+              onOpen={() => rv.openDiscussion(d)} />
+          ))}
+        </div>
+      ))}
+      {others.length > 0 && (
+        <>
+          {/* Another worktree, or another revision of this one. No Open: the
+              path they name is in a checkout this canvas is not reading. */}
+          <div className="wf-group rv-other">Other reviews of this repository</div>
+          {others.map((d) => (
+            <DiscussionCard key={d.id} d={d} inList
+              acts={d.live ? rv.discussionActs : undefined}
+              note={d.live ? undefined
+                : "That worktree is gone — this is the record of it, and there is no code left to act on."} />
+          ))}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -420,6 +604,10 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
   // them.
   const scrollTop = useRef(0);
   const viewMode = useRef<PreviewMode>("diff");
+  // The FileDiffResult the viewer has on screen, reported up as it lands. The
+  // header's Reviewed toggle marks THAT — re-fetching the diff at click time is
+  // how a checkout that moved on gets recorded as read.
+  const [diff, setDiff] = useState<FileDiffResult | null>(null);
   const canvasRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const el = canvasRef.current;
@@ -530,6 +718,12 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
     }
   }
 
+  // Three states from one row: unread, read, and read-then-changed. The last
+  // reads as unpressed on purpose — the next click re-marks it against the diff
+  // now on screen rather than dropping the mark.
+  const readEntry = loc ? rv.reviewed.find((f) => f.path === loc.path) : undefined;
+  const markedRead = !!readEntry && !readEntry.changed;
+
   const askFix = (intent: "ask" | "fix", anchor: DiffAnchor) => {
     if (!loc || !rv.activeId) return;
     revealCompanion();
@@ -566,6 +760,18 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
           <button className="icon-btn rv-uncollapse" title="Show companion" aria-label="Show companion"
             onClick={toggleCompanion}><IconChevrons left /></button>
         )}
+        {/* Only for a diff of the revision being reviewed: a CodeRef opened at
+            another one is not part of this review, and a file whose diff has no
+            digest has nothing to identify what was read. */}
+        {loc && onScope && diff && (
+          <button className="btn-sm" aria-pressed={markedRead} disabled={!diff.hash}
+            title={diff.hash ? undefined : diff.binary
+              ? "A binary file has no diff to have read."
+              : "This diff was too large to send whole, so there's nothing to mark."}
+            onClick={() => rv.markReviewed(loc.path, diff.hash!, diff.revision, !markedRead)}>
+            {markedRead ? "Reviewed" : "Mark reviewed"}
+          </button>
+        )}
         {/* Explicit, because nothing else here re-reads a diff: a turn ending
             refreshes the lists around it, and stops there. */}
         <button className="icon-btn" title="Refresh" onClick={rv.refresh}><IconRefresh /></button>
@@ -597,6 +803,16 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
         <BaseEditor value={rv.baseRef} branch={log?.branch} onDone={rv.setBase} />
       )}
 
+      {/* What the reviewer read is no longer what the file says. It flags and
+          reoffers the diff; it clears nothing, because only a reader can say
+          they have read something. */}
+      {loc && onScope && readEntry?.changed && (
+        <div className="rv-warn rv-changed">
+          <span>Changed since you reviewed it</span>
+          <button className="btn-sm" onClick={rv.reload}>Review new changes</button>
+        </div>
+      )}
+
       {/* Commits: the log, until one is picked. Picking re-asks every read above
           with ?rev=, which is why there is no separate detail screen. */}
       {scope === "commits" && !commit ? (
@@ -626,12 +842,18 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
         // Keyed on the reload: "re-read everything now" includes this diff, and
         // a fresh viewer is the whole of what that means.
         <FileView key={rv.reloadKey} cwd={loc.cwd ?? rv.cwd} target={loc} spec={loc.spec ?? null}
-          scrollTop={loc.scrollTop} onMode={(m) => { viewMode.current = m; }}
+          scrollTop={loc.scrollTop} onMode={(m) => { viewMode.current = m; }} onDiff={setDiff}
           review={onScope ? {
             comments: byLine,
             onAdd: (anchor, body) => rv.addComment(loc.path, anchor, body),
             onDelete: rv.deleteComment,
             onAskFix: rv.activeId ? askFix : undefined,
+            discussion: {
+              items: rv.discussions.filter((d) => d.path === loc.path),
+              onCreate: (anchor, body, revision, diffHash) =>
+                rv.createDiscussion(loc.path, anchor, body, revision, diffHash),
+              acts: rv.discussionActs,
+            },
           } : undefined}
           canAttach={canAttach}
           onAttach={(range, text) => attachFiles([makeRangeFile(loc.abs, basename(loc.path), range, text)])}
