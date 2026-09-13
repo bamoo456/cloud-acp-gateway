@@ -20,6 +20,7 @@ import { makeAbsFile, makeRangeFile } from "../lib/mentions.ts";
 import { rangeFromOffsets, offsetsOfLines, sliceLines, formatRange, type LineRange } from "../lib/lineRange.ts";
 import { copyText } from "../lib/clipboard.ts";
 import type { MessageFile } from "../types.ts";
+import type { AskFixRequest } from "../lib/reviewPrompt.ts";
 import { UnifiedDiff, anchorOf, type DiffAnchor } from "./UnifiedDiff.tsx";
 import { SavedComment, CommentComposer, DiscussionCard, anchorKey,
   type DiscussionActs } from "./ReviewComments.tsx";
@@ -206,6 +207,7 @@ export function FilePanel() {
   const openFilePreview = useStore((s) => s.openFilePreview);
   const attachFiles = useStore((s) => s.attachFiles);
   const setAskFix = useStore((s) => s.setAskFix);
+  const dispatchAskFix = useStore((s) => s.dispatchAskFix);
   const setWorkspace = useStore((s) => s.setWorkspace);
   const agentName = useStore((s) => s.agentName);
   const setChangeStat = useStore((s) => s.setChangeStat);
@@ -667,10 +669,14 @@ export function FilePanel() {
                 // Bound to the conversation on screen NOW: the request can be
                 // sent after switching to another one, and must still land here.
                 onAskFix={session && !session.viewOnly ? (intent, range, text) => {
-                  setAskFix({
+                  const req = {
                     intent, agentName: session.agentName || agentName, sessionId: session.id, cwd: target.cwd ?? cwd, spec: null,
                     path: target.path, line: range.start, endLine: range.end, code: text,
-                  });
+                  };
+                  // Trace has nothing to type: the excerpt is the whole question,
+                  // so it goes now instead of waiting on a Send nobody would add to.
+                  if (intent === "trace") void dispatchAskFix(req, "");
+                  else setAskFix(req);
                   if (!desktop) closeFiles();
                 } : undefined} />
             </div>
@@ -733,7 +739,7 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
     comments: Map<string, ReviewComment[]>;
     onAdd: (anchor: DiffAnchor, body: string) => void;
     onDelete: (id: string) => void;
-    onAskFix?: (intent: "ask" | "fix", anchor: DiffAnchor) => void;
+    onAskFix?: (intent: AskFixRequest["intent"], anchor: DiffAnchor) => void;
     // The durable discussions recorded against THIS file. Where each one still
     // belongs is decided here, against the diff on screen — the anchors
     // themselves are never touched.
@@ -757,7 +763,7 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
   // rendered, and the review canvas marks THAT one read.
   onDiff?: (d: FileDiffResult | null) => void;
   onAttach: (range: LineRange, text: string) => void;
-  onAskFix?: (intent: "ask" | "fix", range: LineRange, text: string) => void;
+  onAskFix?: (intent: AskFixRequest["intent"], range: LineRange, text: string) => void;
 }) {
   const [mode, setMode] = useState<PreviewMode>(target.mode);
   // The diff line a review comment is being written against. Null is the
@@ -846,7 +852,7 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
 
   // The selection stays: the lines are still what the question is about, and
   // the composer's chip is the acknowledgement here.
-  function askSelection(intent: "ask" | "fix") {
+  function askSelection(intent: AskFixRequest["intent"]) {
     const text = codeRef.current?.textContent;
     if (!range || !text || !onAskFix) return;
     onAskFix(intent, range, sliceLines(text, range));
@@ -1119,14 +1125,14 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
           {/* Ask about the selected lines, or have them fixed. Text rather than
               glyphs: the two differ only in what the agent is allowed to do,
               which no icon says. */}
-          {onAskFix && mode === "file" && file?.kind === "text" && (["ask", "fix"] as const).map((intent) => (
+          {onAskFix && mode === "file" && file?.kind === "text" && (["ask", "fix", "trace"] as const).map((intent) => (
             <button key={intent} type="button" className="icon-btn wf-add wf-ask" disabled={!range}
               onClick={() => askSelection(intent)}
               onMouseDown={(e) => e.preventDefault()}
               title={range
-                ? (intent === "ask" ? "Ask about lines " : "Request a fix for lines ") + formatRange(range)
+                ? { ask: "Ask about lines ", fix: "Request a fix for lines ", trace: "Trace lines " }[intent] + formatRange(range)
                 : "Select lines in the file first"}>
-              {intent === "ask" ? "Ask" : "Fix"}
+              {{ ask: "Ask", fix: "Fix", trace: "Trace" }[intent]}
             </button>
           ))}
           {!(mode === "render" && isHtml) && (

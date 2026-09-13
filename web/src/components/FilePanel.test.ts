@@ -1251,7 +1251,7 @@ describe("FilePanel", () => {
     // Offered regardless of embeddedContext — the request goes as text.
     expect(container.querySelector("button.wf-add:not(.wf-ask)")).toBeNull();
     const asks = () => [...container.querySelectorAll<HTMLButtonElement>("button.wf-ask")];
-    expect(asks().map((b) => b.textContent)).toEqual(["Ask", "Fix"]);
+    expect(asks().map((b) => b.textContent)).toEqual(["Ask", "Fix", "Trace"]);
     expect(asks().every((b) => b.disabled)).toBe(true);
 
     const code = container.querySelector("pre.wf-text code")!;
@@ -1277,6 +1277,43 @@ describe("FilePanel", () => {
     expect(useStore.getState().filePreview?.abs).toBe("/repo/notes.txt");
     // jsdom is the non-desktop branch: the sheet gets out of the composer's way.
     expect(useStore.getState().filesOpen).toBe(false);
+  });
+
+  test("Trace from the file panel goes straight out, not onto the composer", async () => {
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    const dispatchAskFix = vi.fn().mockResolvedValue("sent");
+    getFilePreview.mockResolvedValue({
+      path: "notes.txt", abs: "/repo/notes.txt", kind: "text",
+      size: 40, modifiedAt: new Date().toISOString(),
+      text: "alpha\nbravo\ncharlie\ndelta", truncated: false,
+    } satisfies FilePreviewResult);
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", agentName: "claude", promptCapabilities: {}, dispatchAskFix,
+      activeId: "s1", sessions: { s1: { ...makeSession("s1"), cwd: "/repo" } },
+      filePreview: { abs: "/repo/notes.txt", path: "notes.txt", mode: "file" },
+    });
+    await render();
+
+    const code = container.querySelector("pre.wf-text code")!;
+    await act(async () => {
+      const range = document.createRange();
+      range.setStart(code.firstChild!, 0);
+      range.setEnd(code.firstChild!, 5);
+      window.getSelection()!.removeAllRanges();
+      window.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+    const trace = [...container.querySelectorAll<HTMLButtonElement>("button.wf-ask")]
+      .find((b) => b.textContent === "Trace")!;
+    await act(async () => { trace.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+
+    // The excerpt is the whole question, so there is nothing to type and no chip.
+    expect(dispatchAskFix).toHaveBeenCalledWith({
+      intent: "trace", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null,
+      path: "notes.txt", line: 1, endLine: 1, code: "alpha",
+    }, "");
+    expect(useStore.getState().askFix).toBeNull();
   });
 
   test("Ask/Fix are not offered on a saved conversation that has not been resumed", async () => {
