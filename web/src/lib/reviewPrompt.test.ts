@@ -118,6 +118,13 @@ describe("buildAskFixMessage", () => {
     expect(text).toContain('{ "symbol": string, "definition": Ref[], "callers": Ref[], "callees": Ref[], "references"?: Ref[], "notes"?: string }');
     expect(text).toContain("`path` is required for every Ref; give a line whenever you can; omit an item rather than guess.");
     expect(text).toContain("Paths refer to the checkout as it is now (working tree); results open the current file.");
+    // Taken off a historical diff line, it still names that revision and that
+    // side — and still says the answer is about the checkout as it is now.
+    const old = buildAskFixMessage(
+      r({ intent: "trace", spec: { commit: "3f2a9c0" }, label: "3f2a9c0 fix: guard it", side: "old" }), "");
+    expect(old).toContain("(commit `3f2a9c0 fix: guard it`):");
+    expect(old).toContain("### src/workspace.ts:408 (removed line)");
+    expect(old).toContain("Paths refer to the checkout as it is now");
   });
 
   test("Ask and Fix carry no output contract — they are prose questions", () => {
