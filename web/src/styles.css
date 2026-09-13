@@ -944,6 +944,13 @@
     opacity: 1; color: var(--faint); background: var(--surface); border-radius: 8px; }
   .md-copy .i-check, .md-copy.copied .i-copy { display: none; }
   .md-copy.copied .i-check { display: block; }
+  /* A trace or guide card (Markdown.tsx) replaces the raw block inside the same
+     wrapper, so it inherits that wrapper's margin and has to leave the copy
+     button the same 46px the <pre> does — the title ellipsizes right there. */
+  .acp-block > .acp-result { margin: 0; }
+  .acp-block > .acp-result > summary { padding-right: 46px; }
+  .acp-result .acp-why { color: var(--muted); }
+  .acp-note { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
   .md code { font-family: var(--mono); font-size: var(--chat-code-size); }
   /* A 390px column fits about 30 monospace characters, so a code block that
      scrolls sideways shows a third of every line and no hint that the rest
