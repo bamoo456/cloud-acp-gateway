@@ -34,7 +34,9 @@ export function Markdown({ text, diagrams, images, cwd, final }: {
     let alive = true;
     const mounted = () => alive;
     void renderMermaid(host, mounted).then((drawn) => {
-      if (alive && drawn.length) void linkDiagrams(host, drawn, cwd, final === true, mounted);
+      // Not gated on `drawn`: a diagram that would not draw still has metadata
+      // to list, and that list is all the navigation left.
+      if (alive) void linkDiagrams(host, drawn, cwd, final === true, mounted);
     });
     return () => { alive = false; };
   }, [text, diagrams, cwd, final]);
@@ -221,13 +223,18 @@ function acpItem(raw: unknown, tag: "div" | "li"): HTMLElement | null {
 // replaces them, and nothing here closes over the mapping it read last time.
 async function linkDiagrams(host: HTMLElement, drawn: DrawnDiagram[], cwd: string | undefined, final: boolean, alive: () => boolean) {
   const source = new Map(drawn.map((d) => [d.figure, d.src]));
-  // A diagram that failed to draw is in the walk too: it is not a figure to map,
-  // but it must still stand between the metadata and the figure before it.
+  // A diagram that failed to draw is in the walk too: it has no nodes to map, but
+  // it still owns its metadata — and it must stand between that metadata and the
+  // figure before it rather than let the two pair up.
   const parts = [...host.querySelectorAll<HTMLElement>(".md-mermaid, .md-mermaid-failed, .acp-nodes")];
   for (let i = 0; i < parts.length; i++) {
     const figure = parts[i], meta = parts[i + 1];
     const src = source.get(figure);
-    if (src === undefined || !meta?.classList.contains("acp-nodes")) continue;
+    // A figure this pass did not draw is either one that failed — which still
+    // gets its reference list, minus the nodes — or one drawn by an earlier
+    // pass, which has its list already.
+    if (src === undefined && !figure.classList.contains("md-mermaid-failed")) continue;
+    if (!meta?.classList.contains("acp-nodes")) continue;
     const refs = nodeRefs(meta.dataset.json ?? "");
     if (!refs) {
       // The picture still stands; what is lost is only the navigation. The block
@@ -235,7 +242,7 @@ async function linkDiagrams(host: HTMLElement, drawn: DrawnDiagram[], cwd: strin
       if (final) { meta.hidden = false; meta.after(el("div", "acp-note", UNREADABLE)); }
       continue;
     }
-    const nodes = await flowchartNodes(src);
+    const nodes = src === undefined ? null : await flowchartNodes(src);
     if (!alive() || !figure.isConnected) return;
     const marks: RefEl[] = [];
     for (const node of nodes ?? []) {
@@ -255,7 +262,9 @@ async function linkDiagrams(host: HTMLElement, drawn: DrawnDiagram[], cwd: strin
     const rows = [...refs.values()].map((ref) => acpItem(ref, "div")).filter((row): row is HTMLElement => !!row);
     const list = el("div", "acp-node-list", undefined, el("div", "loc", "References"), ...rows);
     if (rows.length) {
-      figure.after(list);
+      // Under the diagram, or under the note standing in for the one that failed.
+      const error = figure.nextElementSibling;
+      (error?.classList.contains("md-mermaid-error") ? error : figure).after(list);
       marks.push(...list.querySelectorAll<HTMLElement>(".md-ref"));
     }
     if (cwd) hydrateRefs(marks, cwd, alive);
