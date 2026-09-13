@@ -269,6 +269,16 @@ describe("global styles", () => {
     expect(offenders).toEqual([]);
   });
 
+  test("a mapped diagram node says it opens without repainting the diagram", () => {
+    // The node keeps the colours mermaid drew it with: recolouring it would be a
+    // fifth meaning for the palette on a surface that is already all colour. So
+    // the pointer and the focus ring are the whole affordance — and a node the
+    // metadata never placed has neither.
+    expect(cssRule(".acp-node.resolved")).toMatch(/cursor:\s*pointer/);
+    expect(cssRule(".acp-node.resolved:focus-visible")).toMatch(/outline:\s*2px solid var\(--accent\)/);
+    expect(cssRule(".acp-node-list")).toMatch(/font-size:\s*12.5px/);
+  });
+
   test("reviewed is a muted tick, and changed-after-review wears the accent", () => {
     // The one mark this workspace adds to a file row, and the reason the green
     // rule above has no new entry: a column of green ticks buries the files

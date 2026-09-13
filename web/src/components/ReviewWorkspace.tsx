@@ -6,7 +6,10 @@ import {
   type ChangedFile, type ChangesResult, type CommitEntry, type Discussion, type FileDiffResult,
   type OtherDiscussion, type ReviewComment, type ReviewedFile, type ReviewIdentity, type RevSpec,
 } from "../lib/api.ts";
-import { buildReviewMessage, buildApprovalMessage, buildDiscussionMessage } from "../lib/reviewPrompt.ts";
+import {
+  buildReviewMessage, buildApprovalMessage, buildDiscussionMessage,
+  type AskFixRequest, type DiagramKind,
+} from "../lib/reviewPrompt.ts";
 import { basename, timeAgo, STATUS_MARK, STATUS_LABEL } from "../lib/format.ts";
 import { IconArrow, IconBack, IconChevrons, IconRefresh } from "../lib/icons.tsx";
 import { PathTree } from "./PathTree.tsx";
@@ -74,6 +77,7 @@ export function useReviewSession(cwd: string, active: boolean) {
   const activeId = useStore((s) => (s.activeId && !s.sessions[s.activeId]?.viewOnly ? s.activeId : null));
   const agentName = useStore((s) => (s.activeId && s.sessions[s.activeId]?.agentName) || s.agentName);
   const setAskFix = useStore((s) => s.setAskFix);
+  const dispatchAskFix = useStore((s) => s.dispatchAskFix);
   // The canvas is the one viewer, and the Review slot is what it reads. The
   // Agent workspace's `filePreview` is deliberately not consulted anywhere in
   // here: the two workspaces keep their place independently.
@@ -342,7 +346,7 @@ export function useReviewSession(cwd: string, active: boolean) {
   return {
     cwd, scope, log, baseRef, editingBase, commit, changes, comments, persisted,
     loading, err, sending, showDraft, spec, pending, open, reloadKey,
-    activeId, agentName, setAskFix,
+    activeId, agentName, setAskFix, dispatchAskFix,
     canSend: agentReady && !sending && !activeBusy,
     setShowDraft, setEditingBase,
     restoreSpec,
@@ -724,14 +728,36 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
   const readEntry = loc ? rv.reviewed.find((f) => f.path === loc.path) : undefined;
   const markedRead = !!readEntry && !readEntry.changed;
 
-  const askFix = (intent: "ask" | "fix", anchor: DiffAnchor) => {
-    if (!loc || !rv.activeId) return;
+  // How the commit reads in here, for every request that names the scope.
+  const commitLabel = commit ? commit.shortSha + " " + commit.subject : undefined;
+
+  // Ask and Fix become a chip the reviewer types into; Trace has nothing to add
+  // — the excerpt is the whole question — so it goes out as it is.
+  const askFix = (req: AskFixRequest) => {
     revealCompanion();
-    rv.setAskFix({
+    if (req.intent === "trace") void rv.dispatchAskFix(req, "");
+    else rv.setAskFix(req);
+  };
+
+  const askLine = (intent: AskFixRequest["intent"], anchor: DiffAnchor) => {
+    if (!loc || !rv.activeId) return;
+    askFix({
       intent, agentName: rv.agentName, sessionId: rv.activeId, cwd: rv.cwd, spec,
-      path: loc.path, label: commit ? commit.shortSha + " " + commit.subject : undefined,
+      path: loc.path, label: commitLabel,
       side: anchor.side, line: anchor.line, code: anchor.code,
     });
+  };
+
+  // A guide or a diagram is about the whole change, so it needs no selection —
+  // only a conversation to answer in and a list of files to read.
+  const canGuide = !!rv.activeId && !!rv.changes?.files.length;
+  const askChange = (kind: "guide" | DiagramKind) => () => {
+    if (!rv.activeId || !rv.changes) return;
+    revealCompanion();
+    void rv.dispatchAskFix({
+      kind, agentName: rv.agentName, sessionId: rv.activeId, cwd: rv.cwd, spec,
+      label: commitLabel, files: rv.changes.files,
+    }, "");
   };
 
   return (
@@ -760,6 +786,14 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
           <button className="icon-btn rv-uncollapse" title="Show companion" aria-label="Show companion"
             onClick={toggleCompanion}><IconChevrons left /></button>
         )}
+        {/* About the whole change rather than the open file, which is why they
+            live in the bar and not in the selection row. Present and disabled
+            without a conversation to answer in: an action that appears only once
+            you have done the thing that enables it is one nobody finds. */}
+        <button className="btn-sm" disabled={!canGuide} onClick={askChange("guide")}
+          title="Ask for an ordered reading path through this change">Review guide</button>
+        <button className="btn-sm" disabled={!canGuide} onClick={askChange("request-flow")}
+          title="Ask for a request-flow diagram of this change">Diagram</button>
         {/* Only for a diff of the revision being reviewed: a CodeRef opened at
             another one is not part of this review, and a file whose diff has no
             digest has nothing to identify what was read. */}
@@ -847,7 +881,7 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
             comments: byLine,
             onAdd: (anchor, body) => rv.addComment(loc.path, anchor, body),
             onDelete: rv.deleteComment,
-            onAskFix: rv.activeId ? askFix : undefined,
+            onAskFix: rv.activeId ? askLine : undefined,
             discussion: {
               items: rv.discussions.filter((d) => d.path === loc.path),
               onCreate: (anchor, body, revision, diffHash) =>
@@ -859,10 +893,10 @@ export function ReviewCanvas({ rv }: { rv: ReviewSession }) {
           onAttach={(range, text) => attachFiles([makeRangeFile(loc.abs, basename(loc.path), range, text)])}
           // The selection is read out of the file as it is on disk, so it is
           // not the revision's — `spec: null` says so.
-          onAskFix={rv.activeId ? (intent, range, text) => { revealCompanion(); rv.setAskFix({
+          onAskFix={rv.activeId ? (intent, range, text) => askFix({
             intent, agentName: rv.agentName, sessionId: rv.activeId!, cwd: rv.cwd, spec: null,
             path: loc.path, line: range.start, endLine: range.end, code: text,
-          }); } : undefined} />
+          }) : undefined} />
       ) : (
         <div className="wf-empty">Pick a changed file to read it here.</div>
       )}

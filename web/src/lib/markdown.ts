@@ -50,8 +50,22 @@ const CHECK_SVG = '<svg class="i-check" viewBox="0 0 24 24" fill="none" stroke="
 type Rule = NonNullable<MarkdownIt["renderer"]["rules"]["fence"]>;
 const withCopy = (render: Rule): Rule => (tokens, idx, options, env, self) => {
   const html = render(tokens, idx, options, env, self);
-  if (tokens[idx].info.trim().split(/\s+/)[0] === "mermaid") return html;
-  return `<div class="md-pre">${html}<button type="button" class="msg-copy md-copy" title="Copy" aria-label="Copy code">${COPY_SVG}${CHECK_SVG}</button></div>`;
+  const info = tokens[idx].info.trim().split(/\s+/)[0];
+  if (info === "mermaid") return html;
+  // A structured trace or review guide is marked, not parsed: Markdown.tsx
+  // reads the JSON and builds the card. The raw block stays inside the wrapper
+  // either way — it is the fallback when the JSON cannot be read, and it is
+  // what the copy button copies once the card hides it.
+  const kind = info === "acp-trace" ? "trace" : info === "acp-guide" ? "guide" : "";
+  const open = kind ? `<div class="md-pre acp-block" data-kind="${kind}">` : '<div class="md-pre">';
+  const block = `${open}${html}<button type="button" class="msg-copy md-copy" title="Copy" aria-label="Copy code">${COPY_SVG}${CHECK_SVG}</button></div>`;
+  // A diagram's node metadata is plumbing rather than prose — node ids and paths
+  // say nothing to a reader next to the picture they describe — so it is carried
+  // as an attribute for Markdown.tsx and the block is hidden. It is unhidden
+  // again only when the JSON turns out to be unreadable, which is the one time
+  // the raw text is the best thing left to show.
+  if (info === "acp-nodes") return `<div class="acp-nodes" hidden data-json="${md.utils.escapeHtml(tokens[idx].content)}">${block}</div>`;
+  return block;
 };
 md.renderer.rules.fence = withCopy(md.renderer.rules.fence!);
 md.renderer.rules.code_block = withCopy(md.renderer.rules.code_block!);
