@@ -103,14 +103,45 @@ function naturalSize(svg: SVGSVGElement | null): void {
   if (width) svg.style.width = width + "px";
 }
 
+// A drawn diagram and the source it was drawn from. The source is what
+// flowchartNodes has to re-read to name the nodes, and it is not recoverable
+// from the SVG — the fence it came from has been replaced by then.
+export interface DrawnDiagram { figure: HTMLElement; src: string }
+
+// The nodes a flowchart source declares, as the parser sees them: `id` is the
+// identifier written in the source, `domId` the id the renderer will give the
+// node's <g>. Null for anything that is not a flowchart — other diagram types
+// reach the same unified renderer, but only the flowchart forms are the ones
+// #290 scopes this to — and for a source that will not parse.
+//
+// Only meaningful after renderMermaid has run: mermaid.initialize is what
+// registers the diagram types getDiagramFromText matches against.
+export async function flowchartNodes(src: string): Promise<{ id: string; domId: string }[] | null> {
+  try {
+    const { default: mermaid } = await import("mermaid");
+    const diagram = await mermaid.mermaidAPI.getDiagramFromText(src);
+    const db = diagram.db as { getData?: () => { nodes?: { id?: unknown; domId?: unknown }[] } };
+    if (!diagram.type.startsWith("flowchart") || typeof db.getData !== "function") return null;
+    const nodes = db.getData().nodes;
+    if (!Array.isArray(nodes)) return null;
+    // A subgraph comes back in the same list without a domId, so the shape is
+    // the filter rather than the length.
+    return nodes.flatMap((n) =>
+      typeof n.id === "string" && typeof n.domId === "string" ? [{ id: n.id, domId: n.domId }] : []);
+  } catch {
+    return null;
+  }
+}
+
 // Replace every mermaid fence under `root` with its diagram. `alive` is checked
 // between diagrams: the container belongs to React, and a file switched while
 // this was awaiting must not have last file's diagrams written into it.
-export async function renderMermaid(root: HTMLElement, alive: () => boolean = () => true): Promise<void> {
+export async function renderMermaid(root: HTMLElement, alive: () => boolean = () => true): Promise<DrawnDiagram[]> {
+  const drawn: DrawnDiagram[] = [];
   const blocks = mermaidBlocks(root);
-  if (!blocks.length) return;
+  if (!blocks.length) return drawn;
   const { default: mermaid } = await import("mermaid");
-  if (!alive()) return;
+  if (!alive()) return drawn;
   mermaid.initialize({
     startOnLoad: false,
     // The source is a file being previewed, so it is not trusted to inject
@@ -122,23 +153,29 @@ export async function renderMermaid(root: HTMLElement, alive: () => boolean = ()
   for (const code of blocks) {
     const pre = code.parentElement;
     // Re-rendered under us, or already replaced: nothing to swap out.
-    if (!alive() || !pre || !pre.isConnected) return;
+    if (!alive() || !pre || !pre.isConnected) return drawn;
     const id = "mmd-" + ++seq;
+    // textContent, not innerHTML: the fence's <, > and & are escaped in the
+    // DOM and mermaid needs the source as it was written.
+    const src = code.textContent ?? "";
     try {
-      // textContent, not innerHTML: the fence's <, > and & are escaped in the
-      // DOM and mermaid needs the source as it was written.
-      const { svg } = await mermaid.render(id, code.textContent ?? "");
-      if (!alive() || !pre.isConnected) return;
+      // Only the markup: render also hands back bindFunctions, the bridge that
+      // wires a source's own `click` directives onto the drawn nodes. Calling it
+      // would run whatever the agent wrote; what navigates here is the metadata
+      // block instead (see Markdown.tsx).
+      const { svg } = await mermaid.render(id, src);
+      if (!alive() || !pre.isConnected) return drawn;
       const figure = document.createElement("div");
       figure.className = "md-mermaid";
       figure.innerHTML = svg;
       naturalSize(figure.querySelector("svg"));
       pre.replaceWith(figure);
+      drawn.push({ figure, src });
     } catch (e) {
       // The block stays. A diagram that won't parse is still the text somebody
       // wrote, and an empty box says less than the source does — so say what
       // mermaid objected to and leave the code where it is.
-      if (!pre.isConnected) return;
+      if (!pre.isConnected) return drawn;
       pre.classList.add("md-mermaid-failed");
       const note = document.createElement("div");
       note.className = "md-mermaid-error";
@@ -151,4 +188,5 @@ export async function renderMermaid(root: HTMLElement, alive: () => boolean = ()
       document.getElementById("d" + id)?.remove();
     }
   }
+  return drawn;
 }

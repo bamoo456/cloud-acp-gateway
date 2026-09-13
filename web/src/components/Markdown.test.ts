@@ -266,3 +266,148 @@ describe("Markdown structured results", () => {
     expect(copied).toEqual([TRACE + "\n"]);
   });
 });
+
+// A diagram's nodes are made navigable by the metadata block beside it, never
+// by what a node says. mermaid is faked: laying a diagram out needs getBBox and
+// jsdom has none, so the renderer's half of the contract — a <g> whose id is the
+// parser's domId behind this render's prefix — is what the fake reproduces.
+describe("Markdown diagram nodes", () => {
+  let root: Root | null = null;
+  let container: HTMLDivElement;
+  let resolveWorkspaceRef: ReturnType<typeof vi.fn>;
+  let initialize: ReturnType<typeof vi.fn>;
+  let draw: ReturnType<typeof vi.fn>;
+  let bindFunctions: ReturnType<typeof vi.fn>;
+
+  // The parser's own ids, and the same ids as the renderer writes them: the
+  // prefix is why the mapping matches on the suffix (see nodeElement).
+  const NODES = [{ id: "A", domId: "flowchart-A-0" }, { id: "B", domId: "flowchart-B-1" }];
+  const SVG = '<svg viewBox="0 0 100 100">'
+    + '<g class="node" id="mmd-7-flowchart-A-0"><rect></rect><text>Start</text></g>'
+    + '<g class="node" id="mmd-7-flowchart-B-1"><rect></rect><text>src/app.ts</text></g></svg>';
+  const source = (extra = "") =>
+    ["```mermaid", "flowchart TD", "  A[Start] --> B[src/app.ts]", extra, "```"].join("\n");
+  const reply = (meta: string, extra = "") =>
+    [source(extra), "", "Then some prose between the two.", "", "```acp-nodes", meta, "```"].join("\n");
+
+  beforeEach(() => {
+    vi.resetModules();
+    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "wsPath": "/acp", "token": "test-token", "defaultAgent": "claude",
+      "agents": [{ "name": "claude", "cwd": "/repo" }], "fsRoot": "/"
+    }</script>`;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    resolveWorkspaceRef = vi.fn(async (_cwd: string, p: string) =>
+      p === "src/app.ts" ? { abs: "/projA/src/app.ts", path: "src/app.ts" } : null);
+    vi.doMock("../lib/api.ts", () => ({ resolveWorkspaceRef }));
+    initialize = vi.fn();
+    bindFunctions = vi.fn();
+    draw = vi.fn(async () => ({ svg: SVG, bindFunctions }));
+    vi.doMock("mermaid", () => ({
+      default: {
+        initialize, render: draw,
+        mermaidAPI: { getDiagramFromText: async () => ({ type: "flowchart-v2", db: { getData: () => ({ nodes: NODES }) } }) },
+      },
+    }));
+  });
+
+  afterEach(() => {
+    act(() => { root?.unmount(); });
+    root = null;
+    container.remove();
+    vi.doUnmock("../lib/api.ts");
+    vi.doUnmock("mermaid");
+  });
+
+  async function render(text: string, final = true) {
+    const { Markdown } = await import("./Markdown.tsx");
+    await act(async () => {
+      root ??= createRoot(container);
+      root.render(React.createElement(Markdown, { text, cwd: "/projA", diagrams: true, final }));
+    });
+  }
+  const node = (domId: string) => container.querySelector<SVGElement>(`[id$="${domId}"]`)!;
+  async function watchPreview() {
+    const { useStore } = await import("../store/store.ts");
+    const openFilePreview = vi.fn();
+    await act(async () => { useStore.setState({ openFilePreview }); });
+    return openFilePreview;
+  }
+
+  test("a mapped node opens its file, and every other node stays a picture", async () => {
+    // B is labelled with a path and mapped by nobody; Z is mapped and drawn by
+    // nobody.
+    await render(reply(JSON.stringify({
+      A: { path: "src/app.ts", line: 12, endLine: 20, label: "the resolver" },
+      Z: { path: "src/app.ts", line: 3 },
+    })));
+    await vi.waitFor(() => expect(container.querySelector(".acp-node.resolved")).not.toBeNull());
+
+    const mapped = node("flowchart-A-0");
+    expect(mapped.dataset.path).toBe("src/app.ts");
+    expect(mapped.dataset.end).toBe("20");
+    expect(mapped.getAttribute("role")).toBe("link");
+    expect(mapped.getAttribute("tabindex")).toBe("0");
+    // A label that reads like a path is still only a label.
+    expect(node("flowchart-B-1").classList.contains("acp-node")).toBe(false);
+    // The mapping the diagram had no node for navigates from the list instead.
+    expect(container.querySelector(".acp-node-list .loc")!.textContent).toBe("References");
+    const listed = container.querySelectorAll<HTMLElement>(".acp-node-list .md-ref");
+    expect([...listed].map((r) => r.textContent)).toEqual(["the resolver · src/app.ts:12", "src/app.ts:3"]);
+    expect(listed[1].className).toBe("md-ref resolved");
+
+    const openFilePreview = await watchPreview();
+    // The click lands on a shape inside the node, which is what closest() is for.
+    await act(async () => { mapped.querySelector("rect")!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(openFilePreview).toHaveBeenCalledWith({
+      abs: "/projA/src/app.ts", path: "src/app.ts", mode: "file", cwd: "/projA", line: 12, endLine: 20,
+    });
+    await act(async () => { mapped.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    expect(openFilePreview).toHaveBeenCalledTimes(2);
+  });
+
+  test("a path the gateway won't place stays inert in the node and in the list", async () => {
+    // B is mapped to a path that does resolve: once its mark has landed, the one
+    // beside it has been answered too, so "still plain" means it was refused.
+    await render(reply(JSON.stringify({ A: { path: "../etc/passwd", line: 2 }, B: { path: "src/app.ts" } })));
+    await vi.waitFor(() => expect(container.querySelector(".acp-node-list .md-ref.resolved")).not.toBeNull());
+
+    const mapped = node("flowchart-A-0");
+    expect(mapped.classList.contains("resolved")).toBe(false);
+    expect(mapped.hasAttribute("tabindex")).toBe(false);
+    expect(container.querySelector(".acp-node-list .md-ref")!.className).toBe("md-ref");
+    expect(container.querySelectorAll(".acp-node.resolved")).toHaveLength(1);
+
+    const openFilePreview = await watchPreview();
+    await act(async () => { mapped.querySelector("rect")!.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(openFilePreview).not.toHaveBeenCalled();
+  });
+
+  test("metadata that can't be read leaves the diagram drawn and says so once", async () => {
+    await render(reply('{"A": {'));
+    await vi.waitFor(() => expect(container.querySelector(".acp-note")).not.toBeNull());
+
+    expect(container.querySelector(".md-mermaid")).not.toBeNull();
+    expect(container.querySelector(".acp-node")).toBeNull();
+    expect(container.querySelector(".acp-node-list")).toBeNull();
+    expect(container.querySelector(".acp-note")!.textContent).toBe("Structured result couldn't be read — showing the raw reply");
+    // The block it arrived in comes back, because now it is all there is.
+    expect(container.querySelector<HTMLElement>(".acp-nodes")!.hidden).toBe(false);
+  });
+
+  test("a source that scripts its own nodes draws under strict, and binds nothing", async () => {
+    await render(reply(JSON.stringify({ A: { path: "src/app.ts" } }),
+      '  click A href "javascript:alert(1)"\n  click A callback "steal"'));
+    await vi.waitFor(() => expect(container.querySelector(".acp-node.resolved")).not.toBeNull());
+
+    expect(initialize.mock.calls[0][0].securityLevel).toBe("strict");
+    // The source went to mermaid as written; what never happens is the bridge
+    // that would turn its click directives into handlers.
+    expect(draw.mock.calls[0][1]).toContain("click A callback");
+    expect(bindFunctions).not.toHaveBeenCalled();
+    expect(container.querySelector(".md-mermaid a")).toBeNull();
+    expect(container.querySelector(".md-mermaid [href]")).toBeNull();
+  });
+});
