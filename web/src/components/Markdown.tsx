@@ -19,8 +19,13 @@ import { Lightbox } from "./Lightbox.tsx";
 // `cwd` is the folder the paths in this text were written FROM — the session
 // that produced the answer, not whichever one is active now. Without it the
 // code references stay plain text.
-export function Markdown({ text, diagrams, images, cwd }: {
-  text: string; diagrams?: boolean; images?: ImageBase; cwd?: string;
+//
+// `final` says the turn has stopped writing. A structured result becomes a card
+// the moment its JSON parses, streamed or not; what `final` gates is the
+// admission that it never will — half a JSON object is a block still arriving,
+// not a broken one.
+export function Markdown({ text, diagrams, images, cwd, final }: {
+  text: string; diagrams?: boolean; images?: ImageBase; cwd?: string; final?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -38,7 +43,10 @@ export function Markdown({ text, diagrams, images, cwd }: {
   // in lib/codeRef.ts puts them back before that frame paints.
   const openFilePreview = useStore((s) => s.openFilePreview);
   useLayoutEffect(() => {
-    if (!cwd || !ref.current) return;
+    if (!ref.current) return;
+    // Cards first: the references they hold are resolved by the same loop.
+    for (const block of ref.current.querySelectorAll<HTMLElement>(".acp-block")) renderAcpBlock(block, final === true);
+    if (!cwd) return;
     let alive = true;
     for (const el of ref.current.querySelectorAll<HTMLElement>(".md-ref")) {
       const path = el.dataset.path ?? "";
@@ -47,7 +55,7 @@ export function Markdown({ text, diagrams, images, cwd }: {
       void resolveRef(cwd, path).then((r) => { if (alive && el.isConnected) markResolved(el, r); });
     }
     return () => { alive = false; };
-  }, [html, cwd]);
+  }, [html, cwd, final]);
   const openRef = (el: HTMLElement) => {
     // "file", never the default "diff": a path in prose is the file as it is
     // now, and a diff view would present that line as a historical location.
@@ -108,6 +116,94 @@ function markResolved(el: HTMLElement, hit: ResolvedRef | null) {
   el.title = hit.path;
   el.dataset.abs = hit.abs;
   el.dataset.display = hit.path;
+}
+
+// A trace or a review guide (markdown.ts marked the wrapper) drawn as the card
+// a tool call gets — the same frame, because it is the same kind of object: a
+// machine-produced result you fold away once you have read it. The raw <pre> is
+// hidden rather than removed: copyCode reads the <code> inside this wrapper.
+function renderAcpBlock(wrap: HTMLElement, final: boolean) {
+  if (wrap.querySelector(".acp-result, .acp-note")) return;
+  const pre = wrap.querySelector("pre");
+  if (!pre) return;
+  const card = acpCard(wrap.dataset.kind === "guide" ? "guide" : "trace", pre.textContent ?? "");
+  if (!card) {
+    if (final) wrap.append(el("div", "acp-note", "Structured result couldn't be read — showing the raw reply"));
+    return;
+  }
+  pre.hidden = true;
+  wrap.append(card);
+}
+
+const TRACE_SECTIONS: [string, string][] = [
+  ["definition", "Definition"], ["callers", "Callers"], ["callees", "Callees"], ["references", "References"],
+];
+
+function acpCard(kind: "trace" | "guide", raw: string): HTMLElement | null {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  if (!parsed || typeof parsed !== "object") return null;
+  const data = parsed as Record<string, unknown>;
+  const body = el("div", "tbody");
+  if (kind === "trace") {
+    for (const [key, heading] of TRACE_SECTIONS) {
+      const items = asArray(data[key]).map((it) => acpItem(it, "div")).filter(Boolean) as HTMLElement[];
+      if (!items.length) continue;
+      const section = el("div", "tc-item", undefined, el("div", "loc", heading), ...items);
+      body.append(section);
+    }
+    const notes = asString(data.notes);
+    if (notes) body.append(el("div", "tc-item", notes));
+  } else {
+    const steps = asArray(data.steps).map((s) => acpItem(s, "li")).filter(Boolean) as HTMLElement[];
+    if (!steps.length) return null;
+    body.append(el("div", "tc-item", undefined, el("ol", undefined, undefined, ...steps)));
+  }
+  if (!body.childElementCount) return null;
+  const card = el("details", "tool acp-result") as HTMLDetailsElement;
+  card.open = true;
+  card.append(
+    el("summary", undefined, undefined,
+      el("span", "tkind", kind),
+      el("span", "ttitle", asString(kind === "trace" ? data.symbol : data.title))),
+    body,
+  );
+  return card;
+}
+
+// One navigable item. No path is no reference: the agent was told to supply one
+// for everything it wants opened, so an item without it stays the explanatory
+// text it is, rather than becoming a link to a file nobody named.
+function acpItem(raw: unknown, tag: "div" | "li"): HTMLElement | null {
+  if (!raw || typeof raw !== "object") return null;
+  const it = raw as Record<string, unknown>;
+  const path = asString(it.path), label = asString(it.label), why = asString(it.why);
+  const line = asLine(it.line), end = asLine(it.endLine);
+  const row = el(tag, "acp-item");
+  if (path) {
+    const loc = path + (line ? ":" + line : "");
+    const span = el("span", "md-ref", label ? `${label} · ${loc}` : loc);
+    span.dataset.path = path;
+    if (line) span.dataset.line = String(line);
+    if (end) span.dataset.end = String(end);
+    row.append(span);
+  } else if (label) {
+    row.append(el("span", undefined, label));
+  }
+  if (why) row.append(el("span", "acp-why", row.childElementCount ? " — " + why : why));
+  return row.childElementCount ? row : null;
+}
+
+const asString = (v: unknown) => (typeof v === "string" ? v : "");
+const asArray = (v: unknown) => (Array.isArray(v) ? v : []);
+const asLine = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : 0);
+
+function el(tag: string, className?: string, text?: string, ...children: HTMLElement[]): HTMLElement {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text) node.textContent = text;
+  node.append(...children);
+  return node;
 }
 
 async function copyCode(btn: HTMLButtonElement) {

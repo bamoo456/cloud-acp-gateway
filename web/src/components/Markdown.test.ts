@@ -132,3 +132,137 @@ describe("Markdown code references", () => {
     expect(hits).toHaveLength(2);
   });
 });
+
+// A trace or a review guide arrives as a fenced JSON block (lib/reviewPrompt.ts
+// asks for exactly one), and is drawn as the card a tool call gets.
+describe("Markdown structured results", () => {
+  let root: Root | null = null;
+  let container: HTMLDivElement;
+  let resolveWorkspaceRef: ReturnType<typeof vi.fn>;
+  const copied: string[] = [];
+
+  const TRACE = JSON.stringify({
+    symbol: "resolveRef",
+    definition: [{ label: "resolveRef", path: "src/app.ts", line: 12, endLine: 20, why: "the cache entry point" }],
+    callers: [{ label: "Markdown", path: "missing.ts", line: 40 }],
+    callees: [{ label: "a built-in", why: "no file to open" }],
+    notes: "callers found by search, not by an index",
+  });
+  const GUIDE = JSON.stringify({
+    title: "Start with the resolver",
+    steps: [{ label: "the whole file", path: "src/app.ts", why: "read it top to bottom" }],
+  });
+  const fence = (kind: string, body: string) => "```" + kind + "\n" + body + "\n```";
+
+  beforeEach(() => {
+    vi.resetModules();
+    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    copied.length = 0;
+    Object.assign(navigator, { clipboard: { writeText: vi.fn(async (t: string) => { copied.push(t); }) } });
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "wsPath": "/acp", "token": "test-token", "defaultAgent": "claude",
+      "agents": [{ "name": "claude", "cwd": "/repo" }], "fsRoot": "/"
+    }</script>`;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    resolveWorkspaceRef = vi.fn(async (_cwd: string, p: string) =>
+      p === "src/app.ts" ? { abs: "/projA/src/app.ts", path: "src/app.ts" } : null);
+    vi.doMock("../lib/api.ts", () => ({ resolveWorkspaceRef }));
+  });
+
+  afterEach(() => {
+    act(() => { root?.unmount(); });
+    root = null;
+    container.remove();
+    vi.doUnmock("../lib/api.ts");
+  });
+
+  async function render(text: string, final: boolean) {
+    const { Markdown } = await import("./Markdown.tsx");
+    await act(async () => {
+      root ??= createRoot(container);
+      root.render(React.createElement(Markdown, { text, cwd: "/projA", final }));
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  }
+  async function watchPreview() {
+    const { useStore } = await import("../store/store.ts");
+    const openFilePreview = vi.fn();
+    await act(async () => { useStore.setState({ openFilePreview }); });
+    return openFilePreview;
+  }
+
+  test("a trace becomes a card whose located items open the file", async () => {
+    await render(fence("acp-trace", TRACE), true);
+
+    const card = container.querySelector<HTMLElement>(".acp-result")!;
+    expect(card.querySelector(".tkind")!.textContent).toBe("trace");
+    expect(card.querySelector(".ttitle")!.textContent).toBe("resolveRef");
+    // The raw JSON is kept, hidden, as the fallback and as what Copy reads.
+    expect(container.querySelector("pre")!.hidden).toBe(true);
+    expect(card.textContent).toContain("callers found by search");
+
+    const hit = card.querySelector<HTMLElement>('.md-ref[data-path="src/app.ts"]')!;
+    expect(hit.textContent).toBe("resolveRef · src/app.ts:12");
+    expect(hit.className).toBe("md-ref resolved");
+    expect(hit.dataset.end).toBe("20");
+    // Unresolved stays plain, and an item with no path is never a reference.
+    expect(card.querySelector<HTMLElement>('.md-ref[data-path="missing.ts"]')!.className).toBe("md-ref");
+    expect(card.querySelectorAll(".md-ref")).toHaveLength(2);
+    expect(card.textContent).toContain("a built-in");
+
+    const openFilePreview = await watchPreview();
+    await act(async () => { hit.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(openFilePreview).toHaveBeenCalledWith({
+      abs: "/projA/src/app.ts", path: "src/app.ts", mode: "file", cwd: "/projA", line: 12, endLine: 20,
+    });
+  });
+
+  test("a guide step about a whole file opens it without a line", async () => {
+    await render(fence("acp-guide", GUIDE), true);
+
+    const card = container.querySelector<HTMLElement>(".acp-result")!;
+    expect(card.querySelector(".tkind")!.textContent).toBe("guide");
+    expect(card.querySelector(".ttitle")!.textContent).toBe("Start with the resolver");
+    const step = card.querySelector<HTMLElement>("ol li .md-ref")!;
+    expect(step.textContent).toBe("the whole file · src/app.ts");
+
+    const openFilePreview = await watchPreview();
+    await act(async () => { step.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(openFilePreview).toHaveBeenCalledWith({
+      abs: "/projA/src/app.ts", path: "src/app.ts", mode: "file", cwd: "/projA", line: undefined, endLine: undefined,
+    });
+  });
+
+  test("JSON that never parses says so only once the turn has stopped", async () => {
+    await render(fence("acp-trace", '{"symbol":'), false);
+    expect(container.querySelector(".acp-result")).toBeNull();
+    expect(container.querySelector(".acp-note")).toBeNull();
+    expect(container.querySelector("pre")!.hidden).toBe(false);
+
+    // Same text, the turn now finished: the raw fence stays and gains the note.
+    await render(fence("acp-trace", '{"symbol":'), true);
+    expect(container.querySelectorAll(".acp-note")).toHaveLength(1);
+    expect(container.querySelector("pre")!.hidden).toBe(false);
+  });
+
+  test("a half-written block waits, and the finished one is asked about once", async () => {
+    await render("```acp-trace\n" + TRACE.slice(0, 40), false);
+    expect(container.querySelector(".acp-block")).not.toBeNull();
+    expect(container.querySelector(".acp-result")).toBeNull();
+    expect(container.querySelector(".acp-note")).toBeNull();
+    expect(resolveWorkspaceRef).not.toHaveBeenCalled();
+
+    await render(fence("acp-trace", TRACE), false);
+    // The reply keeps growing after the block closed, so the card is rebuilt
+    // from a fresh innerHTML — off the cache, without asking again.
+    await render(fence("acp-trace", TRACE) + "\n\nThat is the whole path.", false);
+    expect(container.querySelectorAll(".acp-result")).toHaveLength(1);
+    expect(resolveWorkspaceRef).toHaveBeenCalledTimes(2);
+
+    const btn = container.querySelector<HTMLButtonElement>(".acp-block .md-copy")!;
+    await act(async () => { btn.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(copied).toEqual([TRACE + "\n"]);
+  });
+});
