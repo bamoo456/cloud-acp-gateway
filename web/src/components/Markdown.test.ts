@@ -442,6 +442,17 @@ describe("Markdown diagram nodes", () => {
     expect(container.querySelector(".acp-node-list .md-ref")!.textContent).toBe("src/app.ts:7");
   });
 
+  // The contract asks for the picture first, and nothing makes an agent obey.
+  test("metadata written before its diagram is shown rather than swallowed", async () => {
+    await render(["```acp-nodes", JSON.stringify({ A: { path: "src/app.ts", line: 7 } }), "```", "", source()].join("\n"));
+    await vi.waitFor(() => expect(container.querySelector(".acp-note")).not.toBeNull());
+
+    expect(container.querySelector(".md-mermaid")).not.toBeNull();
+    expect(container.querySelector<HTMLElement>(".acp-nodes")!.hidden).toBe(false);
+    expect(container.querySelectorAll(".acp-note")).toHaveLength(1);
+    expect(container.querySelector(".acp-node-list")).toBeNull();
+  });
+
   // The metadata is the only thing that makes a node navigable, so a reply
   // re-rendered with different metadata must not leave a node pointing where the
   // last one said.

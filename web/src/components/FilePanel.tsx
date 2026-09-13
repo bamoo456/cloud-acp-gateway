@@ -1283,7 +1283,9 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
                   {file.truncated && <div className="wf-note">The file was cut short, so this preview may be incomplete.</div>}
                   {/* The document's own folder, so `![](docs/shot.png)` next to
                       it resolves to the file rather than to the console's origin. */}
-                  <Markdown text={file.text ?? ""} diagrams
+                  {/* `final`: a file is read whole, so a structure that does not
+                      parse here is broken rather than still arriving. */}
+                  <Markdown text={file.text ?? ""} diagrams final
                     images={{ cwd, dir: dirname(target.abs) }} />
                 </div>
         )}

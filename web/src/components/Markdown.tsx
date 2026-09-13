@@ -234,7 +234,8 @@ async function linkDiagrams(host: HTMLElement, drawn: DrawnDiagram[], cwd: strin
     // gets its reference list, minus the nodes — or one drawn by an earlier
     // pass, which has its list already.
     if (src === undefined && !figure.classList.contains("md-mermaid-failed")) continue;
-    if (!meta?.classList.contains("acp-nodes")) continue;
+    if (!meta?.classList.contains("acp-nodes") || meta.dataset.linked) continue;
+    meta.dataset.linked = "1";
     const refs = nodeRefs(meta.dataset.json ?? "");
     if (!refs) {
       // The picture still stands; what is lost is only the navigation. The block
@@ -268,6 +269,15 @@ async function linkDiagrams(host: HTMLElement, drawn: DrawnDiagram[], cwd: strin
       marks.push(...list.querySelectorAll<HTMLElement>(".md-ref"));
     }
     if (cwd) hydrateRefs(marks, cwd, alive);
+  }
+  // Metadata that never found a diagram — written before its picture, or beside
+  // a fence mermaid never drew. markdown.ts hides every acp-nodes block, so
+  // leaving it alone drops that part of the reply out of sight entirely.
+  if (!final) return;
+  for (const meta of host.querySelectorAll<HTMLElement>(".acp-nodes:not([data-linked])")) {
+    meta.dataset.linked = "1";
+    meta.hidden = false;
+    meta.after(el("div", "acp-note", UNREADABLE));
   }
 }
 
