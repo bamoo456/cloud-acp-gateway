@@ -7,7 +7,7 @@ import { activeMention, replaceMention, makeMessageFile } from "../lib/mentions.
 import { activeCommand, filterCommands, commandToken } from "../lib/commands.ts";
 import { MarkdownInput, type MarkdownInputHandle, type MarkdownInputCallbacks } from "./MarkdownInput.tsx";
 import { listFiles, uploadFile } from "../lib/api.ts";
-import { buildAskFixMessage, describeScope, type AskFixRequest } from "../lib/reviewPrompt.ts";
+import { describeScope, type AskFixRequest } from "../lib/reviewPrompt.ts";
 import { formatRange } from "../lib/lineRange.ts";
 import { basename } from "../lib/format.ts";
 import type { MessageImage, MessageFile, QueuedPrompt, AgentGlyph } from "../types.ts";
@@ -43,7 +43,7 @@ function queuedText(q: QueuedPrompt): string {
 // message itself says it — intent, place, diff side, scope.
 function askFixLabel(a: AskFixRequest): string {
   return [
-    a.intent === "ask" ? "Ask" : "Fix",
+    { ask: "Ask", fix: "Fix", trace: "Trace" }[a.intent],
     basename(a.path) + ":" + formatRange({ start: a.line, end: a.endLine ?? a.line }),
     a.side,
     describeScope(a.spec, a.label).replace(/`/g, ""),
@@ -419,26 +419,17 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     if (!t.trim() && !imgs.length && !refs.length) { if (activeBusy && !ask) stop(); return; }
     setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
     // An Ask/Fix goes to the conversation it was captured from, through
-    // sendPromptTo — whose `false` is the refusal sendPrompt swallows. The box
+    // dispatchAskFix — whose `false` is the refusal sendPrompt swallows. The box
     // was cleared above like any other send; it cannot instead wait for the
     // answer, because sendPromptTo resolves true only once the turn ENDS
     // (runPrompt), and the draft would sit in the box for the whole of it. A
     // refusal is synchronous, so it comes back the next tick, and the text and
     // the chip go back where they were.
     if (ask) {
-      const text = buildAskFixMessage(ask, t);
       s.setAskFix(null);
-      if (sendBusy) {
-        s.queuePrompt(ask.sessionId, { text, images: imgs, files: refs });
-        // The rail here shows THIS conversation's queue; one that went elsewhere
-        // has to say where, or the box empties and nothing else moves.
-        if (ask.sessionId !== targetId) s.setTip("Queued for " + askTarget(ask) + " — sends after its current work finishes.");
-        return;
-      }
-      void s.sendPromptTo(ask.sessionId, text, imgs, refs).then((sent) => {
-        if (sent) return;
+      void s.dispatchAskFix(ask, t, imgs, refs).then((r) => {
+        if (r) return;
         setText(t); setImages(imgs); attach(refs); s.setAskFix(ask);
-        s.setTip("Couldn't send to " + askTarget(ask) + " — that conversation isn't available right now.");
       });
       return;
     }

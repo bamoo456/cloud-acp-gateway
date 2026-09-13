@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Discussion, ReviewComment } from "../lib/api.ts";
+import type { AskFixRequest } from "../lib/reviewPrompt.ts";
 import type { DiffAnchor } from "./UnifiedDiff.tsx";
 import { IconTrash } from "../lib/icons.tsx";
 
@@ -32,7 +33,7 @@ export function SavedComment({ comment, inList, onDelete }: {
 
 export function CommentComposer({ anchor, path, onAdd, onCancel, onAskFix, onDiscuss }: {
   anchor: DiffAnchor; path: string; onAdd: (body: string) => void; onCancel: () => void;
-  onAskFix?: (intent: "ask" | "fix") => void;
+  onAskFix?: (intent: AskFixRequest["intent"]) => void;
   // Absent in the file view and on unchanged lines: a discussion is a record
   // against a line of the change being reviewed. Resolves false when the
   // gateway refused it, which leaves this composer — and the text in it — up.
@@ -62,9 +63,13 @@ export function CommentComposer({ anchor, path, onAdd, onCancel, onAskFix, onDis
         <span className="sp" />
         {/* Not a comment for later — a question or a fix for now, typed in the
             composer, which is where these two take you. */}
+        {/* Trace sits with them because it is the same gesture on the same line;
+            it just goes out on its own — there is nothing to add to "where does
+            this come from and who calls it". */}
         {onAskFix && <>
           <button className="btn-sm" onClick={() => onAskFix("ask")}>Ask</button>
           <button className="btn-sm" onClick={() => onAskFix("fix")}>Fix</button>
+          <button className="btn-sm" onClick={() => onAskFix("trace")}>Trace</button>
         </>}
         {/* The other half of "Add comment": one goes out with the review and is
             gone, this one stays on the gateway until somebody resolves it. */}

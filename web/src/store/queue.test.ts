@@ -133,6 +133,36 @@ describe("queued prompts", () => {
     expect(useStore.getState().queuedPrompts["s1"]).toHaveLength(1);
   });
 
+  // A Trace has no draft to preserve, so the queue is the whole safety net: it is
+  // where the request waits, and where the reviewer can still take it back.
+  test("a Trace queued behind a turn survives the stop, and the rail can drop it", async () => {
+    const { useStore, ws } = await bootstrap();
+
+    const first = useStore.getState().sendPrompt("first");
+    await flush();
+    const queued = await useStore.getState().dispatchAskFix({
+      intent: "trace", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null,
+      path: "src/app.ts", line: 12, code: "const a = 1;",
+    }, "");
+    expect(queued).toBe("queued");
+    expect(useStore.getState().queuedPrompts["s1"][0].text).toMatch(/^Trace request for selected code/);
+
+    // The composer's stop. Sending a request the reviewer just interrupted is
+    // exactly the surprise the queue must not spring.
+    ws.recv({ jsonrpc: "2.0", id: promptsOf(ws)[0].id, result: { stopReason: "cancelled" } });
+    await first;
+    await flush();
+    expect(promptsOf(ws)).toHaveLength(1);
+    expect(useStore.getState().queuedPrompts["s1"]).toHaveLength(1);
+
+    // The ✕ on the rail (Composer.tsx) — the one that was queued is the one
+    // that goes, and nothing is sent on the way out.
+    useStore.getState().unqueuePrompt("s1", useStore.getState().queuedPrompts["s1"][0].id);
+    await flush();
+    expect(useStore.getState().queuedPrompts["s1"]).toBeUndefined();
+    expect(promptsOf(ws)).toHaveLength(1);
+  });
+
   test("a refusal or a token ceiling still drains — those turns ended on their own", async () => {
     const { useStore, ws } = await bootstrap();
 

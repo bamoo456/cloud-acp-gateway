@@ -125,7 +125,7 @@ function AgentTurn({ agentName, agentKind, thoughts, replies, live, expanded, on
             {replies.map((r) => (
               <div className="body" data-id={r.id} key={r.id}>
                 {r.images && r.images.length > 0 && <MessageImages images={r.images} />}
-                {r.text && <Markdown text={r.text} cwd={cwd} />}
+                {r.text && <Markdown text={r.text} cwd={cwd} diagrams={!live} final={!live} />}
               </div>
             ))}
           </div>

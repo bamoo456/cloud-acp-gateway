@@ -428,6 +428,82 @@ describe("review workspace", () => {
     expect(document.activeElement).toBe(button("Companion"));
   });
 
+  test("Trace goes out on its own — no chip to type into, same target and queue", async () => {
+    const { makeSession } = await import("../store/reducers.ts");
+    const dispatchAskFix = vi.fn().mockResolvedValue("queued");
+    const useStore = await setup({
+      activeId: "s1", sessions: { s1: { ...makeSession("s1"), agentName: "claude" } },
+      companionCollapsed: true, dispatchAskFix,
+    });
+    await click(container.querySelector(FILE_ROW));
+    await click(rows().find((r) => r.className.includes("del")));
+    await click([...container.querySelectorAll(".rv-acts button")].find((b) => b.textContent === "Trace"));
+
+    expect(dispatchAskFix).toHaveBeenCalledWith({
+      intent: "trace", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null, label: undefined,
+      path: "src/workspace.ts", side: "old", line: 405, code: "old line",
+    }, "");
+    // Nothing to type means nothing lands on the composer.
+    expect(useStore.getState().askFix).toBeNull();
+    // The answer arrives in the companion, so the companion is uncovered.
+    expect(useStore.getState().companionCollapsed).toBe(false);
+  });
+
+  // The end of a Trace: the reference in the card is clicked, and what
+  // Markdown.tsx emits for it (see Markdown.test.ts) is this call. From here the
+  // canvas is the only thing that moves — no second viewer, and Back still works.
+  test("opening a traced line moves the canvas, joins Back/Forward and uncovers it", async () => {
+    const useStore = await setup();
+    await click(container.querySelector(FILE_ROW));
+    // A phone: the companion is over the canvas when the answer is read.
+    await act(async () => { useStore.getState().toggleReviewSheet("companion"); });
+
+    await act(async () => {
+      useStore.getState().openFilePreview({
+        abs: "/repo/src/workspace.ts", path: "src/workspace.ts", mode: "file", cwd: "/repo", line: 12, endLine: 20,
+      });
+    });
+    await act(async () => { await flush(); });
+
+    // The sheet is out of the way and the file is on the canvas, not beside it.
+    expect(useStore.getState().reviewSheet).toBe("none");
+    expect(useStore.getState().filePreview).toBeNull();
+    expect(useStore.getState().reviewPreview).toMatchObject({ path: "src/workspace.ts", mode: "file", line: 12 });
+    expect(container.querySelector("main.canvas .udiff")).toBeNull();
+
+    // And the diff it was read from is one Back away.
+    expect(nav("Back")?.disabled).toBe(false);
+    await click(nav("Back"));
+    expect(container.querySelector("main.canvas .udiff")).not.toBeNull();
+    expect(nav("Forward")?.disabled).toBe(false);
+  });
+
+  test("Review guide and Diagram ask about the whole change, and wait for a conversation", async () => {
+    const { makeSession } = await import("../store/reducers.ts");
+    const dispatchAskFix = vi.fn().mockResolvedValue("sent");
+    // No session yet: present, so the actions can be found, but nothing to send to.
+    await setup({ dispatchAskFix });
+    expect(button("Review guide")).toBeDisabled();
+    expect(button("Diagram")).toBeDisabled();
+
+    await act(async () => {
+      (await import("../store/store.ts")).useStore.setState({
+        activeId: "s1", sessions: { s1: makeSession("s1") }, companionCollapsed: true,
+      } as never);
+    });
+    await click(button("Review guide"));
+
+    const [req] = dispatchAskFix.mock.calls[0] as [{ kind: string; files: unknown[] }, string];
+    expect(req.kind).toBe("guide");
+    expect(req.files).toEqual(CHANGES.files);
+    expect(dispatchAskFix.mock.calls[0][1]).toBe("");
+    const { useStore } = await import("../store/store.ts");
+    expect(useStore.getState().companionCollapsed).toBe(false);
+
+    await click(button("Diagram"));
+    expect((dispatchAskFix.mock.calls[1][0] as { kind: string }).kind).toBe("request-flow");
+  });
+
   test("Ask/Fix are not offered on a saved conversation that has not been resumed", async () => {
     // sendPromptTo refuses a view-only session, so the buttons would only bounce.
     const { makeSession } = await import("../store/reducers.ts");
