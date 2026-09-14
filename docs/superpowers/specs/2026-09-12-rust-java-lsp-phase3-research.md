@@ -7,13 +7,14 @@
 
 One Rust engine can answer go-to-definition for Java today with IDE-grade latency and no JVM: **[Brokk Bifrost](https://github.com/BrokkAi/bifrost)** (0.11.3, Apache-2.0, prebuilt binaries for six platforms, published as `@brokkai/bifrost` on npm).
 
-This revision replaces the desk research the first draft carried. Bifrost was driven as a real language server against a private multi-module Maven monorepo — 8,936 tracked files, 4.1 GB of working tree, Spring and Jackson throughout. The numbers are in [§4](#4-measured-bifrost-on-a-real-multi-module-repo). Three of them decide the design:
+This revision replaces the desk research the first draft carried. Bifrost was driven as a real language server against two private repositories: a multi-module Maven monorepo of 8,936 tracked files, and one 6,429-file module of a second monorepo roughly fifteen times that size. The numbers are in [§4](#4-measured-bifrost-on-two-real-repositories). Three of them decide the design:
 
 | Measurement | Result | Consequence |
 |---|---|---|
 | Definition, cross-module, warm | **6–9 ms** | Fast enough to sit behind Cmd/Ctrl-click |
 | References, 953 hits | **14.2 s** | Cannot sit behind a click; stays an agent Trace request |
 | Resident set, `--lsp` on 9k files | **1.06 GB** | Rust buys no memory advantage over JDTLS at this size |
+| Cold index, paid inside the first query | **2.6 s – 16.8 s** | Warm the provider when a review opens, not on the first click |
 
 So the recommendation is narrower, and more concrete, than "run a shadow pilot behind a provider-neutral broker":
 
@@ -21,7 +22,8 @@ So the recommendation is narrower, and more concrete, than "run a shadow pilot b
 2. **One provider, no broker.** A `CodeIntelProvider` abstraction with a single implementation is an interface with one implementor. Add the seam when a second engine earns it.
 3. **No JDTLS fallback in the first cut.** Fall back to what already exists — the Trace request at `web/src/lib/reviewPrompt.ts:113-116`. Reconsider JDTLS only if the correctness check in [§7](#7-integration-plan) finds a real gap.
 4. **Treat a miss as a timeout, not an answer.** A definition Bifrost cannot resolve took 15.4 s to return zero results. A hard budget of ~2 s, then fall through, is the whole confidence gate.
-5. **Pin the analyzer offline.** Bifrost's default path reaches GitHub for semantic packs and stalled for minutes when it could not complete. `BIFROST_SEMANTIC_PACK_DOWNLOAD=off` is a trust-boundary requirement for a gateway serving company code, not a tuning option.
+5. **Start the provider when the review opens, not on the first click.** `initialize` returns in under two seconds against an unindexed repository, but the index is then built inside the first query — 16.8 s on a 6,429-file module. Warming it while the reviewer reads the diff hides that entirely.
+6. **Pin the analyzer offline.** Bifrost's default path reaches GitHub for semantic packs and stalled for minutes when it could not complete. `BIFROST_SEMANTIC_PACK_DOWNLOAD=off` is a trust-boundary requirement for a gateway serving company code, not a tuning option.
 
 The division of responsibility stays as #283 drew it, with one line moved:
 
@@ -104,19 +106,37 @@ Only definition clears the bar for a click gesture. This is exactly the boundary
 
 ---
 
-## 4. Measured: Bifrost on a real multi-module repo
+## 4. Measured: Bifrost on two real repositories
 
-Corpus: a private multi-module Maven monorepo, 8,936 tracked files, 4.1 GB of working tree, Spring and Jackson throughout. Host: Apple Silicon, macOS 25.6. Bifrost 0.11.3 via `npx @brokkai/bifrost`, `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`.
+Host for both: Apple Silicon, macOS 25.6, Bifrost 0.11.3 via `npx @brokkai/bifrost`.
+
+| | Corpus A | Corpus B |
+|---|---|---|
+| Shape | Private multi-module Maven monorepo | One module of a second, much larger private monorepo |
+| Size | 8,936 tracked files, 4.1 GB working tree | 6,429 source Java files |
+| Content | Spring and Jackson throughout | Domain model classes across many packages |
+
+Corpus B is the interesting one for sizing, because its parent monorepo holds roughly 95,000 Java
+files. Measuring one module gives a per-file rate without indexing all of it — see
+[Not yet measured](#not-yet-measured) for why the whole thing was not attempted.
 
 ### Startup and indexing
 
-| Phase | Time | Notes |
-|---|---|---|
-| Cold one-shot `scan_usages_by_location` | 109.9 s | Builds the on-disk cache from nothing |
-| Warm one-shot, same query | 37.3 s | One-shot mode rebuilds in-memory state every run — unusable interactively |
-| `--lsp` `initialize` with a warm cache | 1.3 s | Capabilities advertised: `definitionProvider`, `referencesProvider`, `implementationProvider`, `callHierarchyProvider`, `typeHierarchyProvider`, `workspaceSymbolProvider` |
+| Phase | Corpus A | Corpus B | Notes |
+|---|---|---|---|
+| Cold one-shot `scan_usages_by_location` | 109.9 s | — | Network left on; part of this is the semantic-pack fetch |
+| Warm one-shot, same query | 37.3 s | — | One-shot mode rebuilds in-memory state every run — unusable interactively |
+| `--lsp` `initialize` | 1.3 s (warm cache) | 1.7 s (no cache) | `initialize` returns before indexing; capabilities advertised: `definitionProvider`, `referencesProvider`, `implementationProvider`, `callHierarchyProvider`, `typeHierarchyProvider`, `workspaceSymbolProvider` |
+| First `definition` — the cold index, paid in-request | 2.6 s | 16.8 s | Correct cross-package hit in both cases |
 
-The one-shot and long-lived modes are not interchangeable. Every interactive number below comes from `--lsp`.
+The one-shot and long-lived modes are not interchangeable. Every interactive number below comes from
+`--lsp`.
+
+**`initialize` is not readiness.** It returns in under two seconds against an unindexed repository,
+and the index is then built inside the first query — 16.8 s on Corpus B. A provider started when the
+reviewer first clicks will make that reviewer wait; started when the review workspace opens, the
+index builds while they read the diff. This is the one measurement that changed the lifecycle design
+in [§6](#6-architecture).
 
 ### Query latency, long-lived server
 
@@ -134,13 +154,22 @@ The first request pays for lazy per-file work; subsequent ones are single-digit 
 
 ### Resources
 
-| Metric | Value |
-|---|---|
-| Resident set, `--lsp`, after the queries above | 1.06 GB |
-| CPU during indexing | 144% |
-| On-disk cache | 336 MB SQLite + 79 MB WAL + 31 MB semantic-pack catalog, written to `.bifrost/cache` inside the repository |
+| Metric | Corpus A (8,936 files) | Corpus B (6,429 Java files) |
+|---|---|---|
+| Peak resident set, `--lsp` | 1.06 GB | 535 MB |
+| CPU during indexing | 144% | — |
+| On-disk cache | 517 MB total — 336 MB SQLite, 79 MB WAL, 31 MB pack catalog | 231 MB |
+| Cache location | `.bifrost/cache` inside the repository | Relocated out of the checkout |
 
-Bifrost writes its own `.gitignore` into that directory, and the docs state the cache is shared with linked worktrees — which suits one review per worktree. It relocates through `BIFROST_CACHE_ROOT` / `BIFROST_CACHE_DIR`, and the pack catalog separately through `BIFROST_SEMANTIC_PACK_CACHE_ROOT`.
+**Cache relocation works, and it was verified rather than assumed.** With `BIFROST_CACHE_ROOT` and
+`BIFROST_CACHE_DIR` both pointed at a scratch directory, the Corpus B run created no `.bifrost`
+directory in the checkout at all. Left at its default the cache lands in `.bifrost/cache` inside the
+repository, where Bifrost writes its own `.gitignore`; the docs add that it is shared with linked
+worktrees, which suits one review per worktree. The pack catalog relocates separately through
+`BIFROST_SEMANTIC_PACK_CACHE_ROOT`.
+
+Corpus B gives the rate that matters for sizing: **roughly 36 KB of cache and 85 KB of resident set
+per Java file**, with the caveat that both are single measurements on one module.
 
 ### Network behaviour
 
@@ -152,7 +181,16 @@ Three probes — two correct cross-module definitions and one external-JAR miss 
 
 ### Not yet measured
 
-A second private monorepo of roughly 95,000 Java files was not touched. A cold index there is minutes at best, and it decides whether a provider starts eagerly or lazily. That measurement is step one of the plan.
+Corpus B's parent monorepo — roughly 95,000 Java files, 150,255 tracked files, 18 GB — has not been
+indexed whole, and the blocker is disk rather than time. The measuring host had 3.5 GB free on a
+single volume. Extrapolating Corpus B's 36 KB per Java file puts a full index near **3.4 GB of cache**,
+which would have taken the machine to zero free space, so the run was not attempted.
+
+What this leaves open: whether indexing stays linear at 15x the size, what the resident set reaches
+(the per-file rate extrapolates to several gigabytes, which would need a per-host process cap), and
+whether one process per monorepo is viable at all or the scope has to be the changed modules only.
+Repeating this needs about 10 GB of headroom. A first scoped attempt across four modules of that
+monorepo, about 26,600 Java files, was stopped before it produced numbers.
 
 ---
 
@@ -181,7 +219,7 @@ GET /workspace/definition?cwd&path&line&column      2 s budget
         +-- miss or timeout --> existing agent Trace request
 ```
 
-Bifrost is one process per repository, keyed by git common dir — the same identity Phase 2 already stores for reviews. It is spawned on first request, not on session start, and evicted when idle. The supervisor pattern at `src/gateway.ts:2813` (spawn, backoff respawn, process-group kill) is reused as-is.
+Bifrost is one process per repository, keyed by git common dir — the same identity Phase 2 already stores for reviews. It is spawned when a review workspace opens rather than on the first click, because the cold index is paid inside the first query — up to 16.8 s — and that is time the reviewer can spend reading the diff instead of waiting. It is evicted when idle. The supervisor pattern at `src/gateway.ts:2813` (spawn, backoff respawn, process-group kill) is reused as-is.
 
 Results normalise into the `CodeRef` shape that already exists at `web/src/lib/codeRef.ts:6-13`. No new primitive, no new renderer: a definition result opens through the same path a Trace card's reference does.
 
@@ -195,8 +233,8 @@ Deliberately skipped:
 
 ## 7. Integration plan
 
-1. **Measure the large corpus cold.** `--lsp` index time and resident set on ~95k Java files. Decides lazy versus eager start, and whether a per-host process cap is needed.
-2. **Provider lifecycle.** One Bifrost process per git common dir, spawned on first request, idle-evicted. Reuse `src/gateway.ts:2813`. Environment fixed by the gateway: `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`, and `BIFROST_CACHE_ROOT` pointed at the gateway's own data directory so nothing is written into the user's checkout.
+1. **Measure the large corpus cold**, once about 10 GB of disk is free. `--lsp` index time, cache size and resident set on ~95k Java files. Decides whether one process per monorepo is viable, or the indexed scope has to be narrowed to the modules a review touches, and whether a per-host process cap is needed.
+2. **Provider lifecycle.** One Bifrost process per git common dir, spawned when a review opens, idle-evicted. Reuse `src/gateway.ts:2813`. Environment fixed by the gateway: `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`, and `BIFROST_CACHE_ROOT` pointed at the gateway's own data directory so nothing is written into the user's checkout.
 3. **`GET /workspace/definition?cwd&path&line&column`.** A sibling of `/workspace/resolve` at `src/gateway.ts:5312`. The request path and every returned URI clamp through `allowedPreviewPath`, so a result outside the root is refused rather than opened. Hard 2 s timeout. Responds with `CodeRef[]`.
 4. **Cmd/Ctrl-click in the file view.** The column comes from the same selection offsets `rangeFromOffsets` already uses at `web/src/lib/lineRange.ts:25`; `AskFixRequest` gains an optional `column`. A miss or a timeout falls through to the Trace action that the same selection already offers at `web/src/components/FilePanel.tsx:672`.
 5. **Feature flag `ACPG_LSP_JAVA=off|bifrost`.** `@brokkai/bifrost` pinned in `package.json`; its platform binaries are optional dependencies and it declares `engines.node >= 18`, so the Node 20 twin is unaffected.
