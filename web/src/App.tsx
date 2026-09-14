@@ -4,6 +4,7 @@ import { getRunning, getInboxPending, getUsageLimits } from "./lib/api.ts";
 import { TopBar } from "./components/TopBar.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { FilePanel } from "./components/FilePanel.tsx";
+import { useReviewSession, ReviewLeft, ReviewCanvas } from "./components/ReviewWorkspace.tsx";
 import { Thread } from "./components/Thread.tsx";
 import { Composer } from "./components/Composer.tsx";
 import { BranchWindow } from "./components/BranchWindow.tsx";
@@ -27,7 +28,7 @@ import { LoginTerminal } from "./components/LoginTerminal.tsx";
 // gracefully; no test fails).
 import { Terminal } from "./components/Terminal.tsx";
 import { UsageStrip } from "./components/UsageStrip.tsx";
-import { IconTerminal } from "./lib/icons.tsx";
+import { IconChevrons, IconTerminal } from "./lib/icons.tsx";
 import { applyUnread } from "./lib/favicon.ts";
 import { isDesktopSidebarWidth } from "./lib/sidebarWidth.ts";
 import type { AgentRef } from "./types.ts";
@@ -42,10 +43,19 @@ export function App() {
   const cwd = useStore((s) => s.cwd);
   const terminalEnabled = useStore((s) => s.cfg.terminalEnabled);
   const conn = useStore((s) => s.conn);
+  const review = useStore((s) => s.workspace === "review");
+  const reviewSheet = useStore((s) => s.reviewSheet);
+  const companionCollapsed = useStore((s) => s.companionCollapsed);
+  const toggleCompanion = useStore((s) => s.toggleCompanion);
   // Machine-layer facts, in one row along the bottom edge (§1.4): the
   // transport, the folder's diffstat, the context window, the account's quota
   // and the terminal. Not the agent — the crumb and the dock already name it.
   const changeStat = useStore((s) => s.changeStat);
+  // The review's own state — scope, the changed files, the unsent draft. Here
+  // rather than in either column because they are siblings, not one inside the
+  // other, and because leaving for the conversation must not throw a review
+  // away: App is the one component that outlives the switch.
+  const rv = useReviewSession(sess?.cwd || cwd, review);
   const [panel, setPanel] = useState(false);
   const [picker, setPicker] = useState(false);
   const [loginAgent, setLoginAgent] = useState<AgentRef | null>(null);
@@ -206,14 +216,39 @@ export function App() {
       window.removeEventListener("pageshow", resume);
     };
   }, [ensureConnected]);
+  const topBar = (
+    <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)}
+      findOpen={findOpen} onFind={() => setFindOpen((v) => !v)} />
+  );
   return (
     <>
+      {/* In Agent the bar belongs to the chat column, which is what lets the
+          sessions column run the full height beside it. In Review that same
+          column is the companion, off on the right, so the bar has to sit above
+          the row instead of travelling into it. */}
+      {review && topBar}
+      {/* Keyed so React keeps the SAME `.content` element across a workspace
+          switch: the composer's draft, the thread's scroll and the queue rail
+          are component state, and a remount would drop all three. */}
       <div className="app-row">
-        <Sidebar open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)}
+        <Sidebar key="sidebar" open={panel} onClose={() => setPanel(false)} onOpenPicker={() => setPicker(true)}
           focusSearch={searchFocus} />
-        <div className="content">
-          <TopBar onPanel={() => setPanel((p) => !p)} onPicker={() => setPicker(true)}
-            findOpen={findOpen} onFind={() => setFindOpen((v) => !v)} />
+        {review && <ReviewLeft key="rv-left" rv={rv} />}
+        {review && <ReviewCanvas key="canvas" rv={rv} />}
+        <div key="content" className={"content" + (review ? " comp" : "")
+          + (review && companionCollapsed ? " collapsed" : "")
+          + (review && reviewSheet === "companion" ? " open" : "")}>
+          {!review && topBar}
+          {/* The column's own header, and the only thing in Review that is not
+              already part of the conversation: folding it away is what gives
+              the canvas the width (the canvas header holds the way back). */}
+          {review && (
+            <div className="rv-bar comp-h">
+              <span className="rv-title">Review companion</span>
+              <button className="icon-btn" title="Hide companion" aria-label="Hide companion"
+                onClick={toggleCompanion}><IconChevrons /></button>
+            </div>
+          )}
           <main id="main">
             <Thread session={sess} agentReady={agentReady} loading={joining}
               findOpen={findOpen} focusFind={findFocus} onCloseFind={() => setFindOpen(false)} />
@@ -230,7 +265,7 @@ export function App() {
         {/* Right of the chat column on desktop, an overlay on mobile. Always
             mounted: it holds the fetched change list across open/close so
             reopening it is instant rather than a fresh `git status`. */}
-        <FilePanel />
+        {!review && <FilePanel key="files" />}
       </div>
       {picker && <FolderPicker onClose={() => setPicker(false)} />}
       {loginAgent && <LoginTerminal agent={loginAgent} onClose={() => setLoginAgent(null)} />}
