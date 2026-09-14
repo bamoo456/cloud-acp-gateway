@@ -1,704 +1,238 @@
-# Rust-Based Java Language Server Research for cloud-acp-gateway Phase 3
+# Rust-Based Java Code Intelligence for cloud-acp-gateway
 
-**Research date:** 2026-09-12  
+**Research date:** 2026-09-12 · **Measured and revised:** 2026-09-14
 **Related proposal:** [Issue #283 — Review-first workspace with code trace and an agent review companion](https://github.com/bamoo456/cloud-acp-gateway/issues/283)
 
 ## Executive summary
 
-As of 2026-09-12, there is no Rust-based Java language server that is mature enough to replace Eclipse JDT LS as the authoritative Java semantic engine for `cloud-acp-gateway`.
+One Rust engine can answer go-to-definition for Java today with IDE-grade latency and no JVM: **[Brokk Bifrost](https://github.com/BrokkAi/bifrost)** (0.11.3, Apache-2.0, prebuilt binaries for six platforms, published as `@brokkai/bifrost` on npm).
 
-That does **not** mean Rust-based Java code intelligence is a dead end for the project. The requirements in #283 are narrower than “build a browser IDE” or “replace IntelliJ.” The review workflow primarily needs fast deterministic navigation — definition, implementation, references, workspace symbols, and eventually call/type hierarchy — while the ACP agent remains responsible for explanation, review guidance, request-flow tracing, and diagrams.
+This revision replaces the desk research the first draft carried. Bifrost was driven as a real language server against a private multi-module Maven monorepo — 8,936 tracked files, 4.1 GB of working tree, Spring and Jackson throughout. The numbers are in [§4](#4-measured-bifrost-on-a-real-multi-module-repo). Three of them decide the design:
 
-For this use case, the strongest target architecture is a **hybrid**:
+| Measurement | Result | Consequence |
+|---|---|---|
+| Definition, cross-module, warm | **6–9 ms** | Fast enough to sit behind Cmd/Ctrl-click |
+| References, 953 hits | **14.2 s** | Cannot sit behind a click; stays an agent Trace request |
+| Resident set, `--lsp` on 9k files | **1.06 GB** | Rust buys no memory advantage over JDTLS at this size |
+
+So the recommendation is narrower, and more concrete, than "run a shadow pilot behind a provider-neutral broker":
+
+1. **Ship go-to-definition only.** It is the one operation whose measured latency justifies a deterministic backend. References, callers and callees stay with the agent Trace that already ships.
+2. **One provider, no broker.** A `CodeIntelProvider` abstraction with a single implementation is an interface with one implementor. Add the seam when a second engine earns it.
+3. **No JDTLS fallback in the first cut.** Fall back to what already exists — the Trace request at `web/src/lib/reviewPrompt.ts:113-116`. Reconsider JDTLS only if the correctness check in [§7](#7-integration-plan) finds a real gap.
+4. **Treat a miss as a timeout, not an answer.** A definition Bifrost cannot resolve took 15.4 s to return zero results. A hard budget of ~2 s, then fall through, is the whole confidence gate.
+5. **Pin the analyzer offline.** Bifrost's default path reaches GitHub for semantic packs and stalled for minutes when it could not complete. `BIFROST_SEMANTIC_PACK_DOWNLOAD=off` is a trust-boundary requirement for a gateway serving company code, not a tuning option.
+
+The division of responsibility stays as #283 drew it, with one line moved:
 
 ```text
-Rust fast path
-    -> low-latency definition / implementation / references / symbols
-
-JDTLS fallback
-    -> authoritative Java semantics for ambiguous or complex cases
-
-ACP Agent
-    -> explanation, review guidance, request-flow tracing, diagrams
+Bifrost    -> go to definition, deterministic, ~10 ms warm
+ACP agent  -> references, callers, callees, explanation, review guides, diagrams
 ```
-
-Recommended decision:
-
-1. **Do not make a Java LSP a Phase 3 prerequisite.** Phase 3 should continue to ship explicit Agent Trace, structured `CodeRef`s, review guides, and navigable diagrams.
-2. **Run a non-blocking Rust shadow pilot.** The purpose is to measure whether a native Java code-intelligence process can materially improve startup, latency, and per-worktree resource density.
-3. **Keep JDTLS as the semantic oracle/fallback.** A Rust engine should not be treated as compiler-grade semantic authority until the data proves otherwise.
-4. **Treat Project Nova as an architecture/fork reference, not a production dependency today.** Its design is the most ambitious, but maturity and maintenance risk are still high.
-5. **Watch lightweight Rust projects such as Pegon and Caffeine-LS, but do not put them on the critical path.** Their current feature completeness is not sufficient for reliable production navigation.
-
-The important architectural principle is:
-
-> **Rust engine = low-cost navigation accelerator.**  
-> **JDTLS = semantic correctness fallback.**  
-> **ACP Agent = review/comprehension layer.**
 
 ---
 
-## 1. Why this matters to Issue #283
+## 1. What changed from the first draft
 
-Issue #283 is intentionally not proposing another full IDE. Its goal is to collapse the current review loop:
+The first draft of this note was written from repository descriptions and architecture documents. Verifying each claim against the actual repositories, and then running the leading candidate, moved several conclusions:
 
-```text
-IntelliJ
-   <->
-Claude/Codex terminal
-   <->
-review guide / diagram
-   <->
-IntelliJ
-```
-
-into a browser-native review workflow centered on:
-
-```text
-Changed Files | Code Canvas | Review Companion
-```
-
-That product boundary changes how Java language-server options should be evaluated. A traditional IDE evaluation gives high weight to completion, quick fixes, refactoring, formatting, diagnostics, debugger integration, and annotation-processor behavior. Those capabilities matter for an editor, but they are not all on the critical path for a review-first workspace.
-
-For `cloud-acp-gateway`, the initial deterministic code-intelligence needs are narrower:
-
-| Priority | Capability | Why it matters |
-|---|---|---|
-| P0 | Go to definition | Clickable symbol navigation |
-| P0 | Find references | Understand impact and usage |
-| P0 | Go to implementation | Interface -> concrete implementation |
-| P0 | Workspace symbols | Fast symbol lookup for reviewer/agent |
-| P1 | Call hierarchy | Deterministic callers/callees for Trace |
-| P1 | Type hierarchy | Service/interface navigation |
-| P2 | Hover / type information | Review comprehension |
-| P3 | Completion | Review Workspace is not editing-first |
-| P3 | Rename/refactor | Heavy IDE work remains an escape hatch |
-| P3 | DAP/debugging | Not required for normal review |
-
-This is why a Rust implementation may still be useful even if it cannot replace JDTLS.
-
-### Agent Trace vs deterministic navigation
-
-The distinction in #283 should remain explicit:
-
-```text
-Agent Trace
-= comprehension / explanation / review guidance
-
-LSP / code intelligence
-= deterministic, low-latency semantic navigation
-```
-
-For example, “Explain how this request reaches Redis” is naturally an agent task. By contrast, `Cmd/Ctrl-click foo()` implies exact and low-latency navigation and is a better fit for a language server or code-intelligence engine.
-
-Phase 3 can therefore ship without an LSP dependency. Rust-LSP work should run in parallel and provide evidence for a later deterministic-navigation phase.
+| First draft said | Verified state |
+|---|---|
+| Project Nova is the "leading architecture reference", a PoC candidate | **Has no LICENSE file at all** (`/LICENSE` returns 404), last push 2026-02-12, zero releases, zero tags. Not adoptable on licensing grounds alone |
+| Nova "has LSP and DAP binaries", Maven/Gradle integration | The binaries are aspirational — the cargo-dist section describes a build that has never been released. `nova-ide` and `nova-resolve` are rated **prototype** in its own architecture map |
+| Bifrost is a comparison shape, "not a drop-in replacement" | It is the only candidate with all five navigation capabilities answering, prebuilt binaries everywhere, an npm package, and Apache-2.0. It is the recommendation |
+| Caffeine-LS is "early" | Understated — commits land daily, with a classfile stub index and real Maven/Gradle sync. Overstated elsewhere: it is **GPL-3.0** and ships only a `.vsix`, no standalone binary |
+| Pegon "lacks semantic navigation" | Correct in effect, but it does ship file-local `textDocument/definition` and workspace symbols; its own README FAQ is stale |
+| Rust buys "per-worktree resource density" | Not at this scale. 1.06 GB resident on a 9k-file repo is JDTLS-class |
+| The pilot should build a broker, telemetry schema and an 11-corpus benchmark first | Those precede any usage signal. The `CodeRef` primitive it proposed already ships at `web/src/lib/codeRef.ts:6-13`, and the Trace contract already returns definition/callers/callees/references |
 
 ---
 
 ## 2. Candidate inventory
 
-The Rust-native Java language-intelligence projects currently worth evaluating include:
+Two sweeps were run. The first evaluated the four projects named in the original note plus JDTLS. The second was an exhaustive search for anything missed: GitHub repository search across 15 Rust-filtered queries in both sort orders, three topics, crates.io across seven queries, and web search for vendor work published in 2025–2026.
 
-1. [`wilson-anysphere/indonesia`](https://github.com/wilson-anysphere/indonesia) — Project Nova
-2. [`rmuir/pegon`](https://github.com/rmuir/pegon)
-3. [`cubewhy/caffeine-ls`](https://github.com/cubewhy/caffeine-ls)
-4. Other lightweight/tree-sitter-based Java LSPs that may emerge, provided they can pass the same benchmark and correctness gates
+### Rust projects with real cross-file Java semantics
 
-For comparison, the production semantic baseline remains:
+| Project | ★ | License | Last commit | def / refs / impl / callHier / wsSym | Classpath and JARs | Distribution |
+|---|---:|---|---|---|---|---|
+| **[BrokkAi/bifrost](https://github.com/BrokkAi/bifrost)** | 11 | Apache-2.0 | 2026-09-13 | ✅ ✅ ✅ ✅ ✅ | Workspace source; JAR facts through opt-in semantic packs, never by invoking a build tool | 6 platforms, `npm i @brokkai/bifrost` |
+| [Hessesian/kmp-lsp](https://github.com/Hessesian/kmp-lsp) | 188 | MIT | 2026-09-11 | ✅ ⚠️ ✅ ❌ ✅ | JAR indexer sidecar with source extraction | 6 platforms, crates.io, one-shot CLI |
+| [emilycares/java_lsp](https://github.com/emilycares/java_lsp) | 14 | GPL-3.0 | 2026-09-13 | ✅ ✅ ❌ ❌ ❌ | Deepest model: `~/.m2`, Gradle, JDK jimage, classfile parser in one class map | None — source build only |
 
-5. [`eclipse-jdtls/eclipse.jdt.ls`](https://github.com/eclipse-jdtls/eclipse.jdt.ls)
+kmp-lsp's `references` is `rg --word-regexp` textual matching, not resolution, which is what the ⚠️ marks. It is the only credible fallback if Bifrost's single-vendor risk becomes a problem: MIT, prebuilt, and its one-shot CLI (`find`, `refs`, `hover`, `index`) lets a Node host skip the LSP handshake entirely. java_lsp has the best classpath model of the three and a genuine reference index, but is missing three of the five operations, ships no binary, and its GPL-3.0 licence needs a decision even across a subprocess boundary.
 
-A second useful reference point is Brokk Bifrost, a Rust/tree-sitter-backed code-analysis engine with LSP/MCP-oriented use cases. It is not a drop-in JDTLS replacement, but its shape is relevant to AI-oriented code intelligence.
+### Evaluated and rejected
 
-### High-level summary
-
-| Project | Implementation | Positioning | Phase 3 decision |
-|---|---|---|---|
-| **Project Nova** | Rust, custom Java analysis stack | Ambitious Java rust-analyzer-style architecture | **PoC / Watch** |
-| **Pegon** | Rust | Lightweight Java diagnostics/LSP | **Watch** |
-| **Caffeine-LS** | Rust | Early Java parser/type-checking LSP | **Watch** |
-| **Brokk Bifrost** | Rust + Tree-sitter | AI/code-analysis oriented engine | **Evaluate as code-intel component** |
-| **Eclipse JDT LS** | Java/JVM | Mature compiler-backed Java language server | **Keep as oracle/fallback** |
-
-No Rust candidate currently earns an unconditional “Adopt as authoritative Java semantic engine” recommendation.
-
----
-
-## 3. Project Nova
-
-Repository: <https://github.com/wilson-anysphere/indonesia>
-
-Nova is the most architecturally interesting Rust Java implementation in this review and is the closest to the idea of a “Java rust-analyzer.”
-
-Its repository and architecture documentation describe or contain work around:
-
-- native Java parser infrastructure
-- classfile reading
-- classpath modeling
-- Maven/Gradle integration
-- persistent project/dependency caches
-- Salsa-style incremental analysis
-- symbol search/indexing
-- LSP and DAP binaries
-- framework-aware analysis
-- refactoring infrastructure
-- performance/observability tooling
-
-This is broadly the architecture we would want if the long-term goal were a fully independent native Java semantic engine.
-
-### Strengths
-
-- Native Rust process and attractive headless/server deployment model.
-- Incremental-analysis design is a better conceptual fit for long-lived code-intelligence services than repeatedly doing full project imports.
-- Persistent symbol/index cache work is directly relevant to repeated agent worktrees.
-- More ambitious semantic scope than simple Tree-sitter LSPs.
-- Good architecture reference even if not adopted directly.
-
-### Risks
-
-The main issue is maturity. The project is still young and parts of its indexing/semantic pipeline are evolving. The most important production questions for `cloud-acp-gateway` are not whether the architecture is promising, but whether it can correctly handle real Java backend workloads:
-
-- overload resolution
-- generics
-- inheritance and implementation resolution
-- multi-module Maven/Gradle projects
-- dependency JAR symbols
-- generated sources
-- Lombok
-- annotation processors
-- Spring-heavy code
-
-The available evidence is not yet strong enough to treat Nova as a compiler-grade semantic authority.
-
-### Recommendation
-
-**PoC / Watch.** Use Nova as the leading architecture reference and, if engineering time permits, include it in the benchmark harness. Do not make the product dependent on it until correctness and maintenance risk are much better understood.
-
----
-
-## 4. Pegon
-
-Repository: <https://github.com/rmuir/pegon>
-
-Pegon is attractive operationally because it is a small native Rust Java language server. The deployment story — a standalone binary with low JVM-free overhead — is exactly what makes Rust interesting for cloud worktrees.
-
-However, operational simplicity is not enough. The current feature surface is more focused on parsing/diagnostics than on the semantic navigation set required by #283. Definition/references/implementation/call hierarchy need to be considered hard requirements before it can be a serious Phase 3 code-intelligence provider.
-
-### Recommendation
-
-**Watch.** Re-evaluate when semantic navigation is complete enough to run the same correctness benchmark as JDTLS.
-
----
-
-## 5. Caffeine-LS
-
-Repository: <https://github.com/cubewhy/caffeine-ls>
-
-Caffeine-LS is another Rust Java language-server effort with hand-written parsing/Rowan-style infrastructure and native classfile work. It is technically interesting because it is trying to move beyond a pure text/syntax index toward type-aware analysis.
-
-The project is still early. Current functionality is not broad enough to justify production integration for `cloud-acp-gateway`.
-
-### Recommendation
-
-**Watch.** It is worth tracking because its architecture may become relevant, but it is not a production candidate today.
-
----
-
-## 6. Why Rust can help — and what it does not solve
-
-Rust can materially improve several operational characteristics:
-
-- cold process startup
-- idle RSS
-- binary distribution
-- process isolation
-- easier headless deployment
-- ability to run more worktrees per host
-- predictable per-process lifecycle
-
-Those benefits are valuable for a gateway that may supervise many independent Git worktrees.
-
-However, Rust does **not** make Java semantics simple. Correctly resolving a call like:
-
-```java
-foo.bar().baz();
-```
-
-may require:
-
-- local and imported types
-- overload resolution
-- generic substitution
-- inheritance
-- classpath/module path
-- dependency bytecode
-- generated sources
-- annotation processors
-- framework conventions
-
-Java backend projects make the problem harder still. Lombok, MapStruct, Spring, generated sources, and build-tool project models are where many clean-room analyzers diverge from IDE/compiler behavior.
-
-Therefore a native Rust implementation should be evaluated as a **fast-path provider**, not assumed to be an automatic semantic replacement for JDTLS.
-
----
-
-## 7. Architecture options
-
-### Option A — direct Rust-only adoption
-
-```text
-Review Workspace
-      |
-      v
-Rust Java LSP
-      |
-      v
-CodeRef
-```
-
-**Advantages**
-
-- lowest operational complexity at runtime
-- native binary
-- potentially excellent startup/RSS
-
-**Risks**
-
-- correctness gaps become user-visible
-- difficult Java edge cases become our responsibility
-- framework/generated-source failures may be subtle rather than obvious
-
-**Assessment:** too risky for production today.
-
-### Option B — Rust fast path + JDTLS fallback
-
-```text
-                 +----------------+
-request -------->| CodeIntelBroker |
-                 +-------+--------+
-                         |
-            +------------+-------------+
-            |                          |
-            v                          v
-     Rust fast path                 JDTLS
-   fast/common queries        semantic fallback
-            |                          |
-            +------------+-------------+
-                         |
-                         v
-                    normalized
-                      CodeRef
-```
-
-This is the recommended architecture if the pilot succeeds.
-
-The broker should make provider choice invisible to the UI. A response should carry enough metadata for observability and confidence decisions, for example:
-
-```text
-provider
-operation
-workspace_revision
-index_state
-confidence
-latency_ms
-fallback_reason
-```
-
-A Rust result can be returned directly only when it passes explicit confidence rules. Ambiguous or unsupported cases fall back to JDTLS.
-
-### Option C — JDTLS only
-
-This remains the safest correctness-first baseline.
-
-**Advantages**
-
-- mature Java semantics
-- Maven/Gradle support
-- broad language feature coverage
-- existing ecosystem and known behavior
-
-**Costs**
-
-- JVM startup
-- larger memory footprint
-- more expensive concurrent worktree density
-- project import/indexing can be slow
-
-**Assessment:** keep as baseline/oracle even if hybrid work proceeds.
-
----
-
-## 8. Recommended gateway abstraction
-
-Do not couple the Review Workspace directly to a specific LSP protocol implementation.
-
-Introduce a provider-neutral interface such as:
-
-```text
-CodeIntelProvider
-  definition(CodePosition)
-  implementations(CodePosition)
-  references(CodePosition)
-  workspaceSymbols(query)
-  incomingCalls(CodePosition)
-  outgoingCalls(CodePosition)
-  typeHierarchy(CodePosition)
-```
-
-Normalize results into the same `CodeRef` primitive already proposed by #283:
-
-```text
-CodeRef {
-  label?
-  path
-  line?
-  column?
-  symbol?
-}
-```
-
-This keeps the product architecture stable even if providers change from:
-
-```text
-JDTLS
--> Rust pilot
--> hybrid broker
--> future index service
-```
-
-without requiring UI rewrites.
-
----
-
-## 9. Worktree lifecycle and caching
-
-Issue #283 maps review sessions naturally onto independent Git worktrees:
-
-```text
-Review
-  |
-  v
-worktree
-  +-- agent
-  +-- git diff
-  +-- tests
-  +-- optional code-intelligence process
-```
-
-That makes process lifecycle a first-class design problem.
-
-The gateway should avoid “one permanently hot JDTLS per historical review.” Instead, a broker/pool should supervise providers based on activity:
-
-```text
-active review
-   -> warm provider process
-
-idle review
-   -> retain reusable index/cache
-   -> evict process after timeout
-
-review reopened
-   -> reload warm cache / restart provider
-```
-
-A Rust provider is particularly attractive if warm-cache reactivation is cheap enough to avoid keeping many processes resident.
-
-Repository/worktree identity must remain gateway-local and revision-aware. Code-intelligence results must never be reused across the wrong worktree or revision.
-
----
-
-## 10. Security and operational boundaries
-
-Running a Java language server against an untrusted repository can involve more than parsing text. Build import, annotation processors, Gradle plugins, Maven extensions, and generated-source steps can execute repository-controlled code.
-
-The gateway should distinguish between:
-
-```text
-safe static analysis
-```
-
-and:
-
-```text
-build-tool / annotation-processor execution
-```
-
-The Rust fast path should default to static source/bytecode analysis where possible. Any JDTLS/build-tool integration that may execute repository code should inherit the same sandboxing and trust rules as tests/builds run by agents.
-
----
-
-## 11. Observability requirements
-
-Every code-intelligence request should emit structured telemetry such as:
-
-```text
-provider
-operation
-language
-workspace_size_bucket
-index_state
-cache_hit
-latency_ms
-result_count
-confidence
-fallback_reason
-fallback_provider
-rss_bytes
-revision_match
-process_restart_count
-```
-
-Avoid collecting source code, raw symbol names, or raw local paths when not necessary.
-
-The most useful operational metrics are:
-
-```text
-definition p50 / p95 / p99
-references p50 / p95 / p99
-fast-path fallback %
-Rust <-> JDTLS disagreement %
-stale-result %
-cold-to-ready time
-RSS per active worktree
-cache hit %
-process restart %
-```
-
----
-
-## 12. Proposed pilot
-
-The pilot should be non-blocking for Phase 3 product work.
-
-### Stage A — baseline and provider abstraction
-
-- Build a representative Java semantic-query corpus.
-- Establish JDTLS as the comparison oracle.
-- Introduce a provider-neutral `CodeIntelProvider` / broker abstraction.
-- Add `CodeRef` normalization and strict revision/worktree validation.
-
-### Stage B — Rust shadow mode
-
-- Start/supervise the selected Rust candidate for selected worktrees.
-- Send the same eligible navigation queries to the Rust engine and JDTLS.
-- Record latency, result agreement, RSS, indexing time, and fallback reason.
-- Do not expose Rust-only results to users yet.
-
-### Stage C — confidence gate and fallback
-
-- Define exact vs heuristic result categories.
-- Route low-confidence reference results to JDTLS.
-- Add process lifecycle/eviction policy.
-- Add cache and repeated-worktree benchmarks.
-
-### Stage D — opt-in Review Workspace pilot
-
-- Enable deterministic definition/implementation/references for opt-in reviews.
-- Keep Agent Trace as the explanatory layer.
-- Measure whether reviewers actually use deterministic navigation enough to justify further investment.
-
----
-
-## 13. Benchmark corpus
-
-Do not benchmark only on a toy project.
-
-At minimum include:
-
-| Corpus type | Failure mode to exercise |
+| Project | Reason |
 |---|---|
-| Plain Maven Java | Basic symbol correctness |
-| Plain Gradle Java | Source roots/dependencies |
-| Multi-module Maven | Cross-module references |
-| Multi-module Gradle | Project boundaries |
-| Spring Boot | Annotation/framework-heavy code |
-| Lombok | Generated getters/builders |
-| Generic-heavy library | Type/method resolution |
-| Interface-heavy service | Implementation navigation |
-| Generated source / MapStruct | Source-generation behavior |
-| Large monorepo | Startup/index/RSS |
-| Multiple concurrent worktrees | Gateway resource density |
+| [wilson-anysphere/indonesia](https://github.com/wilson-anysphere/indonesia) (Project Nova) | No LICENSE, dormant since 2026-02-12, zero releases. Interesting architecture, unusable artifact |
+| [cubewhy/caffeine-ls](https://github.com/cubewhy/caffeine-ls) | GPL-3.0, no standalone binary, no implementations or call hierarchy. Best classpath story among the lightweight engines — worth re-checking in two quarters |
+| [rmuir/pegon](https://github.com/rmuir/pegon) | A linter. Definition is file-local over tree-sitter scopes |
+| [sourcegraph/scip-semantic](https://github.com/sourcegraph/scip-semantic) | Tagging by enclosing scope, not cross-file resolution |
+| [BloopAI/bloop](https://github.com/BloopAI/bloop), [github/stack-graphs](https://github.com/github/stack-graphs) | Both archived |
+| [agentic-labs/lsproxy](https://github.com/agentic-labs/lsproxy) | Runs `jdtls` underneath; a containerised wrapper, not an engine |
+| codeseek, codanna, knot, gossiphs, infigraph | Tree-sitter call graphs matched by name, no type or classpath resolution. knot additionally requires Neo4j and Qdrant |
+| [TabbyML/tabby](https://github.com/TabbyML/tabby) | `tree-sitter-java` appears only as an indexing and chunking dependency |
+| [zed-extensions/java](https://github.com/zed-extensions/java) | Downloads and proxies JDTLS. No Rust Java engine exists in Zed or Helix |
+| cafebabe, noak, classfile-parser, rjvm, mokapot | Every JVM crate on crates.io is bytecode-level. None offers source-level resolution |
+| scip-java, Kythe, Joern, Semgrep, Serena | Not Rust, and each needs a JVM or a successful build at index time. Joern's `javasrc2cpg` is the strongest build-free option if the Rust constraint is dropped |
 
-The benchmark should run on identical hardware with pinned provider versions.
+No Rust Java analyzer from Anysphere, Cognition, Amazon or Google surfaced in 2025–2026 beyond Nova. JetBrains' Fleet and Kotlin LSP backends are JVM, not Rust.
 
----
+### Baseline
 
-## 14. Benchmark measurements
-
-For each corpus, measure both cold and warm states.
-
-### Startup/indexing
-
-- process spawn -> initialize complete
-- process spawn -> first useful definition response
-- cold/full index wall time
-- warm cache load time
-- CPU time
-- peak and steady RSS
-- cache size and disk I/O
-
-### Query latency
-
-Measure p50/p95/p99 for:
-
-- definition
-- implementation
-- references
-- workspace symbol
-- call hierarchy where available
-
-### Correctness
-
-Compare provider results against a curated expected-answer set and against JDTLS.
-
-Record:
-
-- exact top-definition agreement
-- missing results
-- false-positive references
-- false-negative references
-- cross-module failures
-- dependency-source failures
-- Lombok/generated-symbol failures
-- disagreement requiring fallback
-
-### Concurrency
-
-Repeat at:
-
-```text
-1 active worktree
-4 active worktrees
-8 active worktrees
-16 active worktrees
-```
-
-Measure aggregate RSS, CPU, startup contention, index wall time, eviction/restart behavior, and cache reuse.
+[Eclipse JDT LS](https://github.com/eclipse-jdtls/eclipse.jdt.ls) 1.61.0 (2026-09-03) remains the correctness oracle: compiler-backed, authoritative on Lombok, Spring, inherited members and dependency JARs. It requires a Java 21+ runtime, launches at `-Xmx1G`, and needs a per-workspace data directory and a Maven or Gradle import. It is not in the first cut, and the measurements below are why that costs less than it sounds.
 
 ---
 
-## 15. Suggested acceptance criteria
+## 3. What the review workspace actually needs
 
-These are product/engineering targets to validate, not upstream guarantees.
+#283 ranks the deterministic operations. Measured latency re-ranks them:
 
-### Correctness
+| Priority in #283 | Operation | Measured | Verdict |
+|---|---|---|---|
+| P0 | Go to definition | 6–9 ms warm | **Ship it** |
+| P0 | Find references | 14.2 s | Agent Trace |
+| P0 | Go to implementation | not measured | Later, if definition proves out |
+| P0 | Workspace symbols | 1.4 s | Later; Project search already covers the need |
+| P1 | Call hierarchy | 4.3 s | Agent Trace |
+| P2 | Hover | not measured | Not needed for review |
+| P3 | Completion, rename, debugging | — | Out of scope, the IDE escape hatch covers these |
 
-For query categories explicitly marked eligible for the Rust fast path:
-
-- **>=95% top-definition agreement** with curated/JDTLS expected results
-- zero cross-revision/worktree stale navigation defects
-- references false-positive rate explicitly measured and confidence-gated
-
-A stale result that jumps into another worktree/revision is a critical correctness bug, not an ordinary miss.
-
-### Fast-path coverage
-
-A reasonable promotion target is:
-
-- approximately **>=80% of eligible navigation queries** answered without requiring JDTLS
-
-### Latency
-
-For explicit review navigation actions:
-
-- fast-path **p95 < 500 ms** is a reasonable initial SLO
-
-For future IDE-like `Cmd/Ctrl-click`:
-
-- only promote when end-to-end p95 is around **200 ms or better** and semantic precision is high enough to feel deterministic
-
-### Resource density
-
-Do not choose a fixed per-process memory budget before measuring. Derive pool size, idle timeout, eviction policy, cache strategy, and maximum concurrent JDTLS fallbacks from observed data.
+Only definition clears the bar for a click gesture. This is exactly the boundary #283 drew between an agent round trip and an IDE gesture — the difference is that we can now put a number on it.
 
 ---
 
-## 16. Decision matrix
+## 4. Measured: Bifrost on a real multi-module repo
 
-The following ratings are engineering judgments for the #283 review-first use case, not project-supplied benchmark scores.
+Corpus: a private multi-module Maven monorepo, 8,936 tracked files, 4.1 GB of working tree, Spring and Jackson throughout. Host: Apple Silicon, macOS 25.6. Bifrost 0.11.3 via `npx @brokkai/bifrost`, `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`.
 
-| Option | Correctness | Latency/startup | Resource density | Java/build semantics | Maturity | Decision |
-|---|---:|---:|---:|---:|---:|---|
-| **Rust fast path + JDTLS fallback** | High | High | Medium/High | High | Medium | **Target architecture if pilot passes** |
-| **Rust-only current candidates** | Medium/Low | Potentially high | High | Medium/Low | Low/Medium | **PoC / Watch** |
-| **JDTLS only** | Very high | Medium/Low | Low/Medium | Very high | Very high | **Keep as baseline/oracle** |
-| **Project Nova specifically** | Medium | Potentially high | High | Medium/High ambition | Low/Medium | **PoC / Watch** |
-| **Pegon / Caffeine-LS** | Low/Medium today | Potentially high | High | Low/Medium | Low | **Watch** |
+### Startup and indexing
 
-### Adopt / PoC / Watch / Reject
-
-| Option | Decision | Reason |
+| Phase | Time | Notes |
 |---|---|---|
-| **Hybrid broker** | **Adopt as target architecture if pilot gates pass** | Best balance of low-cost navigation and semantic correctness |
-| **Project Nova** | **PoC / Watch** | Strongest architecture direction, not yet proven enough for production authority |
-| **JDTLS** | **Keep** | Required semantic oracle/fallback |
-| **Pegon** | **Watch** | Native deployment is attractive; semantic navigation is not mature enough |
-| **Caffeine-LS** | **Watch** | Interesting early design, insufficient production maturity |
-| **Rust-only authoritative semantics today** | **Reject** | No current candidate has enough evidence to replace JDTLS safely |
+| Cold one-shot `scan_usages_by_location` | 109.9 s | Builds the on-disk cache from nothing |
+| Warm one-shot, same query | 37.3 s | One-shot mode rebuilds in-memory state every run — unusable interactively |
+| `--lsp` `initialize` with a warm cache | 1.3 s | Capabilities advertised: `definitionProvider`, `referencesProvider`, `implementationProvider`, `callHierarchyProvider`, `typeHierarchyProvider`, `workspaceSymbolProvider` |
+
+The one-shot and long-lived modes are not interchangeable. Every interactive number below comes from `--lsp`.
+
+### Query latency, long-lived server
+
+| Request | Result | Latency |
+|---|---|---|
+| `definition` on a cross-module type, first request | 1 correct hit in another Maven module | 2,647 ms |
+| `definition` on a static method, same file | 1 correct hit | 9 ms |
+| `definition` repeated after other traffic | 1 correct hit | 6 ms |
+| `definition` on a dependency-JAR method (Jackson `readValue`) | **0 hits** | **15,438 ms** |
+| `references` on a widely used class | 953 hits | 14,248 ms |
+| `workspace/symbol` | 140 hits | 1,398 ms |
+| `prepareCallHierarchy` + `incomingCalls` | 361 callers | 4,335 ms |
+
+The first request pays for lazy per-file work; subsequent ones are single-digit milliseconds. **The dangerous row is the fourth**: an unresolvable symbol is not fast-and-empty, it is slow-and-empty. Without a timeout every click on a library symbol hangs the UI for fifteen seconds.
+
+### Resources
+
+| Metric | Value |
+|---|---|
+| Resident set, `--lsp`, after the queries above | 1.06 GB |
+| CPU during indexing | 144% |
+| On-disk cache | 336 MB SQLite + 79 MB WAL + 31 MB semantic-pack catalog, written to `.bifrost/cache` inside the repository |
+
+Bifrost writes its own `.gitignore` into that directory, and the docs state the cache is shared with linked worktrees — which suits one review per worktree. It relocates through `BIFROST_CACHE_ROOT` / `BIFROST_CACHE_DIR`, and the pack catalog separately through `BIFROST_SEMANTIC_PACK_CACHE_ROOT`.
+
+### Network behaviour
+
+Run without `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`, a second invocation sat for 3 minutes 42 seconds at 0.3% CPU holding an open HTTPS socket to a GitHub CDN before it was killed. The [semantic pack documentation](https://bifrost.brokk.ai/semantic-model-packs/) confirms the facade downloads a bundle for the running release. Dependency discovery itself is offline and opt-in — Bifrost never invokes Maven or Gradle and never downloads artifacts.
+
+### Precision caveat
+
+Three probes — two correct cross-module definitions and one external-JAR miss — are a smoke test, not a precision figure. [§7](#7-integration-plan) carries a 20-site correctness check against IntelliJ as an explicit step.
+
+### Not yet measured
+
+A second private monorepo of roughly 95,000 Java files was not touched. A cold index there is minutes at best, and it decides whether a provider starts eagerly or lazily. That measurement is step one of the plan.
 
 ---
 
-## 17. Recommended roadmap adjustment for #283
+## 5. Why this is worth doing now
 
-Do **not** move LSP into the Phase 3 critical path.
+#283 put LSP in Phase 4, "only if real usage justifies it". That gate was written when the alternative cost was a JVM, a build import per repository, and a multi-week integration. The measured cost is now: one pinned npm dependency, one lazily spawned subprocess, one HTTP route, and one click handler.
 
-Keep the product roadmap approximately:
+The 3.0 work has also been split onto its own integration branch, so this can land without holding up the review-first workspace already in flight.
 
-```text
-Phase 0
-  clickable CodeRef + selection Ask/Fix
-
-Phase 1
-  focused Review Workspace
-
-Phase 2
-  durable code-attached review state/discussions
-
-Phase 3
-  explicit Agent Trace
-  review guide
-  navigable diagrams
-
-Parallel shadow work
-  CodeIntelProvider abstraction
-  Rust candidate vs JDTLS benchmark
-  cache/lifecycle experiments
-
-Later deterministic-navigation phase
-  promote LSP-backed definition/references/implementation
-  only when correctness + latency + real usage justify it
-```
-
-This preserves the most important product insight in #283: the gateway should optimize the human review/comprehension loop, not accidentally grow into a full browser IDE.
-
-A Rust code-intelligence provider is valuable when it reduces the cost of deterministic navigation. It should not become an architecture goal by itself.
+What stays true from #283: the gateway optimises the human review loop, and should not grow into a browser IDE. Shipping definition and leaving references to the agent keeps that boundary.
 
 ---
 
-## Final recommendation
+## 6. Architecture
 
-For `cloud-acp-gateway`, the best current decision is:
-
-> **Run a Rust Java code-intelligence shadow pilot behind a provider-neutral broker, and retain JDTLS as the authoritative fallback. Do not block Phase 3 on LSP adoption.**
-
-Project Nova is the most useful architecture reference among current Rust Java efforts, while Pegon and Caffeine-LS should be monitored as lighter-weight alternatives. None currently has enough production evidence to replace JDTLS outright.
-
-The target division of responsibility should remain simple:
+One provider, no broker, no abstraction layer:
 
 ```text
-Rust engine -> fast deterministic navigation
-JDTLS       -> semantic correctness fallback
-ACP agent   -> explanation and review comprehension
+Cmd/Ctrl-click in the code canvas
+        |
+        v
+GET /workspace/definition?cwd&path&line&column      2 s budget
+        |
+        +-- hit  --> CodeRef[] --> existing open-at-line navigation
+        |
+        +-- miss or timeout --> existing agent Trace request
 ```
 
-That gives #283 a path to IDE-like navigation later without turning Phase 3 into a Java language-server project today.
+Bifrost is one process per repository, keyed by git common dir — the same identity Phase 2 already stores for reviews. It is spawned on first request, not on session start, and evicted when idle. The supervisor pattern at `src/gateway.ts:2813` (spawn, backoff respawn, process-group kill) is reused as-is.
+
+Results normalise into the `CodeRef` shape that already exists at `web/src/lib/codeRef.ts:6-13`. No new primitive, no new renderer: a definition result opens through the same path a Trace card's reference does.
+
+Deliberately skipped:
+
+- **A `CodeIntelProvider` interface.** One implementation. The seam costs more than it saves until a second engine exists.
+- **A JDTLS fallback tier.** The fallback is the agent Trace that already ships.
+- **Telemetry schema, benchmark harness, disagreement tracking.** A timeout counter and a miss counter answer the only question the first cut asks: does this resolve often enough to be worth keeping.
+
+---
+
+## 7. Integration plan
+
+1. **Measure the large corpus cold.** `--lsp` index time and resident set on ~95k Java files. Decides lazy versus eager start, and whether a per-host process cap is needed.
+2. **Provider lifecycle.** One Bifrost process per git common dir, spawned on first request, idle-evicted. Reuse `src/gateway.ts:2813`. Environment fixed by the gateway: `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`, and `BIFROST_CACHE_ROOT` pointed at the gateway's own data directory so nothing is written into the user's checkout.
+3. **`GET /workspace/definition?cwd&path&line&column`.** A sibling of `/workspace/resolve` at `src/gateway.ts:5312`. The request path and every returned URI clamp through `allowedPreviewPath`, so a result outside the root is refused rather than opened. Hard 2 s timeout. Responds with `CodeRef[]`.
+4. **Cmd/Ctrl-click in the file view.** The column comes from the same selection offsets `rangeFromOffsets` already uses at `web/src/lib/lineRange.ts:25`; `AskFixRequest` gains an optional `column`. A miss or a timeout falls through to the Trace action that the same selection already offers at `web/src/components/FilePanel.tsx:672`.
+5. **Feature flag `ACPG_LSP_JAVA=off|bifrost`.** `@brokkai/bifrost` pinned in `package.json`; its platform binaries are optional dependencies and it declares `engines.node >= 18`, so the Node 20 twin is unaffected.
+6. **Correctness check.** 20 call sites across at least three modules, definition compared against IntelliJ, recorded here. Includes the cases clean-room analyzers are known to miss: Lombok-generated accessors, Spring injection points, and inherited members.
+7. **Revisit.** If the check finds a class of miss that matters, the options in order are a Bifrost semantic pack for the dependency, then kmp-lsp, then JDTLS as a second tier.
+
+---
+
+## 8. Security and operational boundaries
+
+Bifrost never invokes a build tool and never downloads artifacts, which removes the largest risk a Java language server usually carries: annotation processors, Gradle plugins and Maven extensions executing repository-controlled code during project import. Analysis is static reads of source and, where a pack is explicitly provided, bytecode.
+
+Two requirements follow:
+
+- **No egress from the analyzer.** `BIFROST_SEMANTIC_PACK_DOWNLOAD=off` is set by the gateway, not left to the environment. Company source is being analysed; the process should not talk to the network.
+- **The path clamp is not optional.** Definition results arrive as `file://` URIs chosen by the analyzer. They pass through `allowedPreviewPath` exactly like `/workspace/file` requests do, so an unexpected URI is refused rather than opened.
+
+If JDTLS is ever added as a second tier, it does not inherit these properties — its project import executes repository code and must be sandboxed like an agent-run build.
+
+---
+
+## 9. Open questions
+
+- **Scope.** Definition only, or definition plus references as an explicit asynchronous action with a spinner, alongside Trace?
+- **Default.** Enabled when the Bifrost binary resolves, or opt-in behind the flag until the correctness check is recorded?
+- **Single-vendor risk.** The GitHub repository is an open-core mirror — every commit reads `chore: update Bifrost open-core projection`, and development happens elsewhere. Apache-2.0 and a pinned version limit the exposure; kmp-lsp is the named alternative if that changes.
+
+---
 
 ## Primary references
 
 - Issue #283: <https://github.com/bamoo456/cloud-acp-gateway/issues/283>
-- Project Nova / indonesia: <https://github.com/wilson-anysphere/indonesia>
-- Nova architecture map: <https://github.com/wilson-anysphere/indonesia/blob/main/docs/architecture-map.md>
-- Pegon: <https://github.com/rmuir/pegon>
+- Brokk Bifrost: <https://github.com/BrokkAi/bifrost> · docs <https://bifrost.brokk.ai/lsp/> · semantic packs <https://bifrost.brokk.ai/semantic-model-packs/>
+- kmp-lsp: <https://github.com/Hessesian/kmp-lsp>
+- java_lsp: <https://github.com/emilycares/java_lsp>
 - Caffeine-LS: <https://github.com/cubewhy/caffeine-ls>
+- Pegon: <https://github.com/rmuir/pegon>
+- Project Nova: <https://github.com/wilson-anysphere/indonesia>
 - Eclipse JDT LS: <https://github.com/eclipse-jdtls/eclipse.jdt.ls>
-- Brokk Bifrost: <https://github.com/BrokkAi/brokk-bifrost>
