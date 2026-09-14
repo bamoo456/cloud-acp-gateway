@@ -658,6 +658,88 @@ export async function fileDiff(cwd: string, abs: string, spec?: RevSpec | null):
   return finishDiff(rel, exists ? "modified" : "deleted", r.stdout);
 }
 
+// Which repository a checkout belongs to. The COMMON dir is the identity: a
+// `git worktree` shares it with the checkout it was added from, so two worktrees
+// of one repo answer the same string while two clones of the same upstream do
+// not — which is what "same repository" has to mean for a review whose
+// discussions must not leak between unrelated clones.
+export async function gitCommonDir(cwd: string): Promise<string | null> {
+  // --path-format=absolute arrived in git 2.31; older git exits non-zero on the
+  // flag and prints the common dir relative to cwd instead, which resolves to
+  // the same place.
+  let dir = (await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
+  if (!dir) {
+    const rel = await git(cwd, ["rev-parse", "--git-common-dir"]);
+    if (rel.code !== 0) return null;
+    dir = rel.stdout.trim();
+    if (!dir) return null;
+    dir = path.resolve(cwd, dir);
+  }
+  // realpath for the same reason repoRoot does it: this string is a primary key.
+  try { return fs.realpathSync(dir); } catch { return dir; }
+}
+
+// Evidence, never the key: recorded once so a future reassociation (the common
+// dir moved) has something to match on. A repository with several root commits
+// reports all of them, sorted and newline joined, because picking one of an
+// unordered set is a coin toss.
+//
+// Separate from the common dir because it is read exactly once per repository,
+// when its row is created. `rev-list --max-parents=0` walks the whole history,
+// which is not a thing to do on every refresh of a review — and re-deriving the
+// evidence later would quietly rewrite what it exists to be.
+export async function repoFingerprints(cwd: string): Promise<{ rootCommit: string | null; remote: string | null }> {
+  const roots = await git(cwd, ["rev-list", "--max-parents=0", "HEAD"]);
+  const remote = await git(cwd, ["remote", "get-url", "origin"]);
+  return {
+    rootCommit: roots.code === 0 && roots.stdout.trim()
+      ? roots.stdout.trim().split("\n").map((l) => l.trim()).sort().join("\n")
+      : null,
+    remote: remote.code === 0 && remote.stdout.trim() ? remote.stdout.trim() : null,
+  };
+}
+
+// What identifies the bytes a reviewer was shown, and which comparison produced
+// them. Both halves are stored against a discussion or a reviewed file, so the
+// same function answers for the diff route AND for the "has it changed since?"
+// check — computing them in two places is how the two end up disagreeing about
+// rename detection or which revision `spec` really named.
+//
+// `hash` is absent exactly when the diff on screen was not the whole diff:
+// binary blobs and anything past MAX_DIFF_BYTES. A reviewer cannot claim to have
+// read what was never rendered, so its absence is the client's "you can't mark
+// this" and the state check's "assume it changed".
+export async function diffIdentity(
+  cwd: string, diff: FileDiff, spec?: RevSpec | null,
+): Promise<{ hash?: string; revision: string }> {
+  return {
+    hash: diff.binary || diff.truncated ? undefined : sha256(Buffer.from(diff.diff, "utf8")),
+    revision: await revisionOf(cwd, spec),
+  };
+}
+
+// The comparison a diff came from, as one string:
+//   working    <HEAD sha>:working — the HEAD it is dirty against, plus the mark
+//              that says the other side is a working tree and so is not content
+//              addressable on its own
+//   commit     the resolved sha, never the spelling the client sent: "HEAD~2"
+//              means something else tomorrow
+//   branch     <merge base>..<HEAD sha>, i.e. the two ends of `base...HEAD`
+async function revisionOf(cwd: string, spec?: RevSpec | null): Promise<string> {
+  const sha = async (rev: string): Promise<string> => {
+    const r = await git(cwd, ["rev-parse", "--verify", "--quiet", rev]);
+    return r.code === 0 ? r.stdout.trim() : "";
+  };
+  if (spec?.commit) return (await sha(spec.commit)) || spec.commit;
+  const head = (await sha("HEAD")) || "none";
+  if (spec?.base) {
+    const mb = await git(cwd, ["merge-base", spec.base, "HEAD"]);
+    const from = mb.code === 0 && mb.stdout.trim() ? mb.stdout.trim() : (await sha(spec.base)) || spec.base;
+    return from + ".." + head;
+  }
+  return head + ":working";
+}
+
 // What a committed diff did to the file, read off git's own extended header
 // rather than from a second call. "modified" is the fallback because it is what
 // a header carrying none of these markers means.
@@ -977,6 +1059,57 @@ export async function find(cwd: string, abs: string, query: string): Promise<Fin
     ...(corpus.pending ? { pending: true } : {}),
     ...(corpus.limited ? { limited: true } : {}),
   };
+}
+
+export type ResolveResult = { abs: string } | { code: "not-found" | "ambiguous" };
+
+// Where a path an agent wrote in prose actually is. `allow` is the gateway's
+// read guard, applied to every candidate BEFORE it is stat'd — a `../../etc/x`
+// or a basename that happens to sit outside the tree is refused, not found.
+//
+// Absolute and `./`-style paths mean one place. A bare relative path is tried
+// against cwd and the repo root — a conversation running in `web/` writes both
+// `src/app.ts` and `web/src/app.ts` — and two different hits is an answer we
+// refuse rather than guess between. A lone basename falls back to the filename
+// index, and only an exact, unique match counts: a corpus the caps cut short,
+// or one still missing its untracked half, cannot prove uniqueness.
+export async function resolve(
+  cwd: string, raw: string, allow: (abs: string) => Promise<string | null>,
+): Promise<ResolveResult> {
+  const file = async (p: string): Promise<string | null> => {
+    const abs = await allow(p);
+    if (!abs) return null;
+    try { return (await fs.promises.stat(abs)).isFile() ? abs : null; } catch { return null; }
+  };
+  if (path.isAbsolute(raw) || raw.startsWith("./") || raw.startsWith("../")) {
+    const hit = await file(path.resolve(cwd, raw));
+    return hit ? { abs: hit } : { code: "not-found" };
+  }
+  const root = await repoRoot(cwd);
+  const fromCwd = await file(path.resolve(cwd, raw));
+  const fromRoot = root && root !== cwd ? await file(path.resolve(root, raw)) : null;
+  if (fromCwd && fromRoot && fromCwd !== fromRoot) return { code: "ambiguous" };
+  if (fromCwd || fromRoot) return { abs: (fromCwd ?? fromRoot)! };
+  if (raw.includes("/")) return { code: "not-found" };
+
+  let corpus = root ? await fileIndex.corpusGit(root) : await fileIndex.corpusWalk(cwd);
+  // A root nobody has opened the panel on yet has no status snapshot, so its
+  // untracked files are not in the corpus. changes() is what feeds that half.
+  if (corpus.pending && root) {
+    await changes(cwd);
+    corpus = await fileIndex.corpusGit(root);
+  }
+  if (corpus.pending || corpus.limited) return { code: "ambiguous" };
+  const lower = raw.toLowerCase();
+  const hits: string[] = [];
+  for (let i = 0; i < corpus.paths.length && hits.length < 2; i++) {
+    if (corpus.bases[i] === lower && corpus.paths[i].slice(corpus.paths[i].lastIndexOf("/") + 1) === raw) {
+      hits.push(corpus.paths[i]);
+    }
+  }
+  if (hits.length !== 1) return { code: hits.length ? "ambiguous" : "not-found" };
+  const hit = await file(path.join(root ?? cwd, hits[0]));
+  return hit ? { abs: hit } : { code: "not-found" };
 }
 
 // `git grep -z -n` writes one record per matching line, newline-separated:

@@ -184,4 +184,30 @@ describe("TopBar pending permissions", () => {
     await act(async () => { crumb?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     expect(onPicker).toHaveBeenCalled();
   });
+
+  test("the review button is a pressed-in place, and takes the files button with it", async () => {
+    const { TopBar } = await import("./TopBar.tsx");
+    const { useStore } = await import("../store/store.ts");
+
+    await act(async () => {
+      root = createRoot(container);
+      root.render(React.createElement(TopBar, { onPanel: vi.fn(), onPicker: vi.fn() }));
+    });
+
+    const review = container.querySelector<HTMLButtonElement>("button.review-btn")!;
+    expect(review.getAttribute("aria-label")).toBe("Review");
+    expect(review.getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector("button.files-btn")).not.toBeNull();
+
+    await act(async () => { review.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(useStore.getState().workspace).toBe("review");
+    expect(review.getAttribute("aria-pressed")).toBe("true");
+    // The panel it toggles is not mounted in Review, so the button that would
+    // still flip `filesOpen` behind the workspace goes with it.
+    expect(container.querySelector("button.files-btn")).toBeNull();
+
+    await act(async () => { review.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(review.getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector("button.files-btn")).not.toBeNull();
+  });
 });

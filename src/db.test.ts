@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import Database from "better-sqlite3";
 import { Db } from "./db.ts";
 
@@ -485,4 +487,147 @@ test("a session's controls round-trip, are replaced as a set, and go with the co
   db.deleteSessionControls("s1");
   assert.deepEqual(controls("claude", "s1"), {});
   assert.deepEqual(controls("codex", "s1"), {});
+});
+
+// ---- durable review state ----
+
+const IDENT = { commonDir: "/repo/.git", rootCommit: "root1", remote: "git@example.com:x/y.git" };
+const ANCHOR = {
+  path: "src/a.ts", side: "new" as const, line: 12, code: "+const x = 1;",
+  body: "why?", revision: "abc:working",
+};
+
+test("a review is created once per (repository, worktree, scope) and reused", () => {
+  const db = new Db(":memory:");
+  const a = db.provisionReview(IDENT, "/repo", "working");
+  const again = db.provisionReview(IDENT, "/repo", "working");
+  assert.equal(again.id, a.id);
+  assert.equal(again.repositoryId, a.repositoryId);
+
+  // Same clone, different comparison and different worktree: separate reviews
+  // that share the repository, which is what lets one list the other's
+  // discussions without mixing them into its own.
+  const branch = db.provisionReview(IDENT, "/repo", "branch:main");
+  const linked = db.provisionReview({ ...IDENT, rootCommit: "ignored" }, "/repo-wt", "working");
+  assert.notEqual(branch.id, a.id);
+  assert.notEqual(linked.id, a.id);
+  assert.equal(linked.repositoryId, a.repositoryId);
+
+  // A different clone is a different repository even with the same worktree path.
+  const other = db.provisionReview({ ...IDENT, commonDir: "/other/.git" }, "/repo", "working");
+  assert.notEqual(other.repositoryId, a.repositoryId);
+  db.close();
+});
+
+test("the companion is recorded on first provision and never overwritten", () => {
+  const db = new Db(":memory:");
+  assert.equal(db.provisionReview(IDENT, "/repo", "working").companion, null);
+
+  const named = db.provisionReview(IDENT, "/repo", "working", { agentName: "claude", sessionId: "s1" });
+  assert.deepEqual(named.companion, { agentName: "claude", sessionId: "s1" });
+
+  // Whoever is active LATER does not take ownership of the review.
+  const later = db.provisionReview(IDENT, "/repo", "working", { agentName: "codex", sessionId: "s2" });
+  assert.deepEqual(later.companion, { agentName: "claude", sessionId: "s1" });
+  assert.deepEqual(db.review(later.repositoryId, "/repo", "working")?.companion, { agentName: "claude", sessionId: "s1" });
+  db.close();
+});
+
+test("a discussion collects replies and toggles between resolved and open", () => {
+  const db = new Db(":memory:");
+  const review = db.provisionReview(IDENT, "/repo", "working");
+  const d = db.createDiscussion(review.id, { ...ANCHOR, diffHash: "f".repeat(64) });
+  assert.equal(d.status, "open");
+  assert.deepEqual(d.replies, []);
+
+  assert.ok(db.addDiscussionReply(d.id, "because of the cache"));
+  assert.ok(db.addDiscussionReply(d.id, "and the TTL"));
+  assert.equal(db.addDiscussionReply("no-such-id", "x"), null, "a reply must not outlive its discussion");
+
+  assert.equal(db.setDiscussionStatus(d.id, "resolved"), true);
+  assert.equal(db.setDiscussionStatus("no-such-id", "resolved"), false);
+
+  const [listed] = db.discussions(review.id);
+  assert.equal(listed.status, "resolved");
+  assert.equal(listed.diffHash, "f".repeat(64));
+  assert.equal(listed.revision, ANCHOR.revision);
+  assert.deepEqual(listed.replies.map((r) => r.body), ["because of the cache", "and the TTL"]);
+
+  db.setDiscussionStatus(d.id, "open");
+  assert.equal(db.discussions(review.id)[0].status, "open");
+  db.close();
+});
+
+test("a repository's other reviews are listed without the one being read", () => {
+  const db = new Db(":memory:");
+  const here = db.provisionReview(IDENT, "/repo", "working");
+  const sibling = db.provisionReview(IDENT, "/repo-wt", "working");
+  const elsewhere = db.provisionReview({ ...IDENT, commonDir: "/other/.git" }, "/other", "working");
+  db.createDiscussion(here.id, ANCHOR);
+  db.createDiscussion(sibling.id, { ...ANCHOR, body: "in the other worktree" });
+  db.createDiscussion(elsewhere.id, { ...ANCHOR, body: "another clone entirely" });
+
+  const others = db.repositoryDiscussions(here.repositoryId, here.id);
+  assert.deepEqual(others.map((d) => d.body), ["in the other worktree"]);
+  assert.deepEqual(others.map((d) => d.worktree), ["/repo-wt"]);
+
+  // Nothing provisioned here yet: excluding no review lists every sibling.
+  assert.equal(db.repositoryDiscussions(here.repositoryId, null).length, 2);
+  db.close();
+});
+
+test("reviewed files upsert by path and are deleted by unmarking", () => {
+  const db = new Db(":memory:");
+  const review = db.provisionReview(IDENT, "/repo", "working");
+  db.setReviewedFile(review.id, { path: "src/a.ts", hash: "a".repeat(64), revision: "r1" });
+  db.setReviewedFile(review.id, { path: "src/b.ts", hash: "b".repeat(64), revision: "r1" });
+  // Re-marking after the file moved on replaces the snapshot rather than adding one.
+  db.setReviewedFile(review.id, { path: "src/a.ts", hash: "c".repeat(64), revision: "r2" });
+
+  const files = db.reviewedFiles(review.id);
+  assert.deepEqual(files.map((f) => f.path), ["src/a.ts", "src/b.ts"]);
+  assert.equal(files[0].hash, "c".repeat(64));
+  assert.equal(files[0].revision, "r2");
+
+  db.deleteReviewedFile(review.id, "src/a.ts");
+  assert.deepEqual(db.reviewedFiles(review.id).map((f) => f.path), ["src/b.ts"]);
+  db.close();
+});
+
+test("a draft is per review, and an empty one is deleted rather than stored", () => {
+  const db = new Db(":memory:");
+  const working = db.provisionReview(IDENT, "/repo", "working");
+  const branch = db.provisionReview(IDENT, "/repo", "branch:main");
+  const comment = { path: "src/a.ts", side: "new" as const, line: 3, code: "+x", body: "why three?" };
+  db.setReviewDraft(working.id, [comment]);
+
+  assert.deepEqual(db.reviewDraft(working.id), [comment]);
+  assert.deepEqual(db.reviewDraft(branch.id), [], "another comparison is another draft");
+  // counts cover every scope of the worktree — what badges the tab before
+  // anything has been opened.
+  assert.deepEqual(db.draftCounts(working.repositoryId, "/repo"), { working: 1 });
+  assert.deepEqual(db.draftCounts(working.repositoryId, "/repo-wt"), {});
+
+  db.setReviewDraft(working.id, []);
+  assert.deepEqual(db.reviewDraft(working.id), []);
+  assert.deepEqual(db.draftCounts(working.repositoryId, "/repo"), {});
+  db.close();
+});
+
+test("review state survives reopening the same file", () => {
+  const file = `${fs.mkdtempSync(path.join(os.tmpdir(), "acpg-db-review-"))}/state.sqlite`;
+  const a = new Db(file);
+  const review = a.provisionReview(IDENT, "/repo", "working", { agentName: "claude", sessionId: "s1" });
+  const d = a.createDiscussion(review.id, ANCHOR);
+  a.addDiscussionReply(d.id, "still here tomorrow");
+  a.setReviewedFile(review.id, { path: "src/a.ts", hash: "a".repeat(64), revision: "r1" });
+  a.close();
+
+  const b = new Db(file);
+  const same = b.provisionReview(IDENT, "/repo", "working");
+  assert.equal(same.id, review.id, "reopening must find the review, not make a second one");
+  assert.deepEqual(same.companion, { agentName: "claude", sessionId: "s1" });
+  assert.deepEqual(b.discussions(review.id).map((x) => x.replies.length), [1]);
+  assert.deepEqual(b.reviewedFiles(review.id).map((f) => f.path), ["src/a.ts"]);
+  b.close();
 });

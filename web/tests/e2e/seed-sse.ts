@@ -14,9 +14,13 @@
 //
 // Exported as a string because Playwright's addInitScript serializes it into the
 // page; keeping it as a standalone function body avoids closure/scope surprises.
-export const SEED_SSE = (turns: number): string => `
+// `extra`, when given, is streamed as one last agent message — a reply a spec
+// needs the real renderer to work on (a diagram, a structured result) that the
+// fixed conversation above does not carry.
+export const SEED_SSE = (turns: number, extra = ""): string => `
 (() => {
   const TURNS = ${turns};
+  const EXTRA = ${JSON.stringify(extra)};
   const PARA = "The current branch is feature/LA-70449-design-accumulative-review-strategy-1. " +
     "Based on the branch name and recent commit, the focus is designing an accumulative review strategy " +
     "under Jira ticket LA-70449. The latest work added a draft design doc for it.";
@@ -49,6 +53,10 @@ export const SEED_SSE = (turns: number): string => `
     // id, a blob). Wrapping this rather than clipping it is what the phone
     // layout has to prove.
     note(sid, "agent_message_chunk", "設定檔的位置與那一行的 token：\\n\\n\`\`\`\\nfile:///Users/dev/git/my-apps/cloud-acp-gateway/service-config/virtual-models/gemini.yaml:142 sig=aGVsbG8td29ybGQtdGhpcy1pcy1vbmUtbG9uZy10b2tlbi13aXRoLW5vLXNwYWNlcy1hdC1hbGw=\\n\`\`\`");
+    // Its own exchange, not another chunk of the message above: consecutive
+    // agent chunks are appended to the SAME reply, which would run the two
+    // texts together mid-fence.
+    if (EXTRA) { note(sid, "user_message_chunk", "draw it"); note(sid, "agent_message_chunk", EXTRA); }
   };
   let nextSession = 0;
   const handle = (m) => {
