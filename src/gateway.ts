@@ -59,6 +59,10 @@ import {
   MAX_COMMENT_BYTES, MAX_DRAFTS_BYTES,
 } from "./review.ts";
 import { renderHtmlFile } from "./htmlinline.ts";
+import {
+  isBifrostEnabled, bifrostBinaryPath, bifrostDefinition, bifrostLocationPath,
+  warmBifrost, bifrostStats, BIFROST_DEFINITION_TIMEOUT_MS,
+} from "./bifrost.ts";
 import { buildClientConfig, type AgentKind } from "./client-config.ts";
 import { afterCursor, bySearchOrder, encodeCursor, escapeRegExp, findHits, MAX_HITS_IN_SESSION, searchQueryParams, type SearchHit, type SearchQuery } from "./search-core.ts";
 
@@ -5302,6 +5306,63 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
           res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
           res.end(JSON.stringify(r));
         });
+      })
+      .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
+    return;
+  }
+  // Go to definition (Bifrost Java analyzer). Query: ?cwd&path&line&column,
+  // all 1-based. Answers with CodeRef-shaped hits (abs included, like resolve).
+  // A miss — including the timeout an unresolvable symbol pays — is [] with a
+  // 200, and the client falls through to the agent Trace. ?warm=1 (cwd only)
+  // spawns the analyzer for the review being opened so the cold index builds
+  // while the diff is read instead of on the first click; it answers at once.
+  if (consoleEnabled && pathname === "/workspace/definition") {
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    if (q.get("warm") === "1") {
+      const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+      if (!cwd) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+      if (isBifrostEnabled() && bifrostBinaryPath()) warmBifrost(cwd, cfg.ledgerDir);
+      sendJson(res, { warming: isBifrostEnabled() && !!bifrostBinaryPath(), ...bifrostStats() }, true);
+      return;
+    }
+    const cwd = resolveWithinRoot(q.get("cwd") ?? "");
+    const raw = q.get("path") ?? "";
+    const line = Number(q.get("line") ?? "");
+    const colRaw = q.get("column") ?? "";
+    const column = colRaw === "" ? 1 : Number(colRaw);
+    if (!cwd || !raw || !Number.isInteger(line) || line < 1 || !Number.isInteger(column) || column < 1) {
+      res.writeHead(400); res.end(JSON.stringify({ error: "bad request", code: "bad-request" })); return;
+    }
+    if (!isBifrostEnabled()) {
+      res.writeHead(404); res.end(JSON.stringify({ error: "definition is disabled", code: "disabled" })); return;
+    }
+    if (!bifrostBinaryPath()) {
+      res.writeHead(404); res.end(JSON.stringify({ error: "definition is unavailable", code: "unavailable" })); return;
+    }
+    const abs = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
+    allowedPreviewPath(abs, cwd)
+      .then((target) => {
+        if (!target) { res.writeHead(400); res.end(JSON.stringify({ error: "path outside root", code: "outside-root" })); return; }
+        return bifrostDefinition(cwd, target, line - 1, column - 1, cfg.ledgerDir, BIFROST_DEFINITION_TIMEOUT_MS)
+          .catch((): Awaited<ReturnType<typeof bifrostDefinition>> => [])
+          .then(async (locs) => {
+            const out: Array<{ abs: string; path: string; line: number; endLine?: number; column?: number }> = [];
+            for (const loc of locs) {
+              const p = bifrostLocationPath(loc.uri);
+              if (!p) continue;
+              // Results arrive as file:// URIs chosen by the analyzer — clamp
+              // them exactly like /workspace/file requests, so an unexpected
+              // URI is refused rather than opened.
+              const clamped = await allowedPreviewPath(p, cwd);
+              if (!clamped) continue;
+              const hit: { abs: string; path: string; line: number; endLine?: number; column?: number } = {
+                abs: clamped, path: displayPath(cwd, clamped), line: loc.line + 1, column: loc.character + 1,
+              };
+              if (typeof loc.endLine === "number") hit.endLine = loc.endLine + 1;
+              out.push(hit);
+            }
+            sendJson(res, out, true);
+          });
       })
       .catch((e) => { res.writeHead(500); res.end(JSON.stringify({ error: String(e) })); });
     return;
