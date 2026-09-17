@@ -3,7 +3,7 @@ import { useStore, useIsOpenFile } from "../store/store.ts";
 import type { FilePreviewTarget, PreviewMode } from "../store/store.ts";
 import {
   getWorkspaceChanges, getWorkspaceOutputs, getFileDiff, getFilePreview, getHtmlRender,
-  getReviewDraft, rawFileUrl, saveFilePreview,
+  getReviewDraft, rawFileUrl, saveFilePreview, getWorkspaceDefinition, warmWorkspaceDefinition,
   type ChangesResult, type FileDiffResult, type FilePreviewResult,
   type Discussion, type HtmlRender, type OutputFolder, type ReviewComment, type RevSpec,
 } from "../lib/api.ts";
@@ -18,6 +18,7 @@ import { FileMenu, useRowMenu, type FileMenuTarget } from "./FileMenu.tsx";
 import { ResizeHandle } from "./ResizeHandle.tsx";
 import { makeAbsFile, makeRangeFile } from "../lib/mentions.ts";
 import { rangeFromOffsets, offsetsOfLines, sliceLines, formatRange, type LineRange } from "../lib/lineRange.ts";
+import { offsetToLineColumn, isDefinitionPath } from "../lib/definition.ts";
 import { copyText } from "../lib/clipboard.ts";
 import type { MessageFile } from "../types.ts";
 import type { AskFixRequest } from "../lib/reviewPrompt.ts";
@@ -708,6 +709,32 @@ export function FilePanel() {
   );
 }
 
+// The document position under a mouse click, as a 1-based line + column —
+// the point form of what selectedRange does for a selection. Null when the
+// click is outside the rendered code.
+function positionFromClick(code: HTMLElement, clientX: number, clientY: number) {
+  const doc = code.ownerDocument;
+  let range: Range | null = null;
+  try {
+    if (typeof doc.caretRangeFromPoint === "function") {
+      range = doc.caretRangeFromPoint(clientX, clientY);
+    } else {
+      const pos = (doc as Document & {
+        caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+      }).caretPositionFromPoint?.(clientX, clientY);
+      if (pos) {
+        range = doc.createRange();
+        range.setStart(pos.offsetNode, pos.offset);
+      }
+    }
+  } catch { range = null; }
+  if (!range || !code.contains(range.startContainer)) return null;
+  const before = doc.createRange();
+  before.selectNodeContents(code);
+  before.setEnd(range.startContainer, range.startOffset);
+  return offsetToLineColumn(code.textContent ?? "", before.toString().length);
+}
+
 // What is selected inside the rendered code, as whole lines. The offsets are
 // walked out of the DOM rather than taken from the fetched text: a highlighted
 // file is a tree of <span>s, and only a Range walk gives coordinates in the same
@@ -856,6 +883,49 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
     const text = codeRef.current?.textContent;
     if (!range || !text || !onAskFix) return;
     onAskFix(intent, range, sliceLines(text, range));
+  }
+
+  // A definition lookup is in flight (Cmd/Ctrl-click below).
+  const [jumping, setJumping] = useState(false);
+
+  // Warm the Java definition analyzer while the file is read, so the cold
+  // index is built by the time anything is clicked rather than inside the
+  // first click's 2 s budget.
+  useEffect(() => {
+    if (mode !== "file" || file?.kind !== "text" || edit !== null) return;
+    if (!isDefinitionPath(target.path)) return;
+    warmWorkspaceDefinition(fileCwd);
+  }, [mode, target.abs, target.path, edit, file?.kind, fileCwd]);
+
+  // Cmd/Ctrl-click a symbol to jump to its definition. A hit navigates through
+  // the same path a Trace card's reference does; a miss falls through to the
+  // Trace action the selection already offers, with the clicked line as its
+  // anchor. Plain clicks (and non-Java files) never reach the analyzer.
+  async function goToDefinition(e: React.MouseEvent) {
+    if (!e.metaKey && !e.ctrlKey) return;
+    if (mode !== "file" || file?.kind !== "text" || edit !== null) return;
+    if (!isDefinitionPath(target.path)) return;
+    const code = codeRef.current;
+    if (!code || jumping) return;
+    const pos = positionFromClick(code, e.clientX, e.clientY);
+    if (!pos) return;
+    e.preventDefault();
+    setJumping(true);
+    try {
+      const hits = await getWorkspaceDefinition(fileCwd, target.abs, pos.line, pos.column);
+      if (hits && hits.length > 0) {
+        const h = hits[0];
+        useStore.getState().openFilePreview({
+          abs: h.abs, path: h.path, mode: "file", cwd: target.cwd,
+          line: h.line, endLine: h.endLine,
+        });
+      } else if (onAskFix && code.textContent) {
+        onAskFix("trace", { start: pos.line, end: pos.line },
+          sliceLines(code.textContent, { start: pos.line, end: pos.line }));
+      }
+    } finally {
+      setJumping(false);
+    }
   }
 
   useEffect(() => {
@@ -1086,6 +1156,7 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
             {formatBytes(file.size)}{file.modifiedAt ? " · " + timeAgo(file.modifiedAt) : ""}
           </span>
         )}
+        {jumping && <span className="wf-meta">Looking up definition…</span>}
         <span className="sp" />
         {/* One bordered cluster rather than three loose glyphs: they are the
             file's actions, and grouped they also cost less width than spaced. */}
@@ -1257,7 +1328,7 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
             </div>
           )}
         </>)}
-        {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} codeRef={codeRef} />}
+        {!err && !loading && mode === "file" && file && <FileContents file={file} raw={raw} codeRef={codeRef} onCodeClick={goToDefinition} />}
         {!err && !loading && mode === "render" && file && (
           file.kind !== "text"
             ? <div className="wf-empty">Binary file — there's nothing to render. Switch to File to preview or download it.</div>
@@ -1392,11 +1463,12 @@ function DownloadButton({ raw, name, selfContained }: {
   );
 }
 
-function FileContents({ file, raw, codeRef }: {
+function FileContents({ file, raw, codeRef, onCodeClick }: {
   file: FilePreviewResult; raw: string;
   // The element a selection is measured against — held by FileView, which owns
   // the toolbar button that acts on it.
   codeRef: React.RefObject<HTMLElement>;
+  onCodeClick?: (e: React.MouseEvent) => void;
 }) {
   // Full size opens in an overlay rather than a new tab — see Lightbox, which
   // the markdown preview's own images share.
@@ -1427,9 +1499,12 @@ function FileContents({ file, raw, codeRef }: {
   // here (see its own cap), so a large file still falls back to this.
   const lang = highlightLanguageFor(file.path);
   const html = lang && file.text ? highlightBlock(file.text, lang) : null;
+  // onCodeClick is the Cmd/Ctrl-click definition jump — a plain click must
+  // keep selecting text, so the handler itself decides whether the modifiers
+  // (and the file type) qualify.
   return (
     <>
-      <pre className="wf-text">
+      <pre className="wf-text" onClick={onCodeClick}>
         {html != null
           ? <code ref={codeRef} className="wf-hl" dangerouslySetInnerHTML={{ __html: html }} />
           : <code ref={codeRef}>{file.text}</code>}
