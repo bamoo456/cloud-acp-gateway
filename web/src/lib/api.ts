@@ -625,6 +625,46 @@ export async function grepWorkspace(cwd: string, query: string): Promise<GrepRes
   };
 }
 
+// Go to definition (Bifrost Java analyzer). Null is the miss — disabled,
+// unavailable, timed out, or genuinely unresolvable — and the caller falls
+// through to the agent Trace. Never throws: a jump that fails is an ordinary
+// outcome, not an error to surface.
+export interface DefinitionHit {
+  abs: string; path: string; line?: number; endLine?: number; column?: number;
+}
+
+export async function getWorkspaceDefinition(
+  cwd: string, filePath: string, line: number, column: number,
+): Promise<DefinitionHit[] | null> {
+  const url = base() + "/workspace/definition?cwd=" + encodeURIComponent(cwd) +
+    "&path=" + encodeURIComponent(filePath) + "&line=" + line + "&column=" + column;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const body = await r.json() as Array<Partial<DefinitionHit>>;
+    if (!Array.isArray(body)) return null;
+    return body
+      .filter((h) => h && typeof h.abs === "string" && typeof h.path === "string")
+      .map((h) => ({
+        abs: h.abs as string, path: h.path as string,
+        ...(typeof h.line === "number" ? { line: h.line } : {}),
+        ...(typeof h.endLine === "number" ? { endLine: h.endLine } : {}),
+        ...(typeof h.column === "number" ? { column: h.column } : {}),
+      }));
+  } catch {
+    return null;
+  }
+}
+
+// Fire-and-forget: spawn the analyzer for this folder's repository so its cold
+// index builds while the file is read instead of on the first click.
+export function warmWorkspaceDefinition(cwd: string): void {
+  try {
+    void fetch(base() + "/workspace/definition?cwd=" + encodeURIComponent(cwd) + "&warm=1")
+      .then(() => undefined, () => undefined);
+  } catch { /* ignore */ }
+}
+
 // The <img> source for an image preview, and the href behind "Download" for
 // everything else. A URL rather than a fetch: the browser sends the console's
 // Basic credentials with a subresource load on the same origin, so an <img>
