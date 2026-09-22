@@ -164,7 +164,15 @@ export interface ChangedFile {
 // `repo: null` means the folder isn't a git checkout (or git isn't installed) —
 // `reason` distinguishes those so the panel can say which.
 export interface ChangesResult { repo: string | null; files: ChangedFile[]; truncated: boolean; reason?: string }
-export interface FileDiffResult { path: string; status: ChangeStatus; diff: string; binary: boolean; truncated: boolean }
+export interface FileDiffResult {
+  path: string; status: ChangeStatus; diff: string; binary: boolean; truncated: boolean;
+  // Identity of the bytes THIS response rendered, so a reviewer's "I read it"
+  // can later be compared against what the file says now. `hash` is absent
+  // exactly when the diff was not whole (binary, or past the server's cap),
+  // which is also the answer to "can this be marked reviewed".
+  hash?: string;
+  revision: string;
+}
 export interface FilePreviewResult {
   path: string; abs: string;
   kind: "text" | "image" | "binary";
@@ -220,6 +228,8 @@ export async function getFileDiff(cwd: string, filePath: string, spec?: RevSpec 
     diff: typeof r?.diff === "string" ? r.diff : "",
     binary: !!r?.binary,
     truncated: !!r?.truncated,
+    hash: typeof r?.hash === "string" ? r.hash : undefined,
+    revision: typeof r?.revision === "string" ? r.revision : "",
   };
 }
 
@@ -453,6 +463,118 @@ export async function saveReviewDraft(
   }
 }
 
+// ---- durable review state ----
+// Discussions, the files marked read, and the review identity they hang off.
+// Every shape here mirrors a gateway response verbatim (src/gateway.ts's
+// /workspace/review/* routes); nothing is derived on this side.
+
+// The agent + session that was open when a review first persisted something.
+// Recorded once, server-side, and never re-derived from whoever is active now.
+export interface ReviewCompanion { agentName: string; sessionId: string }
+
+export interface DiscussionReply { id: string; body: string; createdAt: string }
+
+export interface Discussion {
+  id: string;
+  // The anchor exactly as it read when written — never recomputed, so a
+  // discussion cannot be silently moved onto whatever now occupies that line.
+  path: string;
+  side: "new" | "old";
+  line: number;
+  endLine?: number;
+  code: string;
+  body: string;
+  // Which diff produced the anchor: the comparison, and its digest when it had
+  // one (see FileDiffResult).
+  revision: string;
+  diffHash?: string;
+  status: "open" | "resolved";
+  createdAt: string;
+  updatedAt: string;
+  replies: DiscussionReply[];
+}
+
+// A discussion from a sibling review of the same repository — another worktree,
+// or another comparison of this one. `live` is false once its worktree is gone:
+// the record still reads, but there is no code left to act on.
+export interface OtherDiscussion extends Discussion { worktree: string; scope: string; live: boolean }
+
+// `changed` is the server's comparison of the stored hash against the diff as it
+// stands now. `reason: "unhashable"` means the current diff has no digest at all
+// (binary, or truncated), so it is reported changed rather than assumed intact.
+export interface ReviewedFile {
+  path: string; hash: string; revision: string; reviewedAt: string;
+  changed: boolean; reason?: string;
+}
+
+export interface ReviewIdentity {
+  id: string; repositoryId: string; scope: string; worktree: string;
+  worktreeExists: boolean; companion: ReviewCompanion | null;
+}
+
+// `review: null` means nothing has been persisted for this (repo, worktree,
+// scope) yet — reading never creates the review, only a write does.
+export interface ReviewStateResult {
+  review: ReviewIdentity | null;
+  discussions: Discussion[];
+  others: OtherDiscussion[];
+  reviewed: ReviewedFile[];
+}
+
+export async function getReviewState(cwd: string, spec?: RevSpec | null): Promise<ReviewStateResult> {
+  const url = base() + "/workspace/review/state?cwd=" + encodeURIComponent(cwd) + revParam(spec);
+  const r = await readJson(await fetch(url), "Couldn't read this review's state.");
+  return {
+    review: r?.review ?? null,
+    discussions: Array.isArray(r?.discussions) ? r.discussions : [],
+    others: Array.isArray(r?.others) ? r.others : [],
+    reviewed: Array.isArray(r?.reviewed) ? r.reviewed : [],
+  };
+}
+
+export type DiscussionOp =
+  // The anchor and the diff identity are the ones that were RENDERED, passed
+  // through unchanged — the server stores what was on screen, never what it
+  // would read back off disk now.
+  | { op: "create"; anchor: Pick<Discussion, "path" | "side" | "line" | "endLine" | "code">;
+      body: string; revision: string; diffHash?: string; companion?: ReviewCompanion }
+  | { op: "reply"; id: string; body: string }
+  | { op: "resolve" | "reopen"; id: string };
+
+// `reason` is set when the gateway declined: "not-a-repo", or "worktree-gone"
+// for a create against a checkout that has since been deleted. Replies, resolve
+// and reopen are never declined for that — a record outlives its worktree.
+export async function postReviewDiscussion(
+  cwd: string, spec: RevSpec | null, op: DiscussionOp,
+): Promise<{ ok: boolean; reason?: string; discussion?: Discussion; reply?: DiscussionReply }> {
+  const url = base() + "/workspace/review/discussion?cwd=" + encodeURIComponent(cwd) + revParam(spec);
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(op) });
+    if (!r.ok) return { ok: false, reason: "failed" };
+    return await r.json();
+  } catch {
+    return { ok: false, reason: "failed" };
+  }
+}
+
+// Mark one file read, or unmark it. `hash`/`revision` come from the
+// FileDiffResult that rendered — captured, not re-fetched, so a checkout that
+// moved on while it was being read is never recorded as reviewed.
+// Never throws: failing to persist the mark is not a reason to lose the view.
+export async function setFileReviewed(
+  cwd: string, spec: RevSpec | null,
+  f: { path: string; hash?: string; revision?: string; reviewed: boolean; companion?: ReviewCompanion },
+): Promise<boolean> {
+  const url = base() + "/workspace/review/reviewed?cwd=" + encodeURIComponent(cwd) + revParam(spec);
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(f) });
+    if (!r.ok) return false;
+    return !!(await r.json())?.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function findWorkspaceFiles(cwd: string, query: string): Promise<FindResult> {
   const url = base() + "/workspace/find?cwd=" + encodeURIComponent(cwd) + "&q=" + encodeURIComponent(query);
   const r = await readJson(await fetch(url), "Couldn't search this folder.");
@@ -467,6 +589,21 @@ export async function findWorkspaceFiles(cwd: string, query: string): Promise<Fi
     pending: !!r?.pending,
     limited: !!r?.limited,
   };
+}
+
+// The file a path written in an answer names, or null when the gateway could
+// not settle on exactly one (see workspace.resolve). Null rather than a throw:
+// an unresolved reference is the ordinary outcome, not an error to surface.
+export async function resolveWorkspaceRef(cwd: string, filePath: string): Promise<{ abs: string; path: string } | null> {
+  const url = base() + "/workspace/resolve?cwd=" + encodeURIComponent(cwd) + "&path=" + encodeURIComponent(filePath);
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const body = await r.json() as { abs?: unknown; path?: unknown };
+    return typeof body?.abs === "string" ? { abs: body.abs, path: typeof body.path === "string" ? body.path : body.abs } : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function grepWorkspace(cwd: string, query: string): Promise<GrepResult> {

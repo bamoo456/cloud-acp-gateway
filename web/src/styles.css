@@ -957,6 +957,13 @@
     opacity: 1; color: var(--faint); background: var(--surface); border-radius: 8px; }
   .md-copy .i-check, .md-copy.copied .i-copy { display: none; }
   .md-copy.copied .i-check { display: block; }
+  /* A trace or guide card (Markdown.tsx) replaces the raw block inside the same
+     wrapper, so it inherits that wrapper's margin and has to leave the copy
+     button the same 46px the <pre> does — the title ellipsizes right there. */
+  .acp-block > .acp-result { margin: 0; }
+  .acp-block > .acp-result > summary { padding-right: 46px; }
+  .acp-result .acp-why { color: var(--muted); }
+  .acp-note { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
   .md code { font-family: var(--mono); font-size: var(--chat-code-size); }
   /* A 390px column fits about 30 monospace characters, so a code block that
      scrolls sideways shows a third of every line and no hint that the rest
@@ -969,6 +976,10 @@
   .md :not(pre) > code { background: var(--surface-2); padding: 1.5px 5px; border-radius: 6px; }
   .md ul, .md ol { margin: 8px 0; padding-left: 22px; }
   .md a { color: var(--accent); }
+  /* A code reference the gateway has placed (Markdown.tsx adds .resolved). A
+     bare .md-ref deliberately has no rule: unresolved, it is plain text. */
+  .md .md-ref.resolved { color: var(--accent); cursor: pointer; }
+  .md .md-ref.resolved:hover, .md .md-ref.resolved:focus-visible { text-decoration: underline; }
   .md h1,.md h2,.md h3 { margin: 14px 0 8px; line-height: 1.3; }
   .md table { border-collapse: collapse; margin: 10px 0; width: 100%; font-size: var(--chat-table-size); display: block; overflow-x: auto; }
   .md th, .md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
@@ -1864,10 +1875,12 @@
     flex: 0 0 auto; color: var(--muted);
     font-family: var(--mono); font-size: 11.5px;
   }
-  /* back + what you are looking at, for the two screens that take over the mode */
+  /* back + what you are looking at: the canvas's own header, and the draft
+     list's. As tall as the crumb above it, so the two read as one bar across
+     the three columns. */
   .rv-bar {
-    flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
-    padding: 2px 8px 8px; border-bottom: 1px solid var(--border);
+    flex: 0 0 auto; display: flex; align-items: center; gap: 6px; min-height: var(--crumb-h);
+    padding: 2px 8px; border-bottom: 1px solid var(--border);
   }
   .rv-bar .icon-btn svg { width: 18px; height: 18px; }
   .rv-title {
@@ -1918,6 +1931,60 @@
   .rv-cmt textarea:focus { outline: none; }
   .rv-acts { display: flex; align-items: center; gap: 6px; padding: 0 8px 8px; }
   .rv-acts .sp { flex: 1; }
+
+  /* The changed files, and what has been said about them. Sits above the list
+     rather than inside it: a discussion is cross-file, the tree is not. */
+  .rv-tabs {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 2px;
+    padding: 4px 8px; border-bottom: 1px solid var(--border);
+  }
+  .rv-tab {
+    display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px;
+    border-radius: 8px; color: var(--muted); font-size: 12.5px; font-weight: 700;
+  }
+  .rv-tab.on { color: var(--text); background: var(--surface-2); }
+  /* Open threads, not every thread: a resolved one is done. Its own class
+     rather than .rv-badge, which counts draft comments on a file's row. */
+  .rv-tab-n {
+    min-width: 16px; padding: 0 5px; border-radius: 999px; text-align: center;
+    background: var(--accent); color: var(--accent-text);
+    font-size: 10px; font-weight: 800; line-height: 16px;
+  }
+
+  /* A durable discussion, collapsed to its anchor. The diamond is the marker
+     the diff shows; the disclosure triangle is hidden because the row IS the
+     control. */
+  .rv-cmt.discussion { border-style: dashed; }
+  .rv-cmt.discussion > summary { cursor: pointer; list-style: none; }
+  .rv-cmt.discussion > summary::-webkit-details-marker { display: none; }
+  .rv-cmt.discussion > summary:hover { color: var(--text); }
+  .rv-diamond { margin-right: 5px; color: var(--accent); }
+  /* Resolved is quieter, not struck through: the thread is still the record. */
+  .rv-cmt.discussion.resolved { opacity: .65; }
+  .rv-cmt.discussion.resolved .rv-diamond { color: var(--muted); }
+  .rv-open {
+    padding: 0; text-decoration: underline dotted; text-underline-offset: 2px;
+  }
+  .rv-open:hover { color: var(--text); }
+  .rv-cmt.discussion .rv-quote { padding: 6px 10px 0; }
+  /* A reply, indented off the opening body so the thread reads as a thread. */
+  .rv-reply { padding-left: 20px; border-left: 2px solid var(--border); margin-left: 10px; }
+  .rv-gone { color: var(--muted); font-size: 12.5px; }
+  /* Discussions whose line the diff no longer has, at the end of the file. */
+  .rv-stale { padding-bottom: 10px; }
+  .rv-other { color: var(--muted); font-style: italic; }
+
+  /* Read, on the file's row. Muted rather than green: green means a diff `+`,
+     and a column of green ticks buries the files nobody has opened. The changed
+     mark wears the accent instead — that row is work again, not a finished one. */
+  .wf-reviewed { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+  .wf-reviewed.changed { color: var(--accent); }
+  /* And on the file itself, above its diff. */
+  .rv-changed {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    background: var(--surface-2); font-size: 12.5px;
+  }
 
   /* The mode's own footer. Present only once there is a checkout to review, so
      the mode has no chrome at all before then. */
@@ -2049,6 +2116,9 @@
   /* Except when it is carrying a range: the chip is the point of that state, so
      the button grows for it rather than clipping it. */
   .wf-acts .wf-add { width: auto; min-width: 30px; padding: 0 7px; gap: 4px; }
+  /* Ask / Fix are words, not glyphs, so they set their own type. */
+  .wf-acts .wf-ask { font-size: 12px; font-weight: 700; color: var(--muted); }
+  .wf-acts .wf-ask:not(:disabled):hover { color: var(--text); }
 
   /* ---- editing one file ----
      The textarea takes the body's place, so it inherits the body's job of being
@@ -2119,6 +2189,10 @@
      search and a conversation search open at once don't erase each other. */
   ::highlight(th-find) { background-color: var(--hit-bg, rgba(255, 214, 0, 0.35)); }
   ::highlight(th-find-current) { background-color: var(--accent); color: var(--accent-text); }
+  /* The line(s) a code reference landed on (FileView paints the one range as
+     the current hit). Accent-tinted rather than the find yellow, so a search
+     open at the same time reads as a different thing. */
+  ::highlight(wf-line-current) { background-color: color-mix(in srgb, var(--accent) 22%, transparent); }
   .wf-dl { width: 34px; height: 34px; }
   .wf-dl svg { width: 18px; height: 18px; }
   /* "add the selected lines to the chat". Dim until there is a selection, then
@@ -2200,6 +2274,17 @@
   /* A diagram that wouldn't parse keeps its source, and says why underneath. */
   .md pre.md-mermaid-failed { margin-bottom: 4px; }
   .md-mermaid-error { margin: 0 0 .9em; color: var(--err); font-size: 12.5px; }
+  /* A node the diagram's metadata placed in the checkout (Markdown.tsx). The
+     node keeps the colours the diagram drew it with — a recoloured box would be
+     a fifth meaning for the palette — so the pointer and the focus ring are the
+     whole affordance, and a node nobody could place has neither. */
+  .acp-node.resolved { cursor: pointer; }
+  .acp-node.resolved:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Every mapping the diagram came with, under the figure: matching a node to a
+     drawn shape is best-effort, and this list is the part that always opens. */
+  .md-mermaid:has(+ .acp-node-list) { margin-bottom: 2px; }
+  .acp-node-list { display: grid; gap: 2px; margin: 0 0 .9em; font-size: 12.5px; }
+  .acp-node-list .loc { color: var(--muted); }
   /* Full-size viewing stays inside the app (see FileContents): the native
      client hosts this console in a webview where a new tab has nowhere to go. */
   .wf-lightbox {
@@ -2346,6 +2431,68 @@
     .wf-resize:hover, .wf-resize:focus-visible { background: var(--accent); opacity: .5; outline: none; }
     /* body.resizing lives in the 860px block with the sidebar handle — the
        earliest breakpoint at which anything is draggable. */
+  }
+
+  /* ---- review workspace ----
+     The same .app-row, re-dealt: changed files on the left, one code canvas in
+     the middle, and `.content` — the whole conversation, the same element the
+     Agent workspace uses — folded into a companion column on the right. The
+     two side columns borrow #panel's and #files's widths rather than bringing
+     their own, and below 1100px they borrow the whole floating-card recipe:
+     three columns need more room than the 860px sidebar breakpoint promises,
+     so under it the canvas has the row and these overlay it one at a time. */
+  /* Two crumb heights down, where #panel and #files use one: those slide out
+     from under the top bar, and these have the canvas header under it as well.
+     A card over that header would cover the buttons that close it. */
+  .rv-left, .content.comp {
+    position: absolute; top: calc(var(--crumb-h) * 2 + env(safe-area-inset-top) + 6px); left: 8px; right: 8px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow); z-index: 25;
+    transform-origin: top center; display: none; flex-direction: column;
+    max-height: calc(100vh - var(--crumb-h) * 2 - env(safe-area-inset-top) - 14px);
+  }
+  /* No `overflow: hidden` with the rest of the recipe: the engine dock's menu
+     is absolutely positioned and opens upward out of .dock, so clipping the
+     companion to its own box would cut it off. */
+  .rv-left { max-width: 460px; }
+  .content.comp { max-width: 560px; margin-left: auto; }
+  @supports (height: 100dvh) {
+    .rv-left, .content.comp { max-height: calc(100dvh - var(--crumb-h) * 2 - env(safe-area-inset-top) - 14px); }
+  }
+  .rv-left.open, .content.comp.open { display: flex; animation: pop .14s ease-out; }
+  /* The companion's own header, and the two canvas-header buttons that raise
+     the sheets: each belongs to one side of the 1100px gate and is off on the
+     other, so neither offers to reveal a column already on screen. */
+  .comp-h { display: none; }
+  /* The canvas is the one surface that is never a sheet — it is what the sheets
+     overlay — so it takes the row at every width. */
+  .canvas { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; }
+  @media (max-width: 859px) {
+    .rv-left.open, .content.comp.open {
+      top: calc(var(--crumb-h) * 2 + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0;
+      max-width: none; max-height: none; margin: 0;
+      border: none; border-radius: 0; box-shadow: none; animation: none;
+    }
+  }
+  @media (min-width: 1100px) {
+    .rv-left {
+      position: relative; display: flex; flex: 0 0 auto; width: 284px; max-width: 284px;
+      height: 100%; max-height: none; inset: auto; margin: 0;
+      border: none; border-right: 1px solid var(--border); border-radius: 0;
+      box-shadow: none; animation: none;
+    }
+    .content.comp {
+      position: relative; display: flex; flex: 0 0 auto; width: min(440px, 34vw); max-width: 440px;
+      height: 100%; max-height: none; inset: auto; margin: 0;
+      border: none; border-left: 1px solid var(--border); border-radius: 0;
+      box-shadow: none; animation: none;
+    }
+    /* Folded away rather than unmounted — the same trick #panel.collapsed
+       plays, and what keeps the draft and the thread's scroll alive while the
+       canvas has the width. */
+    .content.comp.collapsed { display: none; }
+    .comp-h { display: flex; }
+    .rv-sheet { display: none; }
   }
 
   /* ---- 16px floor for anything a phone can focus ----
