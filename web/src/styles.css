@@ -60,6 +60,15 @@
     --radius: 16px;
     /* The crumb's height, read back by every sheet that hangs below it. */
     --crumb-h: 38px;
+    /* The chat column. Fixed at 760px it spent ~45% of a 1920px screen on
+       margin, with a text pane next to it doing the same — so it grew. The cap
+       that mattered was never the column's, it was a paragraph's, and that one
+       moves to --prose below: code, diffs and tables take the whole column. */
+    --col: 1040px;
+    /* The measure the old 760px column gave its prose (728px of text at the
+       default 17px) — em so the text-size setting and a phone's different face
+       keep the same line length rather than a fixed width. */
+    --prose: 43em;
     /* The fenced code block in the composer is *inverted* from the page so it
        stands out in both themes (dark on light, light on dark — the Claude
        composer look). It reuses --text/--bg so it follows every theme/skin
@@ -755,7 +764,7 @@
 
   /* ---- conversation ---- */
   main { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
-  .thread { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; padding: 18px 16px 8px; }
+  .thread { width: min(var(--col), 100%); max-width: var(--col); min-width: 0; margin: 0 auto; padding: 18px 16px 8px; }
   /* 16px a side plus a card's own 13px leaves 330 of 390 for content — six
      characters of every monospace line spent on margin. A phone gets 10. */
   @media (max-width: 640px) { .thread { padding: 18px 10px 8px; } }
@@ -795,7 +804,7 @@
   .empty p { margin: 0; color: var(--muted); font-size: 16px; }
 
   .notice {
-    max-width: 760px; margin: 8px auto 0; background: var(--surface); border: 1px solid var(--border);
+    max-width: var(--col); margin: 8px auto 0; background: var(--surface); border: 1px solid var(--border);
     border-radius: 14px; box-shadow: var(--shadow); overflow: hidden;
   }
   .notice .nhead { display: flex; align-items: center; gap: 10px; padding: 13px 14px; font-weight: 600; }
@@ -923,6 +932,10 @@
   @media (hover: none) { .msg-copy { opacity: .8; } }
 
   .md { min-width: 0; max-width: 100%; word-wrap: break-word; overflow-wrap: break-word; }
+  /* What the column gained in width goes to what wants it — <pre>, .diff,
+     tables, images — and stops at prose. This is the only place the old fixed
+     760px was load-bearing, so it is the only thing that keeps its cap. */
+  .md :is(p, ul, ol, blockquote) { max-width: var(--prose); }
   .md p { margin: 0 0 10px; } .md p:last-child { margin-bottom: 0; }
   /* A picture in a document, at whatever room the column has. Clicking it opens
      it full size (see Lightbox) — which is the only way to read a 2000px wide
@@ -1080,10 +1093,10 @@
      between the thread and the composer, so it never competes with the session
      title in the crumb and never moves as the textarea grows. Costs 28px. */
   /* Same column as the composer, so the chip's right edge lines up with the
-     input's rather than running out to the pane's edge: 760px of content plus
+     input's rather than running out to the pane's edge: --col of content plus
      the 12px gutters footer pads with, box-sizing being border-box here. */
   .dock { position: relative; flex: 0 0 auto; display: flex; align-items: center;
-    width: min(784px, 100%); margin: 0 auto; padding: 7px 12px; }
+    width: min(calc(var(--col) + 24px), 100%); margin: 0 auto; padding: 7px 12px; }
   /* 8px, not 0: at 390px the two chips shrink together and a spacer that gives
      up its last pixel leaves them border to border, reading as one broken box. */
   .dock .sp { flex: 1; min-width: 8px; }
@@ -1134,7 +1147,7 @@
   /* ---- composer ---- */
   footer { flex: 0 0 auto; padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
     background: linear-gradient(to top, var(--bg) 70%, transparent); }
-  .tipbar { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto 8px; display: flex; align-items: center; gap: 8px;
+  .tipbar { width: min(var(--col), 100%); max-width: var(--col); min-width: 0; margin: 0 auto 8px; display: flex; align-items: center; gap: 8px;
     color: var(--muted); font-size: 13px; }
   .tipbar svg { width: 16px; height: 16px; }
   .tipbar .x { margin-left: 4px; }
@@ -1143,7 +1156,7 @@
   /* The composer is one of the few things that keeps a frame (§1.3), but the
      frame is a hairline, not an identity-coloured ring — it brightens on focus
      instead of announcing which agent is answering. */
-  .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface-2);
+  .composer { width: min(var(--col), 100%); max-width: var(--col); min-width: 0; margin: 0 auto; background: var(--surface-2);
     border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 6px 6px 10px; }
   .composer:focus-within { border-color: var(--muted); }
   /* "!" shell escape: the box stops being a message and says so — accent
@@ -1265,8 +1278,8 @@
      for it to end. A dashed line runs down into the composer with one hollow node
      per waiting message — the shape says both "not sent yet" and "these go out of
      that box, in this order", which a chip strip cannot. Aligned to the composer's
-     own 760px column, like .tipbar above. */
-  .queue-rail { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto 8px; padding-left: 22px; position: relative; }
+     own --col column, like .tipbar above. */
+  .queue-rail { width: min(var(--col), 100%); max-width: var(--col); min-width: 0; margin: 0 auto 8px; padding-left: 22px; position: relative; }
   .queue-rail::before { content: ""; position: absolute; left: 6px; top: 6px; bottom: -8px;
     border-left: 1px dashed var(--pending); }
   .queue-item { position: relative; margin: 0 0 10px; }
@@ -1300,7 +1313,7 @@
   .msg-image img { display: block; max-width: 100%; height: auto; }
 
   /* slash command menu */
-  .cmds { max-width: 760px; margin: 0 auto 6px; background: var(--surface); border: 1px solid var(--border);
+  .cmds { max-width: var(--col); margin: 0 auto 6px; background: var(--surface); border: 1px solid var(--border);
     border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; display: none; max-height: 240px; overflow-y: auto; }
   .cmds.open { display: block; }
   .cmds button { display: flex; gap: 10px; width: 100%; text-align: left; padding: 10px 13px;
@@ -2516,7 +2529,7 @@
   }
 
   /* The branch's own composer (footer, in BranchWindow.tsx) — anchored inside
-     a ~380px card rather than centred at 760px like the main one, so it only
+     a ~380px card rather than centred at --col like the main one, so it only
      needs less padding and a shorter growth cap, not a different look. */
   .composer.compact { padding: 5px 5px 5px 8px; }
   .composer.compact .cm-scroller { max-height: 110px; }
