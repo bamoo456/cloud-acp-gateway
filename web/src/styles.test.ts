@@ -42,13 +42,28 @@ describe("global styles", () => {
   });
 
   test("chat content cannot widen the mobile viewport", () => {
-    expect(cssRule(".thread")).toMatch(/width\s*:\s*min\(760px,\s*100%\)/);
+    expect(cssRule(".thread")).toMatch(/width\s*:\s*min\(var\(--col\),\s*100%\)/);
     expect(cssRule(".thread")).toMatch(/min-width\s*:\s*0/);
     expect(cssRule(".turn.user .body")).toMatch(/overflow-wrap\s*:\s*anywhere/);
     expect(cssRule(".turn")).toMatch(/max-width\s*:\s*100%/);
     expect(cssRule(".tool")).toMatch(/max-width\s*:\s*100%/);
     expect(cssRule(".diff")).toMatch(/max-width\s*:\s*100%/);
     expect(cssRule(".diff .path")).toMatch(/text-overflow\s*:\s*ellipsis/);
+  });
+
+  test("the column fills a window wider than --col, and prose keeps its measure", () => {
+    // The column used to be pinned at 760px, which left ~45% of a 1920px
+    // screen as margin. Every row of the chat (thread, composer, its dock,
+    // queue, tipbar, cmds, notices) has to share the one token, or the edges
+    // stop lining up; what stays capped is the prose inside it.
+    for (const sel of [".thread", ".composer", ".tipbar", ".queue-rail", ".dock"]) {
+      expect(cssRule(sel)).toMatch(/var\(--col\)/);
+    }
+    expect(cssRule(".notice")).toMatch(/max-width\s*:\s*var\(--col\)/);
+    expect(cssRule(".cmds")).toMatch(/max-width\s*:\s*var\(--col\)/);
+    expect(cssRule(".md :is(p, ul, ol, blockquote)")).toMatch(/max-width\s*:\s*var\(--prose\)/);
+    // and the cap must be the text's own size, not a fixed px width
+    expect(styles).toMatch(/--prose\s*:\s*[\d.]+em/);
   });
 
   test("the crumb gives width to the path, and cuts the parents first", () => {
