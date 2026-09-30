@@ -34,6 +34,27 @@ export function rangeFromOffsets(text: string, from: number, to: number): LineRa
   return { start, end: Math.max(start, lineAt(text, last)) };
 }
 
+// The inverse of rangeFromOffsets: where `range` sits in `text`, as [from, to)
+// offsets. Null when the range starts past the last line — a line number for
+// text the viewer does not have (a truncated preview, a file that shrank) must
+// not land on some other line and look like it was found.
+export function offsetsOfLines(text: string, range: LineRange): [number, number] | null {
+  let from = 0;
+  for (let n = 1; n < range.start; n++) {
+    const nl = text.indexOf("\n", from);
+    if (nl < 0) return null;
+    from = nl + 1;
+  }
+  if (from >= text.length) return null;
+  let to = from;
+  for (let n = range.start; n <= range.end; n++) {
+    const nl = text.indexOf("\n", to);
+    if (nl < 0) { to = text.length; break; }
+    to = nl + 1;
+  }
+  return [from, to];
+}
+
 export function sliceLines(text: string, range: LineRange): string {
   return text.split("\n").slice(range.start - 1, range.end).join("\n");
 }

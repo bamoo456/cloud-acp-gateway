@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "vitest";
-import { mermaidBlocks, themeVariables, renderMermaid } from "./mermaid.ts";
+import { flowchartNodes, mermaidBlocks, themeVariables, renderMermaid } from "./mermaid.ts";
 import { renderMarkdown } from "./markdown.ts";
 
 const container = (markdown: string) => {
@@ -69,6 +69,25 @@ describe("mermaid diagrams in markdown", () => {
     // mermaid parents its own error drawing to <body> and only cleans up after a
     // success: nothing of ours may be left outside the container.
     expect([...document.body.children].filter((c) => c !== el)).toEqual([]);
+  });
+
+  // The node mapping in Markdown.tsx rests on getData() naming a node with the
+  // id the renderer will draw it under. Laying a diagram out needs getBBox, but
+  // PARSING one does not — so the half of that contract mermaid owns is
+  // checkable here, against the real library rather than a stand-in.
+  test("a flowchart's nodes come back under the ids the renderer will draw them with", async () => {
+    // getDiagramFromText only matches the diagram types initialize registered,
+    // which in the app renderMermaid has already done.
+    const { default: mermaid } = await import("mermaid");
+    mermaid.initialize({ startOnLoad: false });
+
+    const nodes = await flowchartNodes("flowchart TD\n  A[Start] --> B[End]");
+    expect(nodes?.map((n) => n.id)).toEqual(["A", "B"]);
+    expect(nodes?.[0].domId).toMatch(/^flowchart-A-\d+$/);
+    // Only a flowchart offers a node list; every other diagram stays unmapped,
+    // and so does a source that will not parse.
+    expect(await flowchartNodes("sequenceDiagram\n  A->>B: hi")).toBeNull();
+    expect(await flowchartNodes("not a diagram at all {{{")).toBeNull();
   });
 
   test("a container with no diagram never loads mermaid", async () => {

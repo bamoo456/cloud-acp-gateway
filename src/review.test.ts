@@ -4,9 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  readDraft, readDrafts, writeDraft, parseComments, reviewScopeKey,
+  readDrafts, writeDraft, parseComments, reviewScopeKey,
   REVIEW_DIR, MAX_COMMENTS, MAX_COMMENT_BYTES, DRAFT_TTL_MS,
 } from "./review.ts";
+
+const readDraft = (repo: string, scope: string) => readDrafts(repo)[scope]?.comments ?? [];
 
 function tmpRepo(): string {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-rv-")));

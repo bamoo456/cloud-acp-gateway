@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, postAttention, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, postAttention, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem, type RevSpec } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
@@ -13,6 +13,10 @@ import { isDesktopSidebarWidth } from "../lib/sidebarWidth.ts";
 import { execCommand, shellContext, shellNote } from "../lib/terminal.ts";
 import { buildHandoffMessage } from "../lib/handoffPrompt.ts";
 import {
+  buildAskFixMessage, buildDiagramMessage, buildGuideMessage,
+  type AskFixRequest, type GuideRequest,
+} from "../lib/reviewPrompt.ts";
+import {
   makeSession, applyUpdate, addUserBubble, applyModelsModes, applyHistoryMessages, remapSession, setTitle, evictExcess,
   EMPTY_ENGINE,
 } from "./reducers.ts";
@@ -22,6 +26,13 @@ import type {
   SlashCommand, AgentRef, AgentGlyph,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
+
+// Every review request that goes to an agent: one anchored to a selection
+// (Ask/Fix/Trace) or one about the whole change (Review guide, Diagram).
+export type DispatchRequest = AskFixRequest | GuideRequest;
+// What became of it. `false` is a refusal the caller must recover from — it
+// still holds the only copy of what the reviewer typed.
+export type DispatchResult = "sent" | "queued" | false;
 
 type ConnState = "connecting" | "connected" | "offline";
 export type TextSize = "small" | "default" | "large" | "xl";
@@ -39,7 +50,26 @@ export type PreviewMode = "diff" | "file" | "render";
 // conversation's own: /workspace/* resolves a path against the cwd it is sent,
 // so a file browsed in another project must carry that project's root or the
 // gateway refuses to read it.
-export interface FilePreviewTarget { abs: string; path: string; mode: PreviewMode; cwd?: string }
+// `line`/`endLine` is where in the file to land: the viewer scrolls there and
+// marks it once the content has loaded. Every open replaces this object, so an
+// effect keyed on it re-fires for the same file at a new line.
+export interface FilePreviewTarget {
+  abs: string; path: string; mode: PreviewMode; cwd?: string; line?: number; endLine?: number;
+}
+
+// One location of the Review canvas. A file alone doesn't identify it: the same
+// path reads differently against the working tree and against a commit, and
+// Back is only honest if it returns to the scroll offset it was left at.
+// `spec` absent and `spec: null` are the same revision but not the same
+// location: null is "the working tree, and I said so" (a changed-file row),
+// absent is "whatever is being reviewed" (a CodeRef, which names a line in the
+// file on disk). Only the first re-selects a scope on Back/Forward.
+export interface ReviewLoc extends FilePreviewTarget { spec?: RevSpec | null; scrollTop?: number }
+
+export type Workspace = "agent" | "review";
+// Which of the two side columns is overlaying the canvas below 1100px, where
+// there is only room for one at a time. The enum IS the exclusivity rule.
+export type ReviewSheet = "none" | "files" | "companion";
 
 // One floating conversation window (see State's `sideWindows`).
 // `slot` is which default corner offset the card is born at, so several open at
@@ -229,6 +259,22 @@ interface State {
   sidebarOpen: boolean;
   // Which file the preview pane is showing; null means the file list.
   filePreview: FilePreviewTarget | null;
+  // ---- review workspace ----
+  // Which workspace the window is in. Review replaces the chat/file-panel
+  // layout rather than growing inside it, so it is one flag, not a panel mode.
+  workspace: Workspace;
+  // The canvas's own preview slot. Separate from `filePreview` so that opening
+  // a file in either workspace leaves the other one's reading position alone.
+  reviewPreview: ReviewLoc | null;
+  // Canvas Back/Forward. `past` is where you came from, newest last.
+  reviewHistory: { past: ReviewLoc[]; future: ReviewLoc[] };
+  // Whether the companion column is folded away and the canvas has its width.
+  companionCollapsed: boolean;
+  reviewSheet: ReviewSheet;
+  // The Ask/Fix the composer is about to send (its context chip), captured
+  // when the button was pressed. Set from the file panel and Review, which is
+  // why it is not the composer's own state.
+  askFix: AskFixRequest | null;
   // Files staged on the composer, waiting to be sent with the next message —
   // the chips above the input. In the store for the same reason the preview
   // panel is: they are added from the file panel as well as from the composer's
@@ -353,8 +399,29 @@ interface State {
   toggleSidebar: () => void;
   // Opens the panel *and* the file — the one entry point for "show me this
   // file", wherever the path was clicked.
-  openFilePreview: (file: { abs: string; path?: string; mode?: PreviewMode; cwd?: string }) => void;
+  openFilePreview: (file: {
+    abs: string; path?: string; mode?: PreviewMode; cwd?: string; line?: number; endLine?: number;
+    spec?: RevSpec | null;
+  }) => void;
   clearFilePreview: () => void;
+  // The Review slot's own. A workspace clears the location it owns and no
+  // other: the two slots exist precisely so one can't close the other's file.
+  clearReviewPreview: () => void;
+  setWorkspace: (ws: Workspace) => void;
+  // Called by the canvas as it leaves a location, with the scroll offset read
+  // off the body — the store cannot measure that for itself.
+  pushReviewHistory: (loc: ReviewLoc) => void;
+  clearReviewHistory: () => void;
+  reviewBack: (current: ReviewLoc | null) => void;
+  reviewForward: (current: ReviewLoc | null) => void;
+  toggleCompanion: () => void;
+  toggleReviewSheet: (which: ReviewSheet) => void;
+  setAskFix: (req: AskFixRequest | null) => void;
+  // Send a captured review request to the conversation it names. Lives here and
+  // not in the composer because Trace, Review guide and Diagram have no draft to
+  // ride on, and a second copy of the queue/refusal rules is how the two
+  // routes end up disagreeing about where a request went.
+  dispatchAskFix: (req: DispatchRequest, body: string, images?: MessageImage[], files?: MessageFile[]) => Promise<DispatchResult>;
   attachFiles: (files: MessageFile[]) => void;
   removeAttachedFile: (index: number) => void;
   clearAttachedFiles: () => void;
@@ -458,6 +525,10 @@ function activeAgentColor(state: SkinState): string {
 
 let acp: Acp = undefined as unknown as Acp;
 let sessionInit: Promise<unknown> | null = null;
+
+// What `sidebarOpen` was before Review took the column's width, so leaving can
+// put it back. Nothing renders it, so it is a closure variable, not a field.
+let sidebarBeforeReview = false;
 let creatingSession = false; // a "+" / New chat round-trip is in flight — ignore repeat clicks
 let pendingResyncId: string | null = null;
 // Command lists that named a session before this tab had it, keyed by that
@@ -842,7 +913,7 @@ export const useStore = create<State>((set, get) => {
     acp?.close();
     set({
       agentReady: false, tip: "Reconnecting…",
-      sessions: {}, activeId: null, sideWindows: [],
+      sessions: {}, activeId: null, sideWindows: [], askFix: null,
       // rateLimits is deliberately untouched: it's polled per account,
       // independent of this connection, and a restart shouldn't blank it.
       promptCapabilities: {}, pendingPermissions: [],
@@ -1369,7 +1440,7 @@ export const useStore = create<State>((set, get) => {
       conn: "connecting", agentReady: false, tip,
       // rateLimits carries over: it's keyed by account and polled independent
       // of which agent is active, so a different provider's quota is still valid.
-      sessions: {}, activeId: null,
+      sessions: {}, activeId: null, askFix: null,
       promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
@@ -1558,6 +1629,12 @@ export const useStore = create<State>((set, get) => {
     // Same shape for the left column, at its own (860px) breakpoint.
     sidebarOpen: isDesktopSidebarWidth(),
     filePreview: null,
+    workspace: "agent",
+    reviewPreview: null,
+    reviewHistory: { past: [], future: [] },
+    companionCollapsed: false,
+    reviewSheet: "none",
+    askFix: null,
     attachedFiles: [],
 
     bootstrap() {
@@ -2165,6 +2242,11 @@ export const useStore = create<State>((set, get) => {
       // shows a waiting strip instead of a composer; this is the belt to that
       // braces, for any other caller.
       if (!target || target.viewOnly || sessionId.startsWith("pending-") || !get().agentReady) return false;
+      // The connection belongs to get().agentName; a session another agent owns
+      // (kept across setAgent) would be prompted on a socket that has never
+      // heard of it, and the error would land as a note in that off-screen
+      // conversation while this resolved true.
+      if (target.agentName && target.agentName !== get().agentName) return false;
       if (get().busySessionIds[sessionId]) return false;
       const imgs = get().promptCapabilities.image ? (images || []) : [];
       const refs = get().promptCapabilities.embeddedContext ? (files || []) : [];
@@ -2614,16 +2696,107 @@ export const useStore = create<State>((set, get) => {
 
     openFilePreview(file) {
       if (!file.abs) return;
-      set({
-        filesOpen: true,
-        filePreview: {
-          abs: file.abs, path: file.path || basename(file.abs), mode: file.mode ?? "diff", cwd: file.cwd,
-        },
-      });
+      const target: FilePreviewTarget = {
+        abs: file.abs, path: file.path || basename(file.abs), mode: file.mode ?? "diff", cwd: file.cwd,
+        line: file.line, endLine: file.endLine,
+      };
+      // In Review the canvas IS the viewer, so a file opened there must land on
+      // it and nowhere else — opening the file panel behind it would show the
+      // same file twice and overwrite the Agent workspace's own position.
+      // Navigating also reveals the canvas: below 1100px a side column overlays
+      // it, and a CodeRef that opened a file behind the sheet covering it has
+      // navigated nowhere the reader can see.
+      if (get().workspace === "review") set({ reviewPreview: { ...target, spec: file.spec }, reviewSheet: "none" });
+      else set({ filesOpen: true, filePreview: target });
     },
 
     clearFilePreview() {
       set({ filePreview: null });
+    },
+
+    clearReviewPreview() {
+      set({ reviewPreview: null });
+    },
+
+    setWorkspace(ws) {
+      const st = get();
+      if (st.workspace === ws) return; // re-entering Review must not remember its own collapse
+      if (ws === "review") {
+        sidebarBeforeReview = st.sidebarOpen;
+        // Review's three columns need the width. The sessions button still
+        // works in here; leaving is what puts the column back as it was.
+        set({ workspace: ws, sidebarOpen: false });
+      } else {
+        set({ workspace: ws, sidebarOpen: sidebarBeforeReview });
+      }
+    },
+
+    pushReviewHistory(loc) {
+      set((st) => ({ reviewHistory: { past: [...st.reviewHistory.past, loc], future: [] } }));
+    },
+
+    clearReviewHistory() {
+      set({ reviewHistory: { past: [], future: [] } });
+    },
+
+    // Retracing reveals the canvas for the same reason opening a file does: the
+    // header these buttons live in stays clear of the sheet, so Back under an
+    // open sheet would move the reader somewhere they cannot see.
+    reviewBack(current) {
+      const { past, future } = get().reviewHistory;
+      const prev = past[past.length - 1];
+      if (!prev) return;
+      set({
+        reviewPreview: prev, reviewSheet: "none",
+        reviewHistory: { past: past.slice(0, -1), future: current ? [current, ...future] : future },
+      });
+    },
+
+    reviewForward(current) {
+      const { past, future } = get().reviewHistory;
+      const next = future[0];
+      if (!next) return;
+      set({
+        reviewPreview: next, reviewSheet: "none",
+        reviewHistory: { past: current ? [...past, current] : past, future: future.slice(1) },
+      });
+    },
+
+    toggleCompanion() {
+      set((st) => ({ companionCollapsed: !st.companionCollapsed }));
+    },
+
+    toggleReviewSheet(which) {
+      set((st) => ({ reviewSheet: st.reviewSheet === which ? "none" : which }));
+    },
+
+    setAskFix(req) {
+      set({ askFix: req });
+    },
+
+    async dispatchAskFix(req, body, images, files) {
+      const text = "kind" in req
+        ? (req.kind === "guide" ? buildGuideMessage(req) : buildDiagramMessage(req, req.kind))
+        : buildAskFixMessage(req, body);
+      const where = () => get().sessions[req.sessionId]?.title || "another conversation";
+      // Busy is read against the CAPTURED conversation, not the one on screen:
+      // the request goes where it was taken from, whatever is being looked at
+      // by the time it is sent.
+      if (get().busySessionIds[req.sessionId]) {
+        get().queuePrompt(req.sessionId, { text, images, files });
+        // The composer's rail shows the on-screen conversation's queue; one that
+        // went elsewhere has to say where, or nothing visibly moves.
+        if (req.sessionId !== get().activeId) {
+          get().setTip("Queued for " + where() + " — sends after its current work finishes.");
+        }
+        return "queued";
+      }
+      const sent = await get().sendPromptTo(req.sessionId, text, images, files);
+      if (sent) return "sent";
+      // sendPromptTo's false is the refusal sendPrompt swallows. A silent bounce
+      // looks like a send that lost the message on the way.
+      get().setTip("Couldn't send to " + where() + " — that conversation isn't available right now.");
+      return false;
     },
 
     // De-duplicated on the URI, which carries the line range: two ranges of one
@@ -2676,6 +2849,15 @@ useStore.subscribe((state, prev) => {
   const fullUrl = new URL(shareUrl(id, session?.cwd || state.cwd, state.agentName));
   const url = fullUrl.pathname + fullUrl.search + fullUrl.hash;
   if (location.pathname + location.search + location.hash !== url) history.replaceState(null, "", url);
+});
+
+// A review location names a path in a checkout, so neither the canvas's file
+// nor its Back/Forward stacks survive a folder change. Here rather than inside
+// setCwd() because five paths assign `cwd` — restoring a session's own folder
+// and opening a deep link among them.
+useStore.subscribe((state, prev) => {
+  if (state.cwd === prev.cwd) return;
+  useStore.setState({ reviewPreview: null, reviewHistory: { past: [], future: [] } });
 });
 
 applyAgentSkin(activeAgentSkin(useStore.getState()));

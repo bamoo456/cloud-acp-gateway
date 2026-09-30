@@ -73,6 +73,27 @@ const NESTED = path.join(TREE, "nested");
 fs.mkdirSync(NESTED, { recursive: true });
 execFileSync("git", ["init", "-q", "-b", "main"], { cwd: NESTED, stdio: "pipe" });
 
+// A checkout for /workspace/resolve, laid out so every way a relative path can
+// be read has a witness: `src/store.ts` exists both under `web/` and at the
+// root, `app.ts` is a basename two files share, and `only.ts` is untracked —
+// the index only knows about it through a status snapshot.
+const REFS = path.join(ROOT, "refs");
+fs.mkdirSync(path.join(REFS, "src"), { recursive: true });
+fs.mkdirSync(path.join(REFS, "lib"), { recursive: true });
+fs.mkdirSync(path.join(REFS, "web", "src"), { recursive: true });
+const runRefs = (...args: string[]) => execFileSync("git", args, { cwd: REFS, stdio: "pipe" });
+runRefs("init", "-q", "-b", "main");
+runRefs("config", "user.email", "test@example.com");
+runRefs("config", "user.name", "Test");
+fs.writeFileSync(path.join(REFS, "README.md"), "# refs\n");
+fs.writeFileSync(path.join(REFS, "src", "app.ts"), "export const a = 1;\n");
+fs.writeFileSync(path.join(REFS, "lib", "app.ts"), "export const b = 2;\n");
+fs.writeFileSync(path.join(REFS, "src", "store.ts"), "export const root = 1;\n");
+fs.writeFileSync(path.join(REFS, "web", "src", "store.ts"), "export const web = 1;\n");
+runRefs("add", "-A");
+runRefs("commit", "-q", "-m", "initial");
+fs.writeFileSync(path.join(REFS, "web", "src", "only.ts"), "export const only = 1;\n");
+
 const authHeader = "Basic " + Buffer.from(
   `${process.env.ACPG_AUTH_USER ?? ""}:${process.env.ACPG_AUTH_TOKEN ?? ""}`, "utf8",
 ).toString("base64");
@@ -279,6 +300,59 @@ test("/workspace/find matches on the whole relative path, dotfiles included, and
     const body = await sub.json() as { files: Array<{ path: string; abs: string }> };
     assert.deepEqual(body.files.map((f) => f.path), ["deep/nested.ts"]);
     assert.equal(body.files[0].abs, path.join(TREE, "src", "deep", "nested.ts"));
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/resolve reads a path against the conversation's folder and its repo root, and refuses to guess between them", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const resolve = async (cwd: string, p: string) => {
+      const r = await get(q("/workspace/resolve", { cwd, path: p }));
+      return { status: r.status, body: await r.json() as { abs?: string; path?: string; code?: string } };
+    };
+    const web = path.join(REFS, "web");
+
+    assert.deepEqual(await resolve(REFS, "src/app.ts"),
+      { status: 200, body: { abs: path.join(REFS, "src", "app.ts"), path: "src/app.ts" } });
+    // From a subfolder: its own file by the short path, the root's file by the
+    // path the repo knows it as — shown absolute, since it is outside cwd.
+    assert.deepEqual(await resolve(web, "src/only.ts"),
+      { status: 200, body: { abs: path.join(web, "src", "only.ts"), path: "src/only.ts" } });
+    assert.equal((await resolve(web, "lib/app.ts")).body.abs, path.join(REFS, "lib", "app.ts"));
+    assert.equal((await resolve(web, "lib/app.ts")).body.path, path.join(REFS, "lib", "app.ts"));
+    // `./` and `../` mean the conversation's folder and nothing else.
+    assert.equal((await resolve(web, "./src/store.ts")).body.abs, path.join(web, "src", "store.ts"));
+    assert.equal((await resolve(web, "../README.md")).body.abs, path.join(REFS, "README.md"));
+    // The same relative path at both cwd and root is two files, not a pick.
+    assert.deepEqual(await resolve(web, "src/store.ts"), { status: 404, body: { error: "ambiguous", code: "ambiguous" } });
+    // Absolute paths go through the same read guard as the viewer.
+    assert.equal((await resolve(REFS, path.join(SCRATCH, "note.txt"))).body.abs, path.join(SCRATCH, "note.txt"));
+    assert.deepEqual(await resolve(REFS, path.join(SCRATCH + "-other", "note.txt")),
+      { status: 404, body: { error: "not-found", code: "not-found" } });
+    assert.equal((await resolve(REFS, "../../../../etc/passwd")).status, 404);
+    assert.equal((await resolve("/etc", "passwd")).status, 400);
+  } finally {
+    await close();
+  }
+});
+
+test("a bare filename resolves only through a unique, exact match in the file index", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const resolve = async (p: string) => {
+      const r = await get(q("/workspace/resolve", { cwd: REFS, path: p }));
+      return { status: r.status, body: await r.json() as { abs?: string; code?: string } };
+    };
+    // Untracked, and no /workspace/changes call has fed the index yet — the
+    // resolver has to fetch the status half itself before it can vouch for
+    // uniqueness.
+    assert.equal((await resolve("only.ts")).body.abs, path.join(REFS, "web", "src", "only.ts"));
+    assert.equal((await resolve("app.ts")).body.code, "ambiguous");
+    // Exact means exact: a case-insensitive hit is not the file that was named.
+    assert.equal((await resolve("App.ts")).body.code, "not-found");
+    assert.equal((await resolve("nope.ts")).body.code, "not-found");
   } finally {
     await close();
   }
@@ -496,7 +570,8 @@ test("every workspace route sits behind the gateway account", async () => {
   const { get, close } = await startHttpServer();
   try {
     for (const route of ["/workspace/changes", "/workspace/file", "/workspace/diff", "/workspace/raw",
-                         "/workspace/outputs", "/workspace/render", "/workspace/commits", "/workspace/review"]) {
+                         "/workspace/outputs", "/workspace/render", "/workspace/commits", "/workspace/review",
+                         "/workspace/resolve"]) {
       const r = await get(q(route, { cwd: REPO, path: "kept.txt" }), {});
       assert.equal(r.status, 401, route);
     }
@@ -544,7 +619,7 @@ test("?rev= makes changes and diff describe a commit rather than the worktree", 
 test("a revision that would reach git as a flag is refused, not run", async () => {
   const { get, post, close } = await startHttpServer();
   try {
-    for (const route of ["/workspace/changes", "/workspace/diff", "/workspace/review"]) {
+    for (const route of ["/workspace/changes", "/workspace/diff", "/workspace/review", "/workspace/review/state"]) {
       const r = await get(q(route, { cwd: REPO, path: "kept.txt", rev: "--upload-pack=touch /tmp/pwned" }));
       assert.equal(r.status, 400, route);
       assert.equal(((await r.json()) as { code: string }).code, "bad-revision", route);
@@ -553,6 +628,8 @@ test("a revision that would reach git as a flag is refused, not run", async () =
     // with either would show a diff nobody asked for.
     assert.equal((await get(q("/workspace/changes", { cwd: REPO, rev: "HEAD", base: "main" }))).status, 400);
     assert.equal((await post(q("/workspace/review", { cwd: REPO, base: "-n" }), { comments: [] })).status, 400);
+    assert.equal((await post(q("/workspace/review/discussion", { cwd: REPO, base: "-n" }), { op: "resolve", id: "x" })).status, 400);
+    assert.equal((await post(q("/workspace/review/reviewed", { cwd: REPO, base: "-n" }), { path: "kept.txt", reviewed: false })).status, 400);
   } finally {
     await close();
   }
@@ -581,10 +658,10 @@ test("/workspace/review round-trips a draft, scoped per revision", async () => {
     // …but the counts cover every scope, which is what badges the tab.
     assert.deepEqual(otherBody.counts, { working: 1 });
   } finally {
-    // Leave REPO as the other tests found it: the draft directory is invisible
-    // to `git status` (it ignores itself), but the review route is not the only
-    // reader of this checkout.
-    fs.rmSync(path.join(REPO, ".acp-review"), { recursive: true, force: true });
+    // Leave REPO as the other tests found it. The draft is a row now, so an
+    // empty POST is what clears it — every test in this file shares one gateway
+    // load, and so one database.
+    await post(q("/workspace/review", { cwd: REPO }), { comments: [] });
     await close();
   }
 });
@@ -597,6 +674,9 @@ test("/workspace/review refuses a malformed comment instead of storing it", asyn
       { comments: [{ path: "kept.txt", side: "sideways", line: 1, body: "x" }] },
       { comments: [{ path: "kept.txt", side: "new", line: 0, body: "x" }] },
       { comments: [{ path: "kept.txt", side: "new", line: 1, body: "" }] },
+      // A stored path is later joined onto the repo root and handed to git.
+      { comments: [{ path: "../../etc/passwd", side: "new", line: 1, body: "x" }] },
+      { comments: [{ path: "/etc/passwd", side: "new", line: 1, body: "x" }] },
       {},
     ];
     for (const body of bad) {
@@ -815,6 +895,449 @@ test("a file over the write cap is handed no digest to save with", async () => {
     assert.equal(body.truncated, false);
     assert.equal(body.hash, undefined);
   } finally {
+    await close();
+  }
+});
+
+// ---- durable review state: /workspace/review/{state,discussion,reviewed} ----
+//
+// Every test in this file shares one gateway load and so one database, and a
+// discussion has no delete route by design, so each of these either leaves
+// REPO's review as it found it or asserts only about the records it made.
+
+// Whatever the client rendered is what gets stored, so the tests read the
+// identity out of the diff route rather than computing one.
+async function diffOf(
+  get: (p: string) => Promise<Response>, cwd: string, filePath: string, params: Record<string, string> = {},
+): Promise<{ diff: string; hash?: string; revision: string; truncated: boolean; binary: boolean }> {
+  return await (await get(q("/workspace/diff", { cwd, path: filePath, ...params }))).json() as never;
+}
+
+test("/workspace/diff identifies the bytes it rendered, per revision", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const working = await diffOf(get, REPO, "kept.txt");
+    assert.match(working.hash ?? "", /^[0-9a-f]{64}$/);
+    assert.match(working.revision, /^[0-9a-f]{40}:working$/, "a working diff names the HEAD it is dirty against");
+
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
+    const commit = await diffOf(get, REPO, "kept.txt", { rev: "HEAD" });
+    assert.equal(commit.revision, head, "a commit resolves to its sha, not the spelling asked for");
+    const branch = await diffOf(get, REPO, "kept.txt", { base: "main" });
+    assert.equal(branch.revision, `${head}..${head}`);
+
+    // Same bytes, same digest — that is what makes it a comparison token.
+    assert.equal((await diffOf(get, REPO, "kept.txt")).hash, working.hash);
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/review/state answers about a folder with nothing stored", async () => {
+  const { get, close } = await startHttpServer();
+  try {
+    const plain = path.join(ROOT, "notarepo");
+    fs.mkdirSync(plain, { recursive: true });
+    assert.deepEqual(await (await get(q("/workspace/review/state", { cwd: plain }))).json(),
+      { review: null, discussions: [], others: [], reviewed: [] });
+
+    // A checkout nobody has reviewed yet is the same answer: reading must not
+    // create the review row that would make it a different one.
+    const fresh = path.join(ROOT, "unreviewed");
+    fs.mkdirSync(fresh, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: fresh, stdio: "pipe" });
+    assert.deepEqual(await (await get(q("/workspace/review/state", { cwd: fresh }))).json(),
+      { review: null, discussions: [], others: [], reviewed: [] });
+  } finally {
+    await close();
+  }
+});
+
+test("a discussion is created, replied to, resolved and reopened", async () => {
+  const { get, post, close } = await startHttpServer();
+  try {
+    const rendered = await diffOf(get, REPO, "kept.txt");
+    const created = await (await post(q("/workspace/review/discussion", { cwd: REPO }), {
+      op: "create",
+      anchor: { path: "kept.txt", side: "new", line: 3, code: "+three" },
+      body: "why three?",
+      revision: rendered.revision,
+      diffHash: rendered.hash,
+      companion: { agentName: "claude", sessionId: "s1" },
+    })).json() as { ok: boolean; discussion: { id: string; status: string } };
+    assert.equal(created.ok, true);
+
+    assert.equal(((await (await post(q("/workspace/review/discussion", { cwd: REPO }), {
+      op: "reply", id: created.discussion.id, body: "because two was taken",
+    })).json()) as { ok: boolean }).ok, true);
+
+    const state = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as {
+      review: { scope: string; worktreeExists: boolean; companion: unknown };
+      discussions: Array<{ id: string; code: string; revision: string; diffHash: string; status: string; replies: unknown[] }>;
+      others: Array<{ id: string }>;
+    };
+    const stored = state.discussions.find((d) => d.id === created.discussion.id);
+    assert.ok(stored);
+    assert.equal(state.review.scope, "working");
+    assert.equal(state.review.worktreeExists, true);
+    assert.deepEqual(state.review.companion, { agentName: "claude", sessionId: "s1" });
+    // Stored exactly as displayed: the excerpt and the diff it came from.
+    assert.equal(stored.code, "+three");
+    assert.equal(stored.revision, rendered.revision);
+    assert.equal(stored.diffHash, rendered.hash);
+    assert.equal(stored.replies.length, 1);
+    assert.equal(state.others.some((d) => d.id === created.discussion.id), false,
+      "this review's own discussion is never also somebody else's");
+
+    for (const [op, expected] of [["resolve", "resolved"], ["reopen", "open"]] as const) {
+      assert.equal((await post(q("/workspace/review/discussion", { cwd: REPO }), { op, id: created.discussion.id })).status, 200);
+      const after = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as { discussions: Array<{ id: string; status: string }> };
+      assert.equal(after.discussions.find((d) => d.id === created.discussion.id)?.status, expected, op);
+    }
+
+    // Sending a draft never touches discussions, and neither does clearing one.
+    await post(q("/workspace/review", { cwd: REPO }), { comments: [] });
+    const survived = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as { discussions: Array<{ id: string }> };
+    assert.equal(survived.discussions.some((d) => d.id === created.discussion.id), true);
+  } finally {
+    await close();
+  }
+});
+
+test("/workspace/review/discussion refuses a shape it would have to guess at", async () => {
+  const { post, close } = await startHttpServer();
+  try {
+    const anchor = { path: "kept.txt", side: "new", line: 3, code: "+three" };
+    const bad: unknown[] = [
+      {},
+      { op: "delete", id: "x" },
+      { op: "create", anchor, body: "x" },                                   // no revision
+      { op: "create", anchor, body: "", revision: "r" },
+      { op: "create", anchor: { ...anchor, path: "../outside.txt" }, body: "x", revision: "r" },
+      { op: "create", anchor: { ...anchor, side: "sideways" }, body: "x", revision: "r" },
+      { op: "create", anchor, body: "x", revision: "r", diffHash: "not-a-digest" },
+      { op: "reply", body: "no id" },
+      { op: "reply", id: "x", body: "" },
+    ];
+    for (const body of bad) {
+      const r = await post(q("/workspace/review/discussion", { cwd: REPO }), body);
+      assert.equal(r.status, 400, JSON.stringify(body).slice(0, 60));
+    }
+    // A well-formed op against a discussion that isn't there is a 404, not a
+    // silently stored orphan.
+    assert.equal((await post(q("/workspace/review/discussion", { cwd: REPO }), { op: "resolve", id: "no-such" })).status, 404);
+    assert.equal((await post(q("/workspace/review/discussion", { cwd: REPO }), { op: "reply", id: "no-such", body: "x" })).status, 404);
+  } finally {
+    await close();
+  }
+});
+
+test("a sibling worktree's discussions are listed, and go read-only once it is gone", async () => {
+  const { get, post, close } = await startHttpServer();
+  const WT = path.join(ROOT, "project-wt");
+  try {
+    run("worktree", "add", "-q", "-b", "sidebranch", WT);
+    const rendered = await diffOf(get, WT, "kept.txt");
+    const created = await (await post(q("/workspace/review/discussion", { cwd: WT }), {
+      op: "create",
+      anchor: { path: "kept.txt", side: "new", line: 1, code: " one" },
+      body: "written in the other worktree",
+      revision: rendered.revision,
+    })).json() as { ok: boolean; discussion: { id: string } };
+    assert.equal(created.ok, true);
+
+    // Same clone (one git common dir), different worktree: the main checkout
+    // sees it as somebody else's review rather than as one of its own.
+    const sibling = (s: { body: string }) => s.body === "written in the other worktree";
+    const before = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as {
+      discussions: Array<{ body: string }>; others: Array<{ body: string; worktree: string; scope: string; live: boolean }>;
+    };
+    assert.equal(before.discussions.some(sibling), false, "a sibling's discussion is never one of this review's own");
+    const listed = before.others.find(sibling);
+    assert.ok(listed);
+    assert.equal(listed.worktree, fs.realpathSync(WT));
+    assert.equal(listed.scope, "working");
+    assert.equal(listed.live, true);
+
+    run("worktree", "remove", "--force", WT);
+    const after = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as {
+      others: Array<{ body: string; live: boolean }>;
+    };
+    assert.equal(after.others.find(sibling)?.live, false, "the record outlives the worktree, read-only");
+
+    // The record is still editable — a thread about code that shipped must not
+    // stay open because its branch was deleted.
+    assert.equal((await post(q("/workspace/review/discussion", { cwd: REPO }), { op: "resolve", id: created.discussion.id })).status, 200);
+    // Starting a NEW one there is refused: there is no diff to be looking at.
+    const refused = await post(q("/workspace/review/discussion", { cwd: WT }), {
+      op: "create", anchor: { path: "kept.txt", side: "new", line: 1, code: " one" }, body: "too late", revision: "r",
+    });
+    assert.deepEqual(await refused.json(), { ok: false, reason: "worktree-gone" });
+  } finally {
+    fs.rmSync(WT, { recursive: true, force: true });
+    try { run("worktree", "prune"); run("branch", "-qD", "sidebranch"); } catch { /* already gone */ }
+    await close();
+  }
+});
+
+test("a reviewed file is flagged changed once the diff it was read at moves on", async () => {
+  const { get, post, close } = await startHttpServer();
+  const before = fs.readFileSync(path.join(REPO, "kept.txt"), "utf8");
+  try {
+    const rendered = await diffOf(get, REPO, "kept.txt");
+    assert.equal((await post(q("/workspace/review/reviewed", { cwd: REPO }), {
+      path: "kept.txt", hash: rendered.hash, revision: rendered.revision, reviewed: true,
+    })).status, 200);
+
+    const read = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as {
+      reviewed: Array<{ path: string; hash: string; changed: boolean }>;
+    };
+    assert.deepEqual(read.reviewed.map((f) => [f.path, f.changed]), [["kept.txt", false]]);
+    assert.equal(read.reviewed[0].hash, rendered.hash);
+
+    fs.writeFileSync(path.join(REPO, "kept.txt"), before + "four\n");
+    const moved = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as {
+      reviewed: Array<{ hash: string; changed: boolean }>;
+    };
+    assert.equal(moved.reviewed[0].changed, true);
+    // The snapshot is what was READ, not what the file says now.
+    assert.equal(moved.reviewed[0].hash, rendered.hash);
+
+    assert.equal((await post(q("/workspace/review/reviewed", { cwd: REPO }), { path: "kept.txt", reviewed: false })).status, 200);
+    const cleared = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as { reviewed: unknown[] };
+    assert.deepEqual(cleared.reviewed, []);
+
+    for (const body of [{ reviewed: true }, { path: "../escape.txt", hash: "a".repeat(64), revision: "r", reviewed: true },
+      { path: "kept.txt", hash: "nope", revision: "r", reviewed: true }, { path: "kept.txt", revision: "r", reviewed: true }]) {
+      assert.equal((await post(q("/workspace/review/reviewed", { cwd: REPO }), body)).status, 400, JSON.stringify(body).slice(0, 50));
+    }
+  } finally {
+    fs.writeFileSync(path.join(REPO, "kept.txt"), before);
+    await close();
+  }
+});
+
+test("a diff too big to render has no digest, and what was marked on one is always changed", async () => {
+  const { get, post, close } = await startHttpServer();
+  const BIG = path.join(ROOT, "bigrepo");
+  try {
+    fs.mkdirSync(BIG, { recursive: true });
+    const runBig = (...args: string[]) => execFileSync("git", args, { cwd: BIG, stdio: "pipe" });
+    runBig("init", "-q", "-b", "main");
+    runBig("config", "user.email", "test@example.com");
+    runBig("config", "user.name", "Test");
+    fs.writeFileSync(path.join(BIG, "huge.txt"), "a line of generated output\n".repeat(30000));
+
+    const rendered = await diffOf(get, BIG, "huge.txt");
+    assert.equal(rendered.truncated, true);
+    assert.equal(rendered.hash, undefined, "nobody can claim to have read what was never rendered");
+    assert.match(rendered.revision, /:working$/);
+
+    // The client cannot offer the mark without a hash; a stored one from an
+    // earlier, smaller version has to report itself unverifiable rather than intact.
+    await post(q("/workspace/review/reviewed", { cwd: BIG }), {
+      path: "huge.txt", hash: "a".repeat(64), revision: rendered.revision, reviewed: true,
+    });
+    const state = await (await get(q("/workspace/review/state", { cwd: BIG }))).json() as {
+      reviewed: Array<{ changed: boolean; reason?: string }>;
+    };
+    assert.deepEqual(state.reviewed, [{ path: "huge.txt", hash: "a".repeat(64), revision: rendered.revision,
+      reviewedAt: state.reviewed[0] && (state.reviewed[0] as unknown as { reviewedAt: string }).reviewedAt,
+      changed: true, reason: "unhashable" }]);
+  } finally {
+    fs.rmSync(BIG, { recursive: true, force: true });
+    await close();
+  }
+});
+
+test("an existing .acp-review draft is imported once, and only then removed", async () => {
+  const { get, post, close } = await startHttpServer();
+  const dir = path.join(REPO, ".acp-review");
+  const comment = { path: "kept.txt", side: "new", line: 3, code: "+three", body: "from the old file" };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "drafts.json"), JSON.stringify({
+      version: 1,
+      scopes: {
+        working: { updatedAt: new Date().toISOString(), comments: [comment] },
+        "branch:main": { updatedAt: new Date().toISOString(), comments: [{ ...comment, body: "another scope" }] },
+      },
+    }));
+
+    const imported = await (await get(q("/workspace/review", { cwd: REPO }))).json() as {
+      comments: unknown[]; counts: Record<string, number>;
+    };
+    assert.deepEqual(imported.comments, [comment]);
+    // The scope that was imported is gone from the file; the one nobody has
+    // opened yet is still there, and still badges the tab.
+    const left = JSON.parse(fs.readFileSync(path.join(dir, "drafts.json"), "utf8")) as { scopes: Record<string, unknown> };
+    assert.deepEqual(Object.keys(left.scopes), ["branch:main"]);
+    assert.deepEqual(imported.counts, { working: 1, "branch:main": 1 });
+
+    // Second read comes from the row, and does not re-import anything.
+    assert.deepEqual(((await (await get(q("/workspace/review", { cwd: REPO }))).json()) as { comments: unknown[] }).comments, [comment]);
+
+    // A file the validator refuses is left exactly where it is rather than
+    // half-imported — the same rule as a malformed POST.
+    const unreadable = JSON.stringify({
+      version: 1,
+      scopes: { "branch:main": { updatedAt: new Date().toISOString(), comments: [{ ...comment, side: "sideways" }] } },
+    });
+    fs.writeFileSync(path.join(dir, "drafts.json"), unreadable);
+    const refused = await (await get(q("/workspace/review", { cwd: REPO, base: "main" }))).json() as { comments: unknown[] };
+    assert.deepEqual(refused.comments, []);
+    assert.equal(fs.readFileSync(path.join(dir, "drafts.json"), "utf8"), unreadable,
+      "the checkout's copy must survive a failed import byte for byte");
+    // And nothing was provisioned on the way: a read that refuses its import
+    // leaves the scope with no review at all, not an empty one.
+    assert.equal(((await (await get(q("/workspace/review/state", { cwd: REPO, base: "main" }))).json()) as { review: unknown }).review, null);
+  } finally {
+    await post(q("/workspace/review", { cwd: REPO }), { comments: [] });
+    fs.rmSync(dir, { recursive: true, force: true });
+    await close();
+  }
+});
+
+test("a draft whose checkout copy can't be removed is still imported exactly once", async () => {
+  const { get, close } = await startHttpServer();
+  const RO = path.join(ROOT, "readonlyrepo");
+  const dir = path.join(RO, ".acp-review");
+  const comment = { path: "kept.txt", side: "new", line: 1, code: "+one", body: "written before the upgrade" };
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: RO, stdio: "pipe" });
+    const onDisk = JSON.stringify({
+      version: 1, scopes: { working: { updatedAt: new Date().toISOString(), comments: [comment] } },
+    });
+    fs.writeFileSync(path.join(dir, "drafts.json"), onDisk);
+    // The import's last step is removing the scope it copied. A checkout nobody
+    // may write to costs that cleanup and nothing else: the row is what the
+    // review is read from now.
+    fs.chmodSync(dir, 0o500);
+
+    const imported = await (await get(q("/workspace/review", { cwd: RO }))).json() as { comments: unknown[] };
+    assert.deepEqual(imported.comments, [comment]);
+    assert.equal(fs.readFileSync(path.join(dir, "drafts.json"), "utf8"), onDisk);
+    // Reading again must not stack the same comment twice: the row now holds
+    // this scope, so the file's copy is never looked at again.
+    assert.deepEqual(((await (await get(q("/workspace/review", { cwd: RO }))).json()) as { comments: unknown[] }).comments, [comment]);
+  } finally {
+    fs.chmodSync(dir, 0o700);
+    fs.rmSync(RO, { recursive: true, force: true });
+    await close();
+  }
+});
+
+test("one worktree's two scopes are two reviews, and see each other as somebody else's", async () => {
+  const { get, post, close } = await startHttpServer();
+  const mine = (d: { body: string }) => d.body === "only in the commit's review";
+  try {
+    const rendered = await diffOf(get, REPO, "kept.txt", { rev: "HEAD" });
+    await post(q("/workspace/review/discussion", { cwd: REPO, rev: "HEAD" }), {
+      op: "create", anchor: { path: "kept.txt", side: "new", line: 1, code: "+one" },
+      body: "only in the commit's review", revision: rendered.revision,
+    });
+    assert.equal((await post(q("/workspace/review/reviewed", { cwd: REPO, rev: "HEAD" }), {
+      path: "kept.txt", hash: rendered.hash, revision: rendered.revision, reviewed: true,
+    })).status, 200);
+
+    type State = {
+      review: { scope: string } | null;
+      discussions: Array<{ body: string }>;
+      others: Array<{ body: string; scope: string; live: boolean }>;
+      reviewed: Array<{ path: string }>;
+    };
+    const commit = await (await get(q("/workspace/review/state", { cwd: REPO, rev: "HEAD" }))).json() as State;
+    const working = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as State;
+    assert.equal(commit.review?.scope, "commit:HEAD");
+    assert.equal(working.review?.scope, "working");
+
+    assert.equal(commit.discussions.some(mine), true);
+    assert.equal(commit.reviewed.some((f) => f.path === "kept.txt"), true);
+    // The same checkout, a different comparison: reading the working tree is a
+    // different review, so neither the thread nor the mark belongs to it.
+    assert.equal(working.discussions.some(mine), false);
+    assert.equal(working.reviewed.some((f) => f.path === "kept.txt"), false);
+    const listed = working.others.find(mine);
+    assert.equal(listed?.scope, "commit:HEAD");
+    assert.equal(listed?.live, true, "a sibling scope of a checkout that is still there");
+  } finally {
+    await post(q("/workspace/review/reviewed", { cwd: REPO, rev: "HEAD" }), { path: "kept.txt", reviewed: false });
+    await close();
+  }
+});
+
+test("a diff read before the checkout moved keeps the snapshot that was read", async () => {
+  const { get, post, close } = await startHttpServer();
+  const kept = path.join(REPO, "kept.txt");
+  const before = fs.readFileSync(kept, "utf8");
+  try {
+    const rendered = await diffOf(get, REPO, "kept.txt");
+    // The agent commits, or edits, while the reviewer is still reading. The mark
+    // that lands afterwards is about the bytes that were on screen.
+    fs.writeFileSync(kept, before + "four\n");
+    assert.deepEqual(await (await post(q("/workspace/review/reviewed", { cwd: REPO }), {
+      path: "kept.txt", hash: rendered.hash, revision: rendered.revision, reviewed: true,
+    })).json(), { ok: true });
+
+    const state = await (await get(q("/workspace/review/state", { cwd: REPO }))).json() as {
+      reviewed: Array<{ path: string; hash: string; changed: boolean }>;
+    };
+    const f = state.reviewed.find((r) => r.path === "kept.txt");
+    assert.equal(f?.hash, rendered.hash, "the identity stored is the one that was read");
+    assert.equal(f?.changed, true, "and it is flagged at once — the newer version nobody saw is not reviewed");
+  } finally {
+    fs.writeFileSync(kept, before);
+    await post(q("/workspace/review/reviewed", { cwd: REPO }), { path: "kept.txt", reviewed: false });
+    await close();
+  }
+});
+
+test("a reviewed file that is renamed, deleted or changes mode can no longer be claimed read", async () => {
+  const { get, post, close } = await startHttpServer();
+  const MOVED = path.join(ROOT, "moverepo");
+  try {
+    fs.mkdirSync(MOVED, { recursive: true });
+    const runMoved = (...args: string[]) => execFileSync("git", args, { cwd: MOVED, stdio: "pipe" });
+    runMoved("init", "-q", "-b", "main");
+    runMoved("config", "user.email", "test@example.com");
+    runMoved("config", "user.name", "Test");
+    for (const name of ["renamed.txt", "removed.txt", "mode.txt"]) fs.writeFileSync(path.join(MOVED, name), "one\n");
+    runMoved("add", "-A");
+    runMoved("commit", "-q", "-m", "initial");
+    for (const name of ["renamed.txt", "removed.txt", "mode.txt"]) fs.appendFileSync(path.join(MOVED, name), "two\n");
+
+    const marked: Record<string, string | undefined> = {};
+    for (const name of ["renamed.txt", "removed.txt", "mode.txt"]) {
+      const rendered = await diffOf(get, MOVED, name);
+      marked[name] = rendered.hash;
+      await post(q("/workspace/review/reviewed", { cwd: MOVED }), {
+        path: name, hash: rendered.hash, revision: rendered.revision, reviewed: true,
+      });
+    }
+    const read = await (await get(q("/workspace/review/state", { cwd: MOVED }))).json() as {
+      reviewed: Array<{ path: string; hash: string; changed: boolean }>;
+    };
+    assert.deepEqual(read.reviewed.map((f) => f.changed), [false, false, false]);
+
+    runMoved("mv", "renamed.txt", "newname.txt");
+    fs.rmSync(path.join(MOVED, "removed.txt"));
+    fs.chmodSync(path.join(MOVED, "mode.txt"), 0o755);
+
+    const after = await (await get(q("/workspace/review/state", { cwd: MOVED }))).json() as {
+      reviewed: Array<{ path: string; hash: string; changed: boolean }>;
+    };
+    // Three ways for the content behind a mark to stop being what was read. The
+    // rename is the interesting one: the mark stays on the path it was made on
+    // and the new path is simply unreviewed — nothing is carried across.
+    assert.deepEqual(after.reviewed.map((f) => [f.path, f.changed]),
+      [["mode.txt", true], ["removed.txt", true], ["renamed.txt", true]]);
+    assert.equal(after.reviewed.some((f) => f.path === "newname.txt"), false);
+    // Each still remembers the snapshot it was marked on, so re-marking is a
+    // deliberate act rather than a silent re-hash.
+    for (const f of after.reviewed) assert.equal(f.hash, marked[f.path]);
+  } finally {
+    fs.rmSync(MOVED, { recursive: true, force: true });
     await close();
   }
 });

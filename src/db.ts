@@ -26,6 +26,8 @@
 import path from "node:path";
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
+import type { ReviewComment } from "./review.ts";
 
 // Recent sessions / folders mirror the web client's old localStorage shapes, so
 // the UI types line up. They now live here (server-side) so the same account sees
@@ -78,11 +80,75 @@ export interface InboxItem {
 }
 export type InboxStatus = "pending" | "answered" | "cancelled" | "expired" | "superseded" | "read";
 
+// ---- durable review state (see the tables at the end of the constructor) ----
+
+// One review's identity, as every write to it resolves it.
+export interface ReviewRow {
+  id: string;
+  repositoryId: string;
+  worktree: string;
+  scope: string;
+  // The agent + session that was open when this review first got something worth
+  // keeping. Recorded once: "whoever is active now" is a different question, and
+  // answering it from here would re-own a month-old discussion on every reload.
+  companion: { agentName: string; sessionId: string } | null;
+}
+
+export interface DiscussionReply { id: string; body: string; createdAt: string }
+
+export interface Discussion {
+  id: string;
+  path: string;
+  side: "new" | "old";
+  line: number;
+  endLine?: number;
+  code: string;
+  body: string;
+  revision: string;
+  diffHash?: string;
+  status: "open" | "resolved";
+  createdAt: string;
+  updatedAt: string;
+  replies: DiscussionReply[];
+}
+
+// A discussion from a SIBLING review of the same repository — another worktree,
+// or another comparison of this one. `live` is false when its worktree is gone:
+// the record still reads, the code it points at does not exist to act on.
+export interface OtherDiscussion extends Discussion { worktree: string; scope: string; live: boolean }
+
+export interface ReviewedFile { path: string; hash: string; revision: string; reviewedAt: string }
+
+export interface DiscussionAnchor {
+  path: string; side: "new" | "old"; line: number; endLine?: number; code: string;
+  body: string; revision: string; diffHash?: string;
+}
+
 const MAX_RECENT_SESSIONS = 50;
 const MAX_RECENT_FOLDERS = 20;
 // Cap the audit trail: keep every pending item plus the newest resolved ones, so
 // the table can't grow without bound while a useful recent history survives.
 const MAX_INBOX_RESOLVED = 500;
+
+// The raw column shapes the review queries hand back, mapped to the camelCase
+// types above. Declared once because three queries select the same columns.
+type ReviewRowShape = {
+  id: string; repository_id: string; worktree: string; scope: string;
+  companion_agent: string | null; companion_session: string | null;
+};
+type DiscussionShape = {
+  id: string; path: string; side: string; line: number; end_line: number | null;
+  code: string; body: string; revision: string; diff_hash: string | null;
+  status: string; created_at: string; updated_at: string;
+};
+function mapReview(r: ReviewRowShape): ReviewRow {
+  return {
+    id: r.id, repositoryId: r.repository_id, worktree: r.worktree, scope: r.scope,
+    companion: r.companion_agent && r.companion_session
+      ? { agentName: r.companion_agent, sessionId: r.companion_session }
+      : null,
+  };
+}
 
 export class Db {
   private db: DatabaseSync;
@@ -200,6 +266,87 @@ export class Db {
       entrypoint       TEXT,
       size             INTEGER NOT NULL,
       mtime_ms         INTEGER NOT NULL
+    )`);
+    // ---- durable review state ----
+    // A repository, keyed on its git COMMON dir (see workspace.ts's
+    // gitCommonDir): every `git worktree` of one clone shares that path, which
+    // is what lets a discussion written in one worktree be listed while
+    // reviewing another. root_commit/remote are written at creation and never
+    // read by any query here — they are evidence for a future reassociation, not
+    // the identity.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS repositories (
+      id TEXT PRIMARY KEY,
+      common_dir TEXT NOT NULL UNIQUE,
+      root_commit TEXT,
+      remote TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    // One review = one (repository, worktree, comparison). The worktree is in
+    // the key because two worktrees of the same repo are two different pieces of
+    // work, and the scope is in it because "the working tree" and "this commit"
+    // are different reviews of the same checkout. Rows appear lazily, on the
+    // first thing worth persisting.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS reviews (
+      id TEXT PRIMARY KEY,
+      repository_id TEXT NOT NULL,
+      worktree TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      companion_agent TEXT,
+      companion_session TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE(repository_id, worktree, scope)
+    )`);
+    // A discussion records the line as it READ when somebody wrote about it —
+    // path, side, line range, the excerpt, and which diff produced it. None of
+    // that is ever recomputed: a discussion that can be silently re-anchored to
+    // whatever now occupies line 42 is a discussion about the wrong code.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS discussions (
+      id TEXT PRIMARY KEY,
+      review_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      side TEXT NOT NULL,
+      line INTEGER NOT NULL,
+      end_line INTEGER,
+      code TEXT NOT NULL,
+      body TEXT NOT NULL,
+      revision TEXT NOT NULL,
+      diff_hash TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS discussion_replies (
+      id TEXT PRIMARY KEY,
+      discussion_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_discussions_review ON discussions(review_id)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_discussion_replies ON discussion_replies(discussion_id)`);
+    // The unsent comments of one review, replacing the .acp-review/drafts.json
+    // the checkout used to carry (review.ts's header explains the move). One row
+    // per review, rewritten wholesale — the list is small and last write wins.
+    //
+    // No TTL here, unlike the file it replaces. That expiry existed because a
+    // file nobody could see accumulated abandoned scopes; a row keyed to a review
+    // is deleted when its last comment is, and discussions in the same review
+    // have no expiry at all. One lifecycle rule for the review's state beats two.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS review_drafts (
+      review_id TEXT PRIMARY KEY,
+      comments_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`);
+    // Which files a reviewer has read, and the exact bytes they read. `hash` is
+    // the digest of the diff that was ON SCREEN, sent by the client — the server
+    // deliberately does not re-read the file at click time, or a checkout that
+    // advanced while somebody was reading would be recorded as reviewed.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS reviewed_files (
+      review_id TEXT NOT NULL,
+      path TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      revision TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL,
+      PRIMARY KEY (review_id, path)
     )`);
   }
 
@@ -670,6 +817,192 @@ export class Db {
        FROM inbox ${clause} ORDER BY id DESC${limit}`,
     ).all(...params) as Parameters<typeof this.mapInbox>[0][];
     return rows.map((r) => this.mapInbox(r));
+  }
+
+  // ---- durable review state ----
+
+  // The repository row for a common dir, or null. Lookup only: a GET must be
+  // able to ask "is there anything stored for this checkout" without creating
+  // the row that makes the answer yes.
+  repositoryId(commonDir: string): string | null {
+    const row = this.db.prepare("SELECT id FROM repositories WHERE common_dir = ?").get(commonDir) as { id: string } | undefined;
+    return row ? row.id : null;
+  }
+
+  review(repositoryId: string, worktree: string, scope: string): ReviewRow | null {
+    const row = this.db.prepare(
+      "SELECT id, repository_id, worktree, scope, companion_agent, companion_session FROM reviews WHERE repository_id = ? AND worktree = ? AND scope = ?",
+    ).get(repositoryId, worktree, scope) as ReviewRowShape | undefined;
+    return row ? mapReview(row) : null;
+  }
+
+  // The review for this (repo, worktree, scope), created if it isn't there yet.
+  // Called from the writes only — a read that provisioned would fill the table
+  // with rows for every folder anyone ever opened Review mode on.
+  //
+  // `companion` is written when the columns are still NULL and never after, so
+  // whichever session first persisted something owns the review; a later write
+  // from a different session records nothing.
+  provisionReview(
+    identity: { commonDir: string; rootCommit: string | null; remote: string | null },
+    worktree: string,
+    scope: string,
+    companion?: { agentName: string; sessionId: string } | null,
+  ): ReviewRow {
+    const now = new Date().toISOString();
+    let repoId = this.repositoryId(identity.commonDir);
+    if (!repoId) {
+      repoId = randomUUID();
+      // The fingerprints go in here and nowhere else: they describe the repo as
+      // it was when first seen, and re-deriving them later would quietly rewrite
+      // the evidence they exist to be.
+      this.db.prepare("INSERT OR IGNORE INTO repositories (id, common_dir, root_commit, remote, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(repoId, identity.commonDir, identity.rootCommit, identity.remote, now);
+      repoId = this.repositoryId(identity.commonDir) ?? repoId;
+    }
+    let row = this.review(repoId, worktree, scope);
+    if (!row) {
+      this.db.prepare("INSERT OR IGNORE INTO reviews (id, repository_id, worktree, scope, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(randomUUID(), repoId, worktree, scope, now);
+      row = this.review(repoId, worktree, scope) as ReviewRow;
+    }
+    if (companion && !row.companion) {
+      this.db.prepare("UPDATE reviews SET companion_agent = ?, companion_session = ? WHERE id = ? AND companion_agent IS NULL")
+        .run(companion.agentName, companion.sessionId, row.id);
+      row = { ...row, companion };
+    }
+    return row;
+  }
+
+  createDiscussion(reviewId: string, a: DiscussionAnchor): Discussion {
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    this.db.prepare(
+      `INSERT INTO discussions (id, review_id, path, side, line, end_line, code, body, revision, diff_hash, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+    ).run(id, reviewId, a.path, a.side, a.line, a.endLine ?? null, a.code, a.body, a.revision, a.diffHash ?? null, now, now);
+    return { id, ...a, ...(a.endLine === undefined ? {} : { endLine: a.endLine }), status: "open", createdAt: now, updatedAt: now, replies: [] };
+  }
+
+  // Null when the discussion is gone — the caller answers 404 rather than
+  // storing a reply nothing will ever show.
+  addDiscussionReply(discussionId: string, body: string): DiscussionReply | null {
+    const now = new Date().toISOString();
+    const reply = { id: randomUUID(), body, createdAt: now };
+    const touched = this.db.prepare("UPDATE discussions SET updated_at = ? WHERE id = ?").run(now, discussionId);
+    if (!touched.changes) return null;
+    this.db.prepare("INSERT INTO discussion_replies (id, discussion_id, body, created_at) VALUES (?, ?, ?, ?)")
+      .run(reply.id, discussionId, reply.body, now);
+    return reply;
+  }
+
+  setDiscussionStatus(discussionId: string, status: "open" | "resolved"): boolean {
+    const r = this.db.prepare("UPDATE discussions SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, new Date().toISOString(), discussionId);
+    return !!r.changes;
+  }
+
+  discussions(reviewId: string): Discussion[] {
+    const rows = this.db.prepare(
+      `SELECT id, path, side, line, end_line, code, body, revision, diff_hash, status, created_at, updated_at
+       FROM discussions WHERE review_id = ? ORDER BY created_at`,
+    ).all(reviewId) as DiscussionShape[];
+    return this.withReplies(rows);
+  }
+
+  // Everything else this repository has discussed, whichever worktree or
+  // comparison it was written in. `excludeReviewId` drops the review the caller
+  // is already showing inline; passing null (no review row yet) lists them all.
+  repositoryDiscussions(repositoryId: string, excludeReviewId: string | null): Array<Discussion & { worktree: string; scope: string }> {
+    const rows = this.db.prepare(
+      `SELECT d.id, d.path, d.side, d.line, d.end_line, d.code, d.body, d.revision, d.diff_hash, d.status,
+              d.created_at, d.updated_at, r.worktree, r.scope
+       FROM discussions d JOIN reviews r ON r.id = d.review_id
+       WHERE r.repository_id = ? AND r.id IS NOT ?
+       ORDER BY d.created_at`,
+    ).all(repositoryId, excludeReviewId) as Array<DiscussionShape & { worktree: string; scope: string }>;
+    return this.withReplies(rows).map((d, i) => ({ ...d, worktree: rows[i].worktree, scope: rows[i].scope }));
+  }
+
+  reviewDraft(reviewId: string): ReviewComment[] {
+    const row = this.db.prepare("SELECT comments_json FROM review_drafts WHERE review_id = ?").get(reviewId) as { comments_json: string } | undefined;
+    if (!row) return [];
+    try { return JSON.parse(row.comments_json) as ReviewComment[]; } catch { return []; }
+  }
+
+  setReviewDraft(reviewId: string, comments: ReviewComment[]): void {
+    // An empty list deletes the row rather than storing one: "I deleted my last
+    // comment" and "I never had one" are the same state, and only one of them
+    // should survive a reload.
+    if (comments.length === 0) { this.deleteReviewDraft(reviewId); return; }
+    this.db.prepare("INSERT OR REPLACE INTO review_drafts (review_id, comments_json, updated_at) VALUES (?, ?, ?)")
+      .run(reviewId, JSON.stringify(comments), new Date().toISOString());
+  }
+
+  deleteReviewDraft(reviewId: string): void {
+    this.db.prepare("DELETE FROM review_drafts WHERE review_id = ?").run(reviewId);
+  }
+
+  // Every scope of this worktree that has unsent comments, which is what badges
+  // the Review tab before any of them has been opened.
+  draftCounts(repositoryId: string, worktree: string): Record<string, number> {
+    const rows = this.db.prepare(
+      `SELECT r.scope, d.comments_json FROM review_drafts d JOIN reviews r ON r.id = d.review_id
+       WHERE r.repository_id = ? AND r.worktree = ?`,
+    ).all(repositoryId, worktree) as Array<{ scope: string; comments_json: string }>;
+    const out: Record<string, number> = {};
+    for (const r of rows) {
+      let n = 0;
+      try { n = (JSON.parse(r.comments_json) as unknown[]).length; } catch { /* unreadable row counts as none */ }
+      if (n) out[r.scope] = n;
+    }
+    return out;
+  }
+
+  setReviewedFile(reviewId: string, f: { path: string; hash: string; revision: string }): void {
+    this.db.prepare("INSERT OR REPLACE INTO reviewed_files (review_id, path, hash, revision, reviewed_at) VALUES (?, ?, ?, ?, ?)")
+      .run(reviewId, f.path, f.hash, f.revision, new Date().toISOString());
+  }
+
+  deleteReviewedFile(reviewId: string, filePath: string): void {
+    this.db.prepare("DELETE FROM reviewed_files WHERE review_id = ? AND path = ?").run(reviewId, filePath);
+  }
+
+  reviewedFiles(reviewId: string): ReviewedFile[] {
+    const rows = this.db.prepare("SELECT path, hash, revision, reviewed_at FROM reviewed_files WHERE review_id = ? ORDER BY path")
+      .all(reviewId) as Array<{ path: string; hash: string; revision: string; reviewed_at: string }>;
+    return rows.map((r) => ({ path: r.path, hash: r.hash, revision: r.revision, reviewedAt: r.reviewed_at }));
+  }
+
+  // One query for every listed discussion's replies rather than one per row.
+  private withReplies(rows: DiscussionShape[]): Discussion[] {
+    const byDiscussion = new Map<string, DiscussionReply[]>();
+    if (rows.length) {
+      const holes = rows.map(() => "?").join(",");
+      const replies = this.db.prepare(
+        `SELECT id, discussion_id, body, created_at FROM discussion_replies WHERE discussion_id IN (${holes}) ORDER BY created_at`,
+      ).all(...rows.map((r) => r.id)) as Array<{ id: string; discussion_id: string; body: string; created_at: string }>;
+      for (const r of replies) {
+        const list = byDiscussion.get(r.discussion_id) ?? [];
+        list.push({ id: r.id, body: r.body, createdAt: r.created_at });
+        byDiscussion.set(r.discussion_id, list);
+      }
+    }
+    return rows.map((r) => ({
+      id: r.id,
+      path: r.path,
+      side: r.side === "old" ? "old" : "new",
+      line: r.line,
+      ...(r.end_line === null ? {} : { endLine: r.end_line }),
+      code: r.code,
+      body: r.body,
+      revision: r.revision,
+      ...(r.diff_hash === null ? {} : { diffHash: r.diff_hash }),
+      status: r.status === "resolved" ? "resolved" : "open",
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      replies: byDiscussion.get(r.id) ?? [],
+    }));
   }
 
   close(): void {

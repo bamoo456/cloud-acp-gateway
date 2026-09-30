@@ -399,6 +399,8 @@ describe("Thread turn grouping", () => {
     if (root) { act(() => root?.unmount()); root = null; }
     main.remove();
     vi.unstubAllGlobals();
+    vi.doUnmock("mermaid");
+    vi.doUnmock("../lib/api.ts");
   });
 
   async function render(items: Session["items"], working = false) {
@@ -485,6 +487,41 @@ describe("Thread turn grouping", () => {
     expect(main.querySelector(".turn.agent .replies")).not.toBeNull();
     expect(peeks()).toHaveLength(0);
     expect(main.querySelector("button.reply-fold")).toBeNull();
+  });
+
+  // A reply is re-rendered on every chunk, so half a diagram's source would
+  // arrive as a parse error every few tokens: the turn has to have stopped first.
+  test("a diagram is drawn once the answer has stopped, and not while it arrives", async () => {
+    const draw = vi.fn(async () => ({ svg: '<svg viewBox="0 0 10 10"></svg>' }));
+    vi.doMock("mermaid", () => ({ default: { initialize: vi.fn(), render: draw } }));
+    const items: Session["items"] = [{ id: "a1", kind: "assistant", text: "```mermaid\nflowchart TD\n  A --> B\n```" }];
+
+    await render(items, true);
+    expect(main.querySelector("pre > code.language-mermaid")).not.toBeNull();
+    expect(draw).not.toHaveBeenCalled();
+
+    await rerender(items, false);
+    await vi.waitFor(() => expect(main.querySelector(".md-mermaid")).not.toBeNull());
+    expect(main.querySelector("pre > code.language-mermaid")).toBeNull();
+  });
+
+  // An answer is read against the checkout it was written from. By the time a
+  // trace comes back the reviewer may be in another conversation entirely, and
+  // resolving its paths against the folder of THAT one would open the wrong file.
+  test("a result keeps the cwd of the conversation it arrived in", async () => {
+    const resolveWorkspaceRef = vi.fn(async () => ({ abs: "/tmp/src/app.ts", path: "src/app.ts" }));
+    vi.doMock("../lib/api.ts", () => ({ resolveWorkspaceRef }));
+    const { useStore } = await import("../store/store.ts");
+    // The session on screen is not the one this turn belongs to.
+    useStore.setState({ cwd: "/elsewhere", activeId: "other" } as never);
+
+    await render([{ id: "a1", kind: "assistant", text: "```acp-trace\n"
+      + JSON.stringify({ symbol: "resolveRef", definition: [{ label: "resolveRef", path: "src/app.ts", line: 12 }] })
+      + "\n```" }]);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(resolveWorkspaceRef).toHaveBeenCalledWith("/tmp", "src/app.ts");
+    expect(main.querySelector(".acp-result .md-ref.resolved")).not.toBeNull();
   });
 
   test("the peek line reads as prose, not as markdown", async () => {

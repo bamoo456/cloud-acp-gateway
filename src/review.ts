@@ -1,23 +1,23 @@
 // Review drafts: the comments someone has written against a diff but not yet
-// sent to the agent.
+// sent to the agent — what one may contain, and the `.acp-review/` file they
+// used to live in.
 //
-// They live in the checkout being reviewed — `<repo root>/.acp-review/` — rather
-// than in the browser or in the gateway's own state directory, for three
-// reasons. A draft is *about* this repo, so it belongs with it. The panel is
-// driven from a phone, where a backgrounded tab is discarded without warning and
-// localStorage would be the thing that lost the review. And the gateway is
-// reached from more than one device: a review started on a laptop should still
-// be there on the phone, which per-origin browser storage cannot do.
+// Drafts now live in the gateway's own database (db.ts's review_drafts), beside
+// the discussions and reviewed-file records that a checkout never held. Same
+// reasons the file was preferred to the browser — a phone discards a
+// backgrounded tab, and one account drives the gateway from several devices —
+// plus the one the file could not answer: a discussion has to outlive the
+// worktree it was written in, and a worktree's own files do not.
+//
+// What is left here is the validation (the shapes a browser may store) and the
+// reader that imports an existing `.acp-review/drafts.json` once, so nobody
+// upgrading loses a review in progress. The file functions still write, because
+// the import removes the scope it imported — and only after the row is safely
+// stored.
 //
 // Repo root, not the conversation's cwd: /workspace/changes runs `git status` at
 // the root, so a review's scope is the whole checkout, and a draft started from
-// a session opened on a subdirectory has to be findable from the root. A folder
-// that is not a checkout gets no persistence at all — Review mode has nothing to
-// show there (no commits, no branch, no diff), so there is nothing to persist.
-//
-// This is the only thing in the workspace surface that writes. It writes exactly
-// one directory, whose name is derived server-side from the repo root; the
-// client names a folder and a scope, never a path.
+// a session opened on a subdirectory has to be findable from the root.
 import fs from "node:fs";
 import path from "node:path";
 import type { RevSpec } from "./workspace.ts";
@@ -45,7 +45,9 @@ export const MAX_DRAFTS_BYTES = 1024 * 1024;
 // resurface months later attached to a branch that has moved on.
 export const DRAFT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-export interface ReviewComment {
+// Where a comment or a discussion is attached. Recorded exactly as displayed and
+// never recomputed — see db.ts's discussions table.
+export interface ReviewAnchor {
   // Repo-root-relative POSIX path, as the changed-file list names it.
   path: string;
   // Which side of the diff the line is on. A comment on a deleted line is about
@@ -58,6 +60,9 @@ export interface ReviewComment {
   // comment was actually about beats pointing at a line number that now means
   // something else.
   code: string;
+}
+
+export interface ReviewComment extends ReviewAnchor {
   body: string;
   id?: string;       // client-side identity, preserved verbatim for React keys
 }
@@ -155,10 +160,6 @@ export function readDrafts(repoRoot: string, now = Date.now()): Record<string, R
   return out;
 }
 
-export function readDraft(repoRoot: string, scope: string, now = Date.now()): ReviewComment[] {
-  return readDrafts(repoRoot, now)[scope]?.comments ?? [];
-}
-
 // Replace one scope's comments. An empty list deletes the scope rather than
 // storing an empty one — "I deleted my last comment" and "I never had one" are
 // the same state, and only one of them should survive a reload.
@@ -206,23 +207,42 @@ export function parseComments(input: unknown): ReviewComment[] | null {
   if (!Array.isArray(input) || input.length > MAX_COMMENTS) return null;
   const out: ReviewComment[] = [];
   for (const raw of input) {
-    if (!raw || typeof raw !== "object") return null;
+    const anchor = parseAnchor(raw);
+    if (!anchor) return null;
     const c = raw as Record<string, unknown>;
-    const filePath = c.path;
-    const side = c.side;
-    const line = c.line;
-    const code = c.code ?? "";
     const body = c.body;
-    if (typeof filePath !== "string" || !filePath || Buffer.byteLength(filePath) > MAX_PATH_BYTES) return null;
-    if (side !== "new" && side !== "old") return null;
-    if (typeof line !== "number" || !Number.isInteger(line) || line < 1) return null;
-    if (typeof code !== "string" || Buffer.byteLength(code) > MAX_CODE_BYTES) return null;
     if (typeof body !== "string" || !body.trim() || Buffer.byteLength(body) > MAX_COMMENT_BYTES) return null;
-    const endLine = c.endLine;
-    if (endLine !== undefined && (typeof endLine !== "number" || !Number.isInteger(endLine) || endLine < line)) return null;
     const id = c.id;
     if (id !== undefined && (typeof id !== "string" || id.length > 64)) return null;
-    out.push({ path: filePath, side, line, ...(endLine !== undefined ? { endLine } : {}), code, body, ...(id !== undefined ? { id } : {}) });
+    out.push({ ...anchor, body, ...(id !== undefined ? { id } : {}) });
   }
   return out;
+}
+
+// The location half of a comment, checked on its own because a discussion
+// carries the same anchor without the draft's body/id rules.
+export function parseAnchor(raw: unknown): ReviewAnchor | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  const filePath = c.path;
+  const side = c.side;
+  const line = c.line;
+  const code = c.code ?? "";
+  if (typeof filePath !== "string" || !validRepoPath(filePath)) return null;
+  if (side !== "new" && side !== "old") return null;
+  if (typeof line !== "number" || !Number.isInteger(line) || line < 1) return null;
+  if (typeof code !== "string" || Buffer.byteLength(code) > MAX_CODE_BYTES) return null;
+  const endLine = c.endLine;
+  if (endLine !== undefined && (typeof endLine !== "number" || !Number.isInteger(endLine) || endLine < line)) return null;
+  return { path: filePath, side, line, ...(endLine !== undefined ? { endLine } : {}), code };
+}
+
+// A repo-root-relative POSIX path, the way the changed-file list spells one.
+// The traversal check is not cosmetic: a stored path is later joined onto the
+// repo root and handed to `git diff`, so `../../etc/passwd` would be a read the
+// preview-root filter never got asked about.
+export function validRepoPath(p: string): boolean {
+  if (!p || Buffer.byteLength(p) > MAX_PATH_BYTES) return false;
+  if (path.isAbsolute(p) || p.includes("\\") || p.includes("\0")) return false;
+  return !p.split("/").includes("..");
 }

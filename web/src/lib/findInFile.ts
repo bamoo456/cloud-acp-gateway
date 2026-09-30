@@ -35,8 +35,8 @@ export function matchOffsets(text: string, query: string, cap = MAX_HITS): numbe
   return out;
 }
 
-export function findRanges(root: HTMLElement | null, query: string): Range[] {
-  if (!root || !query) return [];
+// The block's text nodes and where each starts in the concatenated text.
+function textNodes(root: HTMLElement): { nodes: Text[]; starts: number[] } {
   const nodes: Text[] = [];
   const starts: number[] = [];
   let total = 0;
@@ -53,15 +53,33 @@ export function findRanges(root: HTMLElement | null, query: string): Range[] {
     starts.push(total);
     total += t.data.length;
   }
+  return { nodes, starts };
+}
+
+function rangeOver(nodes: Text[], starts: number[], from: number, to: number): Range {
+  const r = document.createRange();
+  const [sn, so] = locate(nodes, starts, from);
+  const [en, eo] = locate(nodes, starts, to);
+  r.setStart(sn, so);
+  r.setEnd(en, eo);
+  return r;
+}
+
+export function findRanges(root: HTMLElement | null, query: string): Range[] {
+  if (!root || !query) return [];
+  const { nodes, starts } = textNodes(root);
   const text = nodes.map((n) => n.data).join("");
-  return matchOffsets(text, query).map((at) => {
-    const r = document.createRange();
-    const [sn, so] = locate(nodes, starts, at);
-    const [en, eo] = locate(nodes, starts, at + query.length);
-    r.setStart(sn, so);
-    r.setEnd(en, eo);
-    return r;
-  });
+  return matchOffsets(text, query).map((at) => rangeOver(nodes, starts, at, at + query.length));
+}
+
+// One Range over [from, to) of the block's concatenated text — the same
+// coordinates a selection is measured in (FilePanel's selectedRange), so a
+// line range found in `textContent` lands on the right characters however
+// many <span>s the highlighter split them across.
+export function offsetRange(root: HTMLElement | null, from: number, to: number): Range | null {
+  if (!root) return null;
+  const { nodes, starts } = textNodes(root);
+  return nodes.length ? rangeOver(nodes, starts, from, to) : null;
 }
 
 // Which text node a whole-block offset falls in. Binary search rather than a

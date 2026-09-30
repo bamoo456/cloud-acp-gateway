@@ -8,6 +8,7 @@ import {
   changes, fileDiff, find, grep, parseGrepZ, preview, repoRoot, outputFolder,
   revChanges, commits, validRev, parseCommitLog, parseNameStatusZ,
   parseStatusZ, parseNumstatZ, looksBinary, inlineImageType, sortTreeEntries,
+  repoFingerprints,
   MAX_TEXT_BYTES, MAX_OUTPUT_FILES, MAX_GREP_FILES, MAX_GREP_PER_FILE, MAX_GREP_LINE_CHARS,
   type TreeEntry,
 } from "./workspace.ts";
@@ -688,5 +689,37 @@ describe("outputFolder", () => {
     const dir = makeScratch();
     assert.equal(await outputFolder(path.join(dir, "mockup.html")), null);
     assert.equal(await outputFolder(path.join(dir, "nope")), null);
+  });
+});
+
+describe("repoFingerprints", () => {
+  test("records every root commit, sorted, and the remote a clone came from", async () => {
+    const dir = makeRepo();
+    const run = (...args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+    run("remote", "add", "origin", "git@example.com:someone/project.git");
+    // A second root, reachable from HEAD: `rev-list --max-parents=0` walks from
+    // HEAD, so an orphan branch nobody merged is not part of this history.
+    run("checkout", "-q", "--orphan", "vendored");
+    run("rm", "-qrf", ".");
+    fs.writeFileSync(path.join(dir, "vendor.txt"), "imported\n");
+    run("add", "-A");
+    run("commit", "-q", "-m", "vendored history");
+    run("checkout", "-q", "main");
+    run("merge", "-q", "--allow-unrelated-histories", "--no-edit", "vendored");
+
+    const f = await repoFingerprints(dir);
+    const roots = execFileSync("git", ["rev-list", "--max-parents=0", "HEAD"], { cwd: dir, encoding: "utf8" })
+      .trim().split("\n").sort();
+    assert.equal(roots.length, 2);
+    // All of them, ordered: picking one of an unordered set is a coin toss, and
+    // this string is evidence a later reassociation has to match on.
+    assert.equal(f.rootCommit, roots.join("\n"));
+    assert.equal(f.remote, "git@example.com:someone/project.git");
+
+    // Neither is required. A checkout with no origin and no commits yet is still
+    // a repository worth holding a review for.
+    const empty = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-fp-")));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: empty, stdio: "pipe" });
+    assert.deepEqual(await repoFingerprints(empty), { rootCommit: null, remote: null });
   });
 });
