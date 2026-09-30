@@ -1142,7 +1142,7 @@ describe("FilePanel", () => {
     useStore.setState({ filesOpen: true, cwd: "/repo" });
     await render();
 
-    const row = container.querySelector<HTMLElement>("button.wf-row")!;
+    const row = container.querySelector<HTMLElement>(FILE_ROW)!;
     await act(async () => {
       row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     });
@@ -1152,8 +1152,8 @@ describe("FilePanel", () => {
     await act(async () => { await flush(); });
 
     expect(downloadFile).toHaveBeenCalledWith(
-      "/workspace/raw?cwd=/repo&path=/repo/src/gateway.ts",
-      "gateway.ts",
+      "/workspace/raw?cwd=/repo&path=/repo/docs/shot.png",
+      "shot.png",
     );
     // The save succeeded, so the menu is done.
     expect(document.querySelector(".wf-menu")).toBeNull();
