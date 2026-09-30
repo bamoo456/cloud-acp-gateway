@@ -5,8 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import {
   loadAgents,
+  agentKindFor,
   supportsClaudeHistory,
   supportsAgentHistory,
+  supportsHistoryDiscovery,
   supportsAgentSessionLoad,
   agentSkinFor,
   listAgentHistory,
@@ -95,6 +97,94 @@ test("loadAgents with an opencode entry whose binary exists keeps the agent", ()
       assert.ok(agents.opencode, "present binary should be kept");
       assert.deepEqual(agents.opencode.args, ["acp"]);
     });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadAgents preserves configured names that shadow Object properties", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-names-"));
+  const fakeBin = path.join(dir, "agent");
+  fs.writeFileSync(fakeBin, "");
+  fs.chmodSync(fakeBin, 0o755);
+  try {
+    const file = path.join(dir, "agents.json");
+    const raw: Record<string, unknown> = {};
+    for (const name of ["constructor", "__proto__", "toString"]) {
+      Object.defineProperty(raw, name, {
+        value: { cmd: fakeBin, args: [] },
+        enumerable: true,
+      });
+    }
+    fs.writeFileSync(file, JSON.stringify(raw));
+
+    withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: undefined }, () => {
+      const agents = loadAgents();
+      assert.equal(Object.getPrototypeOf(agents), null);
+      for (const name of ["constructor", "__proto__", "toString"]) {
+        assert.equal(agents[name].cmd, fakeBin);
+      }
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadAgents accepts literal per-agent env without changing the profile shape", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-env-"));
+  const fakeBin = path.join(dir, "codex-acp");
+  fs.writeFileSync(fakeBin, "");
+  fs.chmodSync(fakeBin, 0o755);
+  const home = path.join(dir, "codex-home");
+  try {
+    const file = path.join(dir, "agents.json");
+    const rawEnv = { CODEX_HOME: home, ACPG_INHERITED: "from-profile" } as Record<string, string>;
+    Object.defineProperty(rawEnv, "__proto__", { value: "safe-value", enumerable: true });
+    fs.writeFileSync(file, JSON.stringify({
+      personal: {
+        cmd: fakeBin,
+        args: [],
+        env: rawEnv,
+      },
+    }));
+
+    withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: undefined }, () => {
+      const agents = loadAgents();
+      assert.equal(agents.personal.env?.CODEX_HOME, home);
+      assert.equal(agents.personal.env?.ACPG_INHERITED, "from-profile");
+      assert.deepEqual(Object.keys(agents.personal.env ?? {}).sort(), ["ACPG_INHERITED", "CODEX_HOME", "__proto__"]);
+      assert.equal(Object.prototype.hasOwnProperty.call(agents.personal.env, "__proto__"), true);
+      assert.equal(agents.personal.env?.["__proto__"], "safe-value");
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadAgents rejects malformed env values and unsafe CODEX_HOME paths", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-env-"));
+  const fakeBin = path.join(dir, "codex-acp");
+  fs.writeFileSync(fakeBin, "");
+  fs.chmodSync(fakeBin, 0o755);
+  const cases: Array<{ env: unknown; message: RegExp }> = [
+    { env: null, message: /expected an object/ },
+    { env: ["not-an-object"], message: /expected an object/ },
+    { env: { "BAD-KEY": "value" }, message: /invalid env key/ },
+    { env: { ACPG_NUMBER: 1 }, message: /must be a string/ },
+    { env: { ACPG_NUL: "bad\0value" }, message: /must not contain NUL/ },
+    { env: { CODEX_HOME: "relative/home" }, message: /CODEX_HOME.*absolute path/ },
+    { env: { CODEX_HOME: "" }, message: /CODEX_HOME.*absolute path/ },
+    { env: { HOME: "relative/home" }, message: /HOME.*absolute path/ },
+    { env: { HOME: "" }, message: /HOME.*absolute path/ },
+  ];
+  try {
+    for (const [i, c] of cases.entries()) {
+      const file = path.join(dir, `agents-${i}.json`);
+      fs.writeFileSync(file, JSON.stringify({ codex: { cmd: fakeBin, args: [], env: c.env } }));
+      withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: undefined }, () => {
+        assert.throws(() => loadAgents(), c.message);
+      });
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -305,7 +395,90 @@ test("loadAgents keeps only one agent when the others are all missing (no FATAL)
   }
 });
 
+test("missing agents file fallback uses a null-prototype registry", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-fallback-"));
+  try {
+    withEnv({
+      ACPG_AGENTS_FILE: path.join(dir, "missing-agents.json"),
+      ACPG_AGENT_CWD: undefined,
+      ACPG_AGENT_CMD: undefined,
+      ACPG_AGENT_ARGS: undefined,
+    }, () => {
+      const agents = loadAgents();
+      assert.equal(Object.getPrototypeOf(agents), null);
+      assert.ok(Object.prototype.hasOwnProperty.call(agents, "claude"));
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("GATEWAY_VERSION matches package.json, so /healthz reports the real version", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")) as { version: string };
   assert.equal(GATEWAY_VERSION, pkg.version);
+});
+
+test("Cursor and Antigravity are recognised from their binary names", () => {
+  // Cursor's ACP binary ships with the app as plain `agent` and runs `agent acp`.
+  assert.equal(agentKindFor("/Users/me/.local/bin/agent"), "cursor");
+  assert.equal(agentKindFor("/usr/local/bin/cursor-agent"), "cursor");
+  // The whole-basename match is what keeps `agent` off claude-agent-acp — the
+  // substring "agent" is in both, so this must not depend on check order.
+  assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/claude-agent-acp"), "claude");
+  assert.equal(agentKindFor("/opt/antigravity/agy_acp_server.par"), "antigravity");
+  // The npm wrapper's two bins are the cmd its own README configures, so both
+  // spellings must be recognised as well as Google's underscored archive.
+  assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/antigravity-acp"), "antigravity");
+  assert.equal(agentKindFor("/opt/acp-gateway/node_modules/.bin/agy-acp-server"), "antigravity");
+});
+
+test("Cursor and Antigravity conversations are browsable and discoverable", () => {
+  // Both keep a readable on-disk store, so they advertise history — and both
+  // record the conversation's cwd in their own metadata rather than leaving it
+  // to be recovered from a transcript, which is what qualifies them for
+  // discovery (the cross-folder Recent list) where opencode does not.
+  for (const cmd of [
+    "/Users/me/.local/bin/agent",
+    "/opt/antigravity/agy_acp_server.par",
+    "/opt/acp-gateway/node_modules/.bin/antigravity-acp",
+  ]) {
+    assert.equal(supportsAgentHistory(cmd), true, cmd);
+    assert.equal(supportsHistoryDiscovery(cmd), true, cmd);
+  }
+  // opencode is the counter-example the rule above is drawn against.
+  assert.equal(supportsAgentHistory("/usr/local/bin/opencode"), true);
+  assert.equal(supportsHistoryDiscovery("/usr/local/bin/opencode"), false);
+  // An unknown CLI still gets neither.
+  assert.equal(supportsAgentHistory("/opt/bin/some-other-acp"), false);
+  assert.equal(supportsHistoryDiscovery("/opt/bin/some-other-acp"), false);
+});
+
+test("an explicit agents.json kind overrides the cmd sniff", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-agent-kind-"));
+  const file = path.join(dir, "agents.json");
+  // A wrapper script tells the sniff nothing, so the entry states its kind.
+  const wrapper = path.join(dir, "run-cursor.sh");
+  fs.writeFileSync(wrapper, "#!/bin/sh\nexec agent acp\n");
+  try {
+    fs.writeFileSync(file, JSON.stringify({
+      wrapped: { cmd: wrapper, args: [], kind: "cursor" },
+      sniffed: { cmd: wrapper, args: [] },
+    }));
+    withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: dir }, () => {
+      const agents = loadAgents();
+      assert.equal(agents.wrapped.kind, "cursor");
+      assert.equal(agentKindFor(agents.wrapped), "cursor");
+      // Same binary without the field: unidentifiable, and honestly so.
+      assert.equal(agents.sniffed.kind, undefined);
+      assert.equal(agentKindFor(agents.sniffed), null);
+    });
+
+    // A kind outside the known set is a config error, not a silent null.
+    fs.writeFileSync(file, JSON.stringify({ bad: { cmd: wrapper, args: [], kind: "gemini" } }));
+    withEnv({ ACPG_AGENTS_FILE: file, ACPG_AGENT_CWD: dir }, () => {
+      assert.throws(() => loadAgents(), /invalid kind "gemini"/);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

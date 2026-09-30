@@ -19,5 +19,27 @@
     "cmd": "/usr/local/bin/opencode",
     "args": ["acp"],
     "cwd": "/workspace"
+  },
+  "cursor": {
+    "cmd": "/Users/me/.local/bin/agent",
+    "args": ["acp"],
+    "cwd": "/workspace"
+  },
+  "cursor-wrapped": {
+    "cmd": "/opt/bin/run-cursor.sh",
+    "args": [],
+    "cwd": "/workspace",
+    "kind": "cursor"
+  },
+  "antigravity": {
+    "cmd": "node_modules/.bin/antigravity-acp",
+    "args": [],
+    "cwd": "/workspace"
+  },
+  "antigravity-npx": {
+    "cmd": "npx",
+    "args": ["-y", "@bamoo456/antigravity-acp"],
+    "cwd": "/workspace",
+    "kind": "antigravity"
   }
 }

@@ -1,5 +1,6 @@
 import { useId, type ReactElement } from "react";
 import type { FileIcon } from "./fileKind.ts";
+import type { AgentGlyph } from "../types.ts";
 
 // ---- header / panel icons ----
 
@@ -202,14 +203,25 @@ export function IconAddToChat() {
 // The file-preview panel's header toggle: the standard VS Code / macOS
 // "toggle right panel" glyph — a frame with a divider toward the right,
 // matching that this panel opens on the right edge of the screen.
-// A pane beside a pane. `left` puts the divider on the left, for the file
-// panel's own list column — the same glyph would otherwise point at the wrong
-// side of the split it toggles.
-export function IconPanel({ left = false }: { left?: boolean }) {
+// A pane beside a pane.
+export function IconPanel() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d={left ? "M9 4v16" : "M15 4v16"} />
+      <path d="M15 4v16" />
+    </svg>
+  );
+}
+
+// A double chevron pointing the way the thing it folds will travel. The file
+// panel's list toggle wore IconPanel's divided rect, which is also the top
+// bar's button for opening this whole panel — two near-identical glyphs a few
+// pixels apart, one moving a pane and one moving the panel.
+export function IconChevrons({ left = false }: { left?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d={left ? "M11 18l-6-6 6-6" : "M13 6l6 6-6 6"} />
+      <path d={left ? "M18 18l-6-6 6-6" : "M6 6l6 6-6 6"} />
     </svg>
   );
 }
@@ -522,6 +534,77 @@ export function OpencodeMark() {
       <rect x="24" y="28" width="16" height="16" fill="#5A5858" />
     </svg>
   );
+}
+
+export function CursorMark() {
+  // Cursor's faceted cube on its near-black app-icon tile: a hexagon lit from
+  // the front, so the top band reads white and the wedge falling to the bottom
+  // vertex — the cursor itself — stays bright against the two shaded halves.
+  // The halves take a vertical gradient because the real mark splits each into
+  // an upper and a lower facet, which flat fills would flatten into one plane.
+  // Self-coloured (ignores currentColor), like the other brand marks.
+  const gid = useId();
+  const left = `${gid}-l`, right = `${gid}-r`;
+  return (
+    <svg className="cursor-mark" viewBox="0 0 64 64" fill="none" aria-hidden>
+      <defs>
+        <linearGradient id={left} x1="0" y1="8" x2="0" y2="56" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#4A4A4A" />
+          <stop offset="1" stopColor="#9A9A9A" />
+        </linearGradient>
+        <linearGradient id={right} x1="0" y1="8" x2="0" y2="56" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#3C3C3C" />
+          <stop offset="1" stopColor="#6E6E6E" />
+        </linearGradient>
+      </defs>
+      <rect x="0" y="0" width="64" height="64" rx="10" fill="#161514" />
+      <g transform="translate(11.5 8) scale(1.7333)">
+        <path d="M22.35 18V6L11.925 0v12l10.425 6z" fill={`url(#${right})`} />
+        <path d="M11.925 0L1.5 6v12l10.425-6V0z" fill={`url(#${left})`} />
+        <path d="M22.35 6L11.925 24V12L22.35 6z" fill="#DCDCDC" />
+        <path d="M22.35 6l-10.425 6L1.5 6h20.85z" fill="#fff" />
+      </g>
+    </svg>
+  );
+}
+
+export function AntigravityMark() {
+  // Antigravity's arch — one round-capped stroke rising from two feet to a
+  // single apex. The Google spectrum runs left to right across the mark rather
+  // than along the path, which is what puts blue on both feet, green up the
+  // left leg and red over the apex: the arch's x tracks its progress, so one
+  // horizontal gradient lands every hue where the brand puts it.
+  const gid = useId();
+  return (
+    <svg className="antigravity-mark" viewBox="0 0 64 64" fill="none" aria-hidden>
+      <defs>
+        <linearGradient id={gid} x1="8" y1="0" x2="56" y2="0" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#7BAAFF" />
+          <stop offset="0.24" stopColor="#34A853" />
+          <stop offset="0.40" stopColor="#F9AB00" />
+          <stop offset="0.53" stopColor="#EA4335" />
+          <stop offset="0.66" stopColor="#4285F4" />
+          <stop offset="1" stopColor="#7BAAFF" />
+        </linearGradient>
+      </defs>
+      <path d="M10 52C14 32 23 13 32 13s18 19 22 39" stroke={`url(#${gid})`}
+        strokeWidth="15" strokeLinecap="round" fill="none" />
+    </svg>
+  );
+}
+
+// The one place a glyph kind turns into a glyph. "mono" has none — the callers
+// that can show a wordmark instead do, and the ones that can't fall back to the
+// robot, so neither decision is duplicated into a second ternary that drifts.
+export function AgentMark({ kind }: { kind: AgentGlyph }) {
+  switch (kind) {
+    case "codex": return <CodexMark />;
+    case "opencode": return <OpencodeMark />;
+    case "cursor": return <CursorMark />;
+    case "antigravity": return <AntigravityMark />;
+    case "claude": return <Robot />;
+    default: return null;
+  }
 }
 
 // ---- Tool icons ----

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { Acp, sseFactory, type RpcMessage } from "../lib/acp.ts";
 import { readConfig, sseUrl, rpcUrl, linkParams, shareUrl } from "../lib/config.ts";
-import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
+import { getMessages, renameSession as apiRename, deleteSession as apiDelete, getPrefs, putTextSize, answerInbox, markInboxRead, postAttention, toggleHiddenFolder as apiToggleHiddenFolder, togglePinnedSession as apiTogglePinnedSession, toggleArchivedSession as apiToggleArchivedSession, type RunningTask, type InboxItem } from "../lib/api.ts";
 import { resolveRunningTask, ingestSeen, type RunningSeen } from "../lib/runningTask.ts";
 import { readRecentSessions, touchRecentSession, removeRecentSession, renameRecentSession as renameRecentCache, hydrateRecentSessions, type RecentSession } from "../lib/recentSessions.ts";
 import { touchRecentFolder, hydrateRecentFolders } from "../lib/recentFolders.ts";
@@ -19,7 +19,7 @@ import {
 import type {
   Session, SessionEngine, ConfigOption, PermissionOption, NewSessionResult, ThreadItem, PendingPermission,
   AgentSkin, MessageImage, MessageFile, QueuedPrompt, PromptCapabilities, ElicitationResponse, RateLimit,
-  SlashCommand, AgentRef,
+  SlashCommand, AgentRef, AgentGlyph,
 } from "../types.ts";
 import { parseElicitationFields } from "../lib/elicitation.ts";
 
@@ -147,17 +147,15 @@ interface State {
   // background session relabelled the one on screen, and switching between two
   // live conversations left the previous one's model on the dock. They live on
   // the session now (types.ts's SessionEngine) — read them with engineOf().
-  // provider kind ("claude" / "codex") -> rateLimitType -> the latest window
-  // that account reported. Keyed by provider, not by the active agent: each
-  // provider's quota is polled continuously regardless of which agent is on
-  // screen (UsageStrip.tsx shows the active one by default, every provider on
-  // hover/click), so switching agents must never wipe another provider's data.
+  // configured agent name -> rateLimitType -> the latest window that account
+  // reported. Two named agents can share a provider while using different
+  // credentials, so provider kind alone is not an account key.
   rateLimits: Record<string, Record<string, RateLimit>>;
-  // provider kind -> whether that account reported no windows because it's a
+  // configured agent name -> whether that account reported no windows because it's a
   // Business/enterprise seat metered by credits instead (UsageStrip.tsx shows
   // this as an unbounded gauge rather than leaving the row blank).
   quotaUnlimited: Record<string, boolean>;
-  // provider kind -> why the gateway could not read that account's quota
+  // configured agent name -> why the gateway could not read that account's quota
   // ("expired", "reauth", "no-credential", "network", …), or absent when it
   // could. A quota that silently renders nothing is indistinguishable from a
   // broken gauge, and the credential reasons need the user to go and re-auth.
@@ -322,6 +320,10 @@ interface State {
   setTextSize: (size: TextSize) => void;
   setTip: (t: string) => void;
   readActiveSession: () => void;
+  // Tell the gateway the open conversation still has a reader, so its backing CLI
+  // is not reaped out from under the next prompt. Self-throttling — call it as
+  // often as convenient (App's poll tick does).
+  beatAttention: () => void;
   // No target = the active conversation (the ActionMenu path); a target = any
   // conversation, active or not (the sidebar's per-row rename). A sidebar row
   // carries its OWN agent and folder — a discovered row names a conversation in
@@ -338,7 +340,7 @@ interface State {
   // a listing covers one folder (or one provider's discoverable store), so absence
   // from it means "not asked about", never "no longer named".
   mergeHistoryTitles: (rows: Array<{ agentName: string; sessionId: string; title: string | null }>) => void;
-  ingestUsageLimits: (kind: string, windows: Record<string, RateLimit>, unlimited?: boolean, unavailable?: string) => void;
+  ingestUsageLimits: (agentName: string, windows: Record<string, RateLimit>, unlimited?: boolean, unavailable?: string) => void;
   ingestRunningTasks: (tasks: RunningTask[]) => void;
   ingestInboxItems: (items: InboxItem[], expectedRevision: number) => void;
   ensureConnected: () => void;
@@ -418,8 +420,22 @@ export function handoffGate(state: State): HandoffGate {
   return { targets, disabled: !targets.length || !ready || running, why };
 }
 
-export function hasCodexSkin(state: SkinState): boolean {
-  return activeAgentSkin(state) === "codex";
+// Which brand an agent wears, everywhere it is drawn or named. The skin wins
+// over the kind — a codex-skinned agent is a Codex however its binary is named
+// — then the kind's own brand, then Claude by name for the configs that predate
+// `kind`. Anything left is "mono": no glyph of its own, so it goes by its name.
+// Lives here as the single answer because three components used to re-derive it
+// and one of them had drifted, which is how antigravity ended up wearing the
+// Claude robot on the empty state but not on its turn labels.
+export function agentGlyphKind(agent: AgentRef | undefined): AgentGlyph {
+  if (normalizeAgentSkin(agent?.skin) === "codex") return "codex";
+  const kind = agent?.kind;
+  if (kind === "opencode" || kind === "cursor" || kind === "antigravity") return kind;
+  return agent?.name === "claude" ? "claude" : "mono";
+}
+
+export function activeAgentGlyph(state: SkinState): AgentGlyph {
+  return agentGlyphKind(state.cfg.agents.find((a) => a.name === state.agentName));
 }
 
 // Which provider's quota an agent config maps to — the only two the gateway's
@@ -480,6 +496,16 @@ const lastSessionByAgent = new Map<string, { id: string; cwd: string }>();
 // an agent resumes its stream after that seq and the ledger replays the frames
 // produced while we were away. Survives Acp recreation (per-agent channels).
 const agentCursors = new Map<string, number>();
+// How often to re-assert that the open conversation still has a reader. Must stay
+// comfortably under the gateway's ACPG_SESSION_IDLE_TTL_MS (default 180s) — a beat
+// slower than the TTL would let the session be reaped between two beats, which is
+// the whole thing this exists to prevent.
+const ATTENTION_BEAT_MS = 60_000;
+// The session the last beat was sent for, and when. Per-session rather than a bare
+// timestamp so switching conversations beats immediately instead of waiting out the
+// previous one's interval.
+let attendedId: string | null = null;
+let attendedAt = 0;
 const PROVISIONAL = () => "pending-" + Math.random().toString(36).slice(2);
 const MAX_LIVE_SESSIONS = 8;
 // How many floating windows can be up at once. Not a layout limit — a cascade of
@@ -817,7 +843,7 @@ export const useStore = create<State>((set, get) => {
     set({
       agentReady: false, tip: "Reconnecting…",
       sessions: {}, activeId: null, sideWindows: [],
-      // rateLimits is deliberately untouched: it's polled per provider,
+      // rateLimits is deliberately untouched: it's polled per account,
       // independent of this connection, and a restart shouldn't blank it.
       promptCapabilities: {}, pendingPermissions: [],
       busy: false, busySessionIds: {},
@@ -855,9 +881,8 @@ export const useStore = create<State>((set, get) => {
     // one window, so this accumulates rather than replaces.
     const rl = p.update._meta?.["_claude/rateLimit"] as RateLimit | undefined;
     if (p.update.sessionUpdate === "usage_update" && rl?.rateLimitType) {
-      // This _meta key only ever rides on a Claude usage_update — hardcoded
-      // rather than derived from the active agent, so it lands correctly even
-      // if a background Codex poll is what's currently being displayed.
+      // This _meta key only ever rides on a Claude usage_update. The SSE channel
+      // name, not provider kind, identifies which configured account reported it.
       //
       // Only the fields the event actually carries win. An event can name a
       // window and say nothing about it — the one real event captured on this
@@ -867,8 +892,8 @@ export const useStore = create<State>((set, get) => {
       // isn't a number, so that reads on screen as the 5h segment vanishing
       // mid-conversation while the others stay, until the next poll.
       const carried = Object.fromEntries(Object.entries(rl).filter(([, v]) => v != null));
-      const merged = { ...get().rateLimits.claude?.[rl.rateLimitType], ...carried };
-      set({ rateLimits: { ...get().rateLimits, claude: { ...get().rateLimits.claude, [rl.rateLimitType]: merged } } });
+      const merged = { ...get().rateLimits[sourceAgent]?.[rl.rateLimitType], ...carried };
+      set({ rateLimits: { ...get().rateLimits, [sourceAgent]: { ...get().rateLimits[sourceAgent], [rl.rateLimitType]: merged } } });
     }
     const st = get();
     const remotePrompt = p.update.sessionUpdate === "user_message_chunk";
@@ -1342,7 +1367,7 @@ export const useStore = create<State>((set, get) => {
     set({
       agentName, cwd: cwd || get().cwd,
       conn: "connecting", agentReady: false, tip,
-      // rateLimits carries over: it's keyed by provider and polled independent
+      // rateLimits carries over: it's keyed by account and polled independent
       // of which agent is active, so a different provider's quota is still valid.
       sessions: {}, activeId: null,
       promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: true,
@@ -1602,7 +1627,7 @@ export const useStore = create<State>((set, get) => {
         // sessions, wiping it would drop a background session's prompt (its badge)
         // on a switch-away/back. Entries carry their agentName so the badge only
         // surfaces prompts answerable on the now-active agent.
-        // rateLimits is NOT reset here: it's keyed by provider and polled
+        // rateLimits is NOT reset here: it's keyed by account and polled
         // continuously regardless of which agent is on screen, so switching
         // away from Codex must not blank the Codex quota it already fetched.
         // The engine lists are not reset either, and nothing has to put them back
@@ -1647,6 +1672,25 @@ export const useStore = create<State>((set, get) => {
       if (!st.inboxItems.some(isRead)) return;
       set({ inboxItems: st.inboxItems.filter((it) => !isRead(it)) });
       void markInboxRead(id);
+    },
+
+    beatAttention() {
+      const st = get();
+      const id = st.activeId;
+      if (!id || id.startsWith("pending-")) return;
+      const sess = st.sessions[id];
+      // A conversation opened out of history has no CLI behind it, and attending
+      // one would spawn a resume for a reader who only wanted to read it — the
+      // whole point of the view-only path. Replying to it resumes it deliberately,
+      // with its own "Resuming agent…" tip; only from then on is it attendable.
+      if (!sess || sess.viewOnly) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      const now = Date.now();
+      if (attendedId === id && now - attendedAt < ATTENTION_BEAT_MS) return;
+      attendedId = id; attendedAt = now;
+      // The session's own agent, not the store's: a conversation kept active
+      // across an agent switch belongs to the channel that owns its CLI.
+      void postAttention(sess.agentName || st.agentName, id);
     },
     renameSession(title, target) {
       const sid = target?.sessionId ?? get().activeId;
@@ -1923,15 +1967,14 @@ export const useStore = create<State>((set, get) => {
       });
     },
 
-    // Called by the /usage/limits poll, once per provider it's running for.
-    // Replaces rather than merges that provider's own windows: the route
-    // reports every window the account has, so folding it into whatever the
-    // ACP path happened to leave behind could only keep a staler copy of the
-    // same window alive. Other providers' entries are untouched. Same object
+    // Called by the /usage/limits poll, once per configured agent it's running for.
+    // Replaces rather than merges that agent's own windows: the route reports
+    // every window the account has, so folding it into the ACP path could only
+    // keep a staler copy alive. Other agents' entries are untouched. Same object
     // back when nothing moved, since this runs on a timer and the strip
     // subscribes to the map.
-    ingestUsageLimits(kind, windows, unlimited, unavailable) {
-      const prevReason = get().quotaUnavailable[kind] ?? "";
+    ingestUsageLimits(agentName, windows, unlimited, unavailable) {
+      const prevReason = get().quotaUnavailable[agentName] ?? "";
       const nextReason = unavailable ?? "";
       // An unavailable answer carries no windows, and must not be read as "this
       // account now has none": a blip mid-session would wipe a gauge that was
@@ -1939,22 +1982,22 @@ export const useStore = create<State>((set, get) => {
       // stays on screen, and the reason speaks for itself when nothing is.
       if (unavailable) {
         if (prevReason === nextReason) return;
-        set({ quotaUnavailable: { ...get().quotaUnavailable, [kind]: nextReason } });
+        set({ quotaUnavailable: { ...get().quotaUnavailable, [agentName]: nextReason } });
         return;
       }
-      const prevWindows = get().rateLimits[kind] ?? {};
+      const prevWindows = get().rateLimits[agentName] ?? {};
       const sameWindows = Object.keys(windows).length === Object.keys(prevWindows).length
         && Object.entries(windows).every(([k, w]) =>
           prevWindows[k]?.utilization === w.utilization && prevWindows[k]?.resetsAt === w.resetsAt);
-      const prevUnlimited = !!get().quotaUnlimited[kind];
+      const prevUnlimited = !!get().quotaUnlimited[agentName];
       const nextUnlimited = !!unlimited;
       if (sameWindows && prevUnlimited === nextUnlimited && prevReason === nextReason) return;
       set({
-        rateLimits: sameWindows ? get().rateLimits : { ...get().rateLimits, [kind]: windows },
+        rateLimits: sameWindows ? get().rateLimits : { ...get().rateLimits, [agentName]: windows },
         quotaUnlimited: prevUnlimited === nextUnlimited
-          ? get().quotaUnlimited : { ...get().quotaUnlimited, [kind]: nextUnlimited },
+          ? get().quotaUnlimited : { ...get().quotaUnlimited, [agentName]: nextUnlimited },
         quotaUnavailable: prevReason === nextReason
-          ? get().quotaUnavailable : { ...get().quotaUnavailable, [kind]: nextReason },
+          ? get().quotaUnavailable : { ...get().quotaUnavailable, [agentName]: nextReason },
       });
     },
 

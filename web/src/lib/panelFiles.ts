@@ -73,7 +73,10 @@ export function mergePanelFiles(
   // touchedFiles established (most recently touched first), then the rest of the
   // checkout's dirt in git's own mtime order, then the folder listings in theirs.
   // Enriching an existing row does not move it, so the agent's newest output
-  // stays at the top.
+  // stays at the top — of THIS list. The panel groups these rows into folders
+  // before drawing them (see PathTree), which sorts each folder's contents by
+  // name, so recency survives here as the split between the list's halves
+  // rather than as the order rows appear in.
   const byPath = new Map<string, PanelFile>();
   for (const f of written) {
     byPath.set(f.path, { abs: f.path, label: f.label, fromThread: true });

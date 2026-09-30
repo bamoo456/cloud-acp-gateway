@@ -48,7 +48,8 @@ available on the same host or inside the same container as the gateway.
   conversation only. The main column's settings are left where they are.
 - Per-agent replay ledger for mobile disconnect/reconnect handling.
 - Built-in TLS by default, with self-signed cert generation or bring-your-own certs.
-- History browsing for supported agents: Claude Code, Codex, and opencode.
+- History browsing for supported agents: Claude Code, Codex, opencode, Cursor
+  and Antigravity. All but opencode also appear in the cross-folder Recent list.
 
 ## Requirements
 
@@ -61,6 +62,15 @@ available on the same host or inside the same container as the gateway.
   - Claude: `claude` installed and logged in.
   - Codex: `OPENAI_API_KEY` / `CODEX_API_KEY`, or `codex login`.
   - opencode: `opencode` installed and authenticated separately.
+  - Cursor: the `agent` CLI that ships with the Cursor app (`agent login`).
+  - Antigravity: `npx @bamoo456/antigravity-acp` (fetches Google's
+    `agy_acp_server` for your platform, ~300-680 MB download), or the
+    `agy_acp_server.par` archive from Google's ACP registry entry. Not a
+    dependency of this gateway: the download would land on every `npm ci`.
+    The **Login** screen cannot authenticate this one: the ACP server keeps its
+    own credential store (`~/.gemini/antigravity-acp/`) and does its own OAuth
+    through the ACP `authenticate` method, which this gateway does not yet send.
+    Authenticate it once on the gateway host before configuring it here.
 
 ## Quick Start
 
@@ -142,7 +152,8 @@ Common optional settings:
 | `ACPG_PREVIEW_ROOTS` | _(none)_ | Extra directories the file preview panel may read, colon-separated (e.g. `/tmp`). By default it sees only the conversation's own project — see [What the preview can reach](#what-the-preview-can-reach). |
 | `ACPG_PREVIEW_FILTER_ENABLED` | `1` | Set `0` to let the preview panel read **any** file on the host, ignoring the rules above. Convenient on a machine you own; makes the gateway credential a read-any-file capability. |
 | `ACPG_HISTORY_HEADLESS` | `off` | Set `on` to list headless runs — `claude -p` and `codex exec` — alongside real conversations. Off by default: a scripted or cron-driven run writes one transcript per invocation, usually in a throwaway cwd, so a nightly job buries your own sessions under its folders. The interactive CLIs and SDK/ACP sessions (including the gateway's own) are always listed. |
-| `CODEX_HOME` | `~/.codex` | Codex login/session state. |
+| `ACPG_HISTORY_HEADLESS` | `off` | Set `on` to list headless runs — `claude -p` and `codex exec` — alongside real conversations. Off by default: a scripted or cron-driven run writes one transcript per invocation, usually in a throwaway cwd, so a nightly job buries your own sessions under its folders. The interactive CLIs and SDK/ACP sessions (including the gateway's own) are always listed. |
+| `CODEX_HOME` | `~/.codex` | Default Codex login/session state for agent entries without `env.CODEX_HOME` or `env.HOME`. |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude login/session state and history. |
 
 ## Agents
@@ -153,13 +164,94 @@ Common optional settings:
 {
   "claude": { "cmd": "node_modules/.bin/claude-agent-acp", "args": [], "cwd": "/workspace" },
   "codex": { "cmd": "node_modules/.bin/codex-acp", "args": [], "cwd": "/workspace" },
-  "opencode": { "cmd": "/usr/local/bin/opencode", "args": ["acp"], "cwd": "/workspace" }
+  "opencode": { "cmd": "/usr/local/bin/opencode", "args": ["acp"], "cwd": "/workspace" },
+  "cursor": { "cmd": "/Users/me/.local/bin/agent", "args": ["acp"], "cwd": "/workspace" },
+  "antigravity": { "cmd": "node_modules/.bin/antigravity-acp", "args": [], "cwd": "/workspace" }
 }
 ```
 
 Relative `cmd` values resolve from the gateway install directory. `cwd` is the
 project directory the agent works in. If `cwd` is omitted, `ACPG_AGENT_CWD` is
 used, then the gateway user's home directory.
+
+### Agent kind
+
+Each entry may state its backing CLI as `"kind"`: `claude`, `codex`, `opencode`,
+`cursor` or `antigravity`. It decides which login command the Login screen runs
+and which resume syntax the terminal hint shows, and it is normally sniffed from
+`cmd`. State it when the binary name can't carry the answer — a wrapper script,
+a renamed or vendored binary — and the gateway will stop guessing:
+
+```json
+{
+  "cursor": { "cmd": "/opt/bin/run-cursor.sh", "args": [], "kind": "cursor" },
+  "antigravity": { "cmd": "npx", "args": ["-y", "@bamoo456/antigravity-acp"], "kind": "antigravity" }
+}
+```
+
+The second entry is the common case: launched through `npx`, the basename the
+sniff sees is `npx`, which names no CLI at all.
+
+An agent whose kind is unknown still works as a plain ACP agent; it just gets no
+history browsing, and the Login screen answers 501 instead of running some other
+agent's login flow. Override the command per agent with
+`ACPG_<AGENT>_LOGIN_CMD` / `ACPG_<AGENT>_LOGIN_ARGS`.
+
+### Per-agent environment and Codex accounts
+
+Each agent may define an optional `env` object. Its string values are merged over
+the gateway environment for that ACP child only, and for that agent's `/login/*`
+PTY. The gateway process environment is never changed, so sibling agents can use
+different accounts concurrently. Environment values are literal strings: keys
+must be valid environment names, values must not contain NUL, and `CODEX_HOME`
+and `HOME` must be non-empty absolute paths. Shell variables and `~` are not
+expanded.
+
+For gateway-side Codex history and quota lookups, the fallback is precise:
+non-empty `env.CODEX_HOME`, then inherited `CODEX_HOME`, then
+`env.HOME/.codex`, then the ordinary `~/.codex` default. The ACP and login
+children receive the complete per-agent environment. The gateway never mutates
+its own environment.
+
+For example, two named Codex agents can keep separate login, history, search,
+deletion, and usage stores:
+
+```json
+{
+  "codex": {
+    "cmd": "node_modules/.bin/codex-acp",
+    "args": [],
+    "cwd": "/workspace",
+    "env": { "CODEX_HOME": "/workspace/.codex-personal" }
+  },
+  "codex-work": {
+    "cmd": "node_modules/.bin/codex-acp",
+    "args": [],
+    "cwd": "/workspace",
+    "env": { "CODEX_HOME": "/workspace/.codex-work" }
+  }
+}
+```
+
+The two directories do not need to exist before startup; remove the extra entry
+when a second account is not needed. The first login for each named agent writes
+credentials into its selected `CODEX_HOME`, and the ACP child receives the same
+path. History routes select the account with `agent=<name>`; search without an
+agent scans each distinct configured Codex home and preserves the matching agent
+name. Session-ID deletion scans configured stores but still refuses transcripts
+whose recorded cwd is outside `FS_ROOT`. Gateway metadata and deletion are keyed
+by session ID, not account, and therefore assume session IDs are globally unique
+across configured Codex homes.
+
+Usage clients may request `GET /usage/limits?kind=codex&agent=codex-work`.
+Existing kind-only requests remain valid when the configured Codex store is
+unambiguous; with multiple distinct homes they return an unavailable response
+with `reason: "ambiguous-agent"` instead of silently selecting an account.
+
+The environment override applies to every ACP child and to the existing
+Claude/Codex login PTYs. Provider-specific history isolation for Claude/opencode
+and provider-specific quota overrides remain outside this feature; their existing
+shared stores and quota behavior are unchanged.
 
 The gateway skips agent entries whose command does not exist, so one shared
 `agents.json` can include optional agents. It exits if no usable agents remain.

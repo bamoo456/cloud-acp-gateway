@@ -59,6 +59,30 @@ for (const vp of VIEWPORTS) {
   });
 }
 
+// The column was pinned at 760px, which left ~45% of a 1920px screen as margin.
+// It fills the pane now; the cap that was load-bearing — a readable line of
+// prose — moved onto the prose itself, so code and tables still take the width.
+test("a wide window gives the column its width and stops at prose", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 917 });
+  await page.addInitScript(SEED_SSE(1));
+  await page.goto("/");
+  await expect(page.locator(".turn.agent .md pre").last()).toBeVisible();
+
+  const m = await page.evaluate(() => {
+    const px = (sel: string) => document.querySelector(sel)!.getBoundingClientRect().width;
+    return {
+      thread: px(".thread"),
+      composer: px(".composer"),
+      para: px(".turn.agent .md p"),
+      pre: px(".turn.agent .md pre"),
+    };
+  });
+  expect(m.thread, "the column fills the pane instead of sitting in a wide margin").toBeGreaterThan(900);
+  expect(m.composer, "the composer shares the thread's column, or the edges stop lining up").toBe(m.thread);
+  expect(m.para, "prose keeps the measure the fixed column gave it").toBeLessThan(800);
+  expect(m.pre, "code takes the width prose gives up").toBeGreaterThan(m.para + 100);
+});
+
 test("conversation action menu opens with the expected actions", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(SEED_SSE(2));

@@ -651,15 +651,18 @@ export async function getRunning(): Promise<RunningTask[]> {
 // gauge renders them identically. Unlike the ACP path this needs no turn to have
 // happened. `null` means the gateway couldn't say (too old to have the route,
 // offline, no credential) — which is different from "no windows". `kind`
-// selects which account the gateway reads — Claude's own OAuth usage endpoint,
-// or Codex's ChatGPT-backend one on "codex". `unlimited` is set for a
+// selects the provider and `agent` selects the configured account the gateway
+// reads — Claude's own OAuth usage endpoint, or Codex's ChatGPT-backend one on
+// "codex". `unlimited` is set for a
 // Business/enterprise seat, which reports no windows at all — metered by
 // credits instead — so the UI has something to show besides a blank row.
 export interface UsageLimitsResult { windows: Record<string, RateLimit>; unlimited?: boolean; unavailable?: string }
 
-export async function getUsageLimits(kind: "claude" | "codex" = "claude"): Promise<UsageLimitsResult | null> {
+export async function getUsageLimits(kind: "claude" | "codex" = "claude", agent?: string): Promise<UsageLimitsResult | null> {
   try {
-    const r = await fetch(base() + "/usage/limits?kind=" + kind);
+    const params = new URLSearchParams({ kind });
+    if (agent) params.set("agent", agent);
+    const r = await fetch(base() + "/usage/limits?" + params.toString());
     if (!r.ok) return null;
     const j = await r.json();
     // "unavailable" is an answer, not a failure — the gateway says it when the
@@ -733,6 +736,21 @@ export async function markInboxRead(sessionId: string): Promise<void> {
   try {
     const u = new URL(base() + "/inbox/read");
     u.searchParams.set("sessionId", sessionId);
+    await fetch(u.toString(), { method: "POST" });
+  } catch {
+    // ignore
+  }
+}
+
+// Tell the gateway a reader has this conversation open and on screen, so its
+// idle reaper stops treating "not typed into yet" as "abandoned" (and re-loads it
+// straight away if it was already reaped). Best-effort: a failure only means the
+// next beat, or the prompt itself, pays the resume instead.
+export async function postAttention(agent: string, sessionId: string): Promise<void> {
+  try {
+    const u = new URL(base() + "/attention");
+    u.searchParams.set("agent", agent);
+    u.searchParams.set("session", sessionId);
     await fetch(u.toString(), { method: "POST" });
   } catch {
     // ignore

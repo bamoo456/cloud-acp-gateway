@@ -75,9 +75,9 @@ export function LoginTerminal({ agent, onClose }: { agent: AgentRef; onClose: ()
         if (cancelled) return;
         setPhase((p) => (p === "awaiting-code" ? "done" : p));
       };
-    }).catch((e) => {
+    }).catch((e: unknown) => {
       if (cancelled) return;
-      setErrMsg(String(e));
+      setErrMsg(e instanceof Error ? e.message : String(e));
     });
 
     return () => {

@@ -3,6 +3,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ChangesResult, CommitEntry, FileDiffResult, ReviewComment } from "../lib/api.ts";
 
+// A file row, not a folder row: every list in the panel is a folder tree now,
+// so ".wf-row" also matches the folder headers the tree draws.
+const FILE_ROW = "button.wf-row:not(.wf-dir-row)";
+
 const flush = async () => {
   await Promise.resolve();
   await Promise.resolve();
@@ -117,9 +121,25 @@ describe("ReviewPanel", () => {
     expect(chip("Working")?.className).toContain("on");
     // No revision parameter: the working tree is what the panel has always shown.
     expect(getWorkspaceChanges).toHaveBeenCalledWith("/repo", null);
-    // Name and folder are separate cells, as in every other list in the panel.
-    expect(container.querySelector(".wf-nm")?.textContent).toBe("workspace.ts");
-    expect(container.querySelector(".wf-dir")?.textContent).toBe("src");
+    // The folder is a row of its own, with the file nested under it — the
+    // second line each row used to carry the path on is gone.
+    expect(container.querySelector("button.wf-dir-row .wf-nm")?.textContent).toBe("src");
+    expect(container.querySelector(FILE_ROW + " .wf-nm")?.textContent).toBe("workspace.ts");
+    expect(container.querySelector(".wf-dir")).toBeNull();
+  });
+
+  test("a folder row folds its files away, and back", async () => {
+    await render();
+    const folder = container.querySelector<HTMLButtonElement>("button.wf-dir-row")!;
+    expect(folder.getAttribute("aria-expanded")).toBe("true");
+
+    await click(folder);
+    expect(container.querySelector(FILE_ROW)).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>("button.wf-dir-row")!
+      .getAttribute("aria-expanded")).toBe("false");
+
+    await click(container.querySelector("button.wf-dir-row"));
+    expect(container.querySelector(FILE_ROW + " .wf-nm")?.textContent).toBe("workspace.ts");
   });
 
   test("Commits lists the log, and picking one re-asks for that revision", async () => {
@@ -149,7 +169,7 @@ describe("ReviewPanel", () => {
     await render();
     await click(chip("Commits"));
     await click([...container.querySelectorAll(".rv-commit")][0]);
-    await click(container.querySelector(".wf-row"));
+    await click(container.querySelector(FILE_ROW));
     expect(rows().length).toBeGreaterThan(0);
 
     await bump({ refreshKey: 1 });
@@ -186,7 +206,7 @@ describe("ReviewPanel", () => {
 
   test("Refresh re-reads the open file's diff; a turn ending leaves it alone", async () => {
     await render();
-    await click(container.querySelector(".wf-row"));
+    await click(container.querySelector(FILE_ROW));
     expect(getFileDiff).toHaveBeenCalledTimes(1);
 
     // A turn ending refreshes the lists around the diff, not the diff itself:
@@ -212,7 +232,7 @@ describe("ReviewPanel", () => {
 
   test("every diff row is a comment target, and adding one saves the draft", async () => {
     const onCount = await render();
-    await click(container.querySelector(".wf-row"));
+    await click(container.querySelector(FILE_ROW));
     expect(getFileDiff).toHaveBeenCalledWith("/repo", "/repo/src/workspace.ts", null);
 
     // The whole row, not a hover-only affordance: this panel is driven from a
@@ -246,7 +266,7 @@ describe("ReviewPanel", () => {
     // The two numbering schemes are not interchangeable — storing this against
     // the new side would point at unrelated code.
     await render();
-    await click(container.querySelector(".wf-row"));
+    await click(container.querySelector(FILE_ROW));
     await click(rows().find((r) => r.className.includes("del")));
     expect(container.querySelector(".rv-anchor")?.textContent).toContain("removed");
   });
@@ -281,7 +301,7 @@ describe("ReviewPanel", () => {
     getReviewDraft.mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: false });
     saveReviewDraft.mockResolvedValue(false);
     await render();
-    await click(container.querySelector(".wf-row"));
+    await click(container.querySelector(FILE_ROW));
     await click(rows().find((r) => r.className.includes("add")));
     const box = container.querySelector<HTMLTextAreaElement>(".rv-cmt textarea")!;
     await act(async () => {

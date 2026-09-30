@@ -39,6 +39,7 @@ interface Props {
   className?: string;
   onChange(value: string, caret: number): void;
   onPasteFiles?(files: File[]): void;
+  onDropFiles?(files: File[]): void;
   callbacksRef: React.MutableRefObject<MarkdownInputCallbacks>;
 }
 
@@ -73,7 +74,7 @@ function wrapSelection(view: EditorView, marker: string): boolean {
 // the old <textarea>'s contract — a controlled `value` + onChange(value, caret)
 // — so the Composer's slash/@ menus and send logic are unchanged.
 export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function MarkdownInput(
-  { value, placeholder, className, onChange, onPasteFiles, callbacksRef },
+  { value, placeholder, className, onChange, onPasteFiles, onDropFiles, callbacksRef },
   ref,
 ) {
   const host = useRef<HTMLDivElement>(null);
@@ -81,6 +82,7 @@ export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function Mar
   // Latest onChange/onPasteFiles, read by the editor's (stable) extensions.
   const onChangeRef = useRef(onChange); onChangeRef.current = onChange;
   const onPasteRef = useRef(onPasteFiles); onPasteRef.current = onPasteFiles;
+  const onDropRef = useRef(onDropFiles); onDropRef.current = onDropFiles;
   // Holds the placeholder extension so it can be reconfigured when the connected
   // agent (and thus the prompt) changes, without rebuilding the editor.
   const placeholderComp = useRef(new Compartment());
@@ -132,6 +134,17 @@ export const MarkdownInput = forwardRef<MarkdownInputHandle, Props>(function Mar
                 .filter((f): f is File => !!f);
               if (imgs.length) { e.preventDefault(); cb2(imgs); return true; }
               return false;
+            },
+            // CodeMirror's built-in drop handler reads a dropped file with
+            // FileReader and inserts its *text* into the document — drop an
+            // .html file and you get its markup pasted in. Take the drop first
+            // and route it to the attachment path instead. stopPropagation so
+            // the Composer's own onDrop doesn't attach the same files twice.
+            drop: (e) => {
+              const cb2 = onDropRef.current;
+              const fs = Array.from(e.dataTransfer?.files || []);
+              if (!cb2 || !fs.length) return false;
+              e.preventDefault(); e.stopPropagation(); cb2(fs); return true;
             },
           }),
           EditorView.updateListener.of((u) => {

@@ -21,29 +21,53 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 // Login commands are keyed by agent KIND (the backing CLI), not the agent's
 // configured name — an agent renamed in agents.json (e.g. a codex agent named
 // "gpt") must still run the right login command.
-const LOGIN_CMDS_BY_KIND: Record<string, { cmd: string; args: string[] }> = {
+type LoginCmd = { cmd: string; args: string[]; env?: Record<string, string> };
+const LOGIN_CMDS_BY_KIND: Record<string, LoginCmd> = {
   claude: { cmd: "claude", args: ["auth", "login"] },
   codex: { cmd: "codex", args: ["login", "--device-auth"] },
+  // Cursor's CLI opens a browser itself by default, which is useless when the
+  // PTY is being driven from a phone: NO_OPEN_BROWSER makes it print the URL
+  // instead, which is the form this surface exists to relay.
+  cursor: { cmd: "agent", args: ["login"], env: { NO_OPEN_BROWSER: "1" } },
+  // No antigravity entry, deliberately. `agy` was the obvious candidate, but the
+  // ACP server keeps its own credential store: it logs
+  // `settings: path=~/.gemini/antigravity-acp/settings.json status=missing` and
+  // `credential_manager.py: Credentials missing or invalid` on a host where both
+  // ~/.gemini/oauth_creds.json and agy's own ~/.gemini/antigravity-cli/ are
+  // populated. Running `agy` there would authenticate something else and report
+  // success, which is the exact failure this map was rewritten to stop. The
+  // server does its own OAuth via the ACP `authenticate` method — which this
+  // gateway does not yet send — so until then this kind gets the 501 + hint.
 };
-const DEFAULT_LOGIN = { cmd: "claude", args: ["auth", "login"] };
 // Enough scrollback that a phone reconnecting mid-flow still sees the login URL
 // and the "Paste code here" prompt replayed.
 const MAX_SCROLLBACK = 64 * 1024;
 
 // Registered by the gateway, which alone knows the configured agents and each
-// one's backing CLI (kind, derived from its cmd). `agentKinds` lets loginCmdFor
+// one's backing CLI (its `kind`). `agentKinds` lets loginCmdFor
 // map a name to a command without re-deriving the kind; `knownAgents` is the
 // allowlist handleLogin checks so a client can't spawn a login for an arbitrary
 // ?agent= name (every configured agent is registered, even if its kind is
 // undefined).
 const agentKinds = new Map<string, string>();
 const knownAgents = new Set<string>();
-export function registerLoginAgent(agentName: string, kind: string | null | undefined): void {
+const agentConfigs = new Map<string, { env?: Record<string, string>; cwd?: string }>();
+export function registerLoginAgent(
+  agentName: string,
+  kind: string | null | undefined,
+  env?: Record<string, string>,
+  cwd?: string,
+): void {
   knownAgents.add(agentName);
   if (kind) agentKinds.set(agentName, kind);
+  agentConfigs.set(agentName, { env, cwd });
 }
 
-function loginCmdFor(agentName: string): { cmd: string; args: string[] } {
+// null when this gateway has no idea how to log the agent in. There is
+// deliberately no catch-all default: it used to be `claude auth login`, so
+// pressing Login on any agent whose kind wasn't claude or codex ran Claude's
+// login flow — wrong credentials, wrong CLI, and silently so.
+export function loginCmdFor(agentName: string): LoginCmd | null {
   // Per-name env override is the explicit escape hatch and wins over the kind map.
   const envCmd = process.env[`ACPG_${agentName.toUpperCase()}_LOGIN_CMD`];
   const envArgs = process.env[`ACPG_${agentName.toUpperCase()}_LOGIN_ARGS`];
@@ -51,15 +75,22 @@ function loginCmdFor(agentName: string): { cmd: string; args: string[] } {
     return { cmd: envCmd, args: (envArgs ?? "").split(/\s+/).filter(Boolean) };
   }
   const kind = agentKinds.get(agentName);
-  return (kind && LOGIN_CMDS_BY_KIND[kind]) || DEFAULT_LOGIN;
+  return (kind && LOGIN_CMDS_BY_KIND[kind]) || null;
 }
 
 const sessions = new Map<string, LoginSession>();
-export function getSession(agentName: string): LoginSession {
+// null for an agent with no known login command — the caller reports that
+// rather than spawning something arbitrary.
+export function getSession(agentName: string): LoginSession | null {
   let s = sessions.get(agentName);
   if (!s) {
-    const { cmd, args } = loginCmdFor(agentName);
-    s = new LoginSession(cmd, args);
+    const login = loginCmdFor(agentName);
+    if (!login) return null;
+    const config = agentConfigs.get(agentName);
+    // The agent's own env from agents.json wins: it is the more specific
+    // statement about this one agent.
+    const env = login.env || config?.env ? { ...login.env, ...config?.env } : undefined;
+    s = new LoginSession(login.cmd, login.args, env, config?.cwd);
     sessions.set(agentName, s);
   }
   return s;
@@ -83,7 +114,12 @@ class LoginSession {
   // the agent to pick up the freshly written credentials.
   onSuccess?: () => void;
 
-  constructor(private cmd: string, private args: string[]) {}
+  constructor(
+    private cmd: string,
+    private args: string[],
+    private env?: Record<string, string>,
+    private cwd?: string,
+  ) {}
 
   running(): boolean {
     return this.proc !== null;
@@ -93,7 +129,7 @@ class LoginSession {
     return { running: this.running(), lastExit: this.lastExit };
   }
 
-  start(cwd?: string): void {
+  start(): void {
     // If a PTY is still tracked but the underlying process has already exited
     // (e.g. killed via stop()), clear the stale reference so a new one can start.
     try { this.proc?.write(""); } catch { this.proc = null; }
@@ -110,8 +146,10 @@ class LoginSession {
       name: "xterm-color",
       cols: 100,
       rows: 30,
-      cwd: cwd || process.env.HOME || process.cwd(),
-      env: process.env as { [k: string]: string },
+      cwd: this.cwd || process.env.HOME || process.cwd(),
+      // The login PTY must use the same per-agent account as its ACP child,
+      // while preserving the gateway's inherited environment for everything else.
+      env: { ...process.env, ...this.env } as { [k: string]: string },
     });
     this.proc = proc;
     proc.onData((d) => {
@@ -218,6 +256,17 @@ export function handleLogin(
     return true;
   }
   const session = getSession(agent);
+  // A configured agent whose backing CLI this gateway has no login command for.
+  // 501 rather than a spawn: the fix is ACPG_<AGENT>_LOGIN_CMD, and the message
+  // says so instead of running some other agent's login flow.
+  if (!session) {
+    res.writeHead(501, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      error: `no login command known for agent "${agent}"`,
+      hint: `set ACPG_${agent.toUpperCase()}_LOGIN_CMD (and _LOGIN_ARGS), or give the agent a "kind" in agents.json`,
+    }));
+    return true;
+  }
 
   if (pathname === "/login/start") {
     if (req.method !== "POST") {

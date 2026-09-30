@@ -34,6 +34,8 @@
     --agent-claude: #d97757;
     --agent-codex: #10a37f;
     --agent-opencode: #5A5858;
+    --agent-cursor: #6E6E6E;
+    --agent-antigravity: #4285F4;
     /* The prompt's tint (below, .turn.user) — a fixed brand colour chosen from
        mockup, not derived from --text or the active agent, so it stays put
        across skins/agents. The mix % and radius are separate tokens (not
@@ -58,6 +60,15 @@
     --radius: 16px;
     /* The crumb's height, read back by every sheet that hangs below it. */
     --crumb-h: 38px;
+    /* The chat column. Fixed at 760px it spent ~45% of a 1920px screen on
+       margin, with a text pane next to it doing the same — so it grew. The cap
+       that mattered was never the column's, it was a paragraph's, and that one
+       moves to --prose below: code, diffs and tables take the whole column. */
+    --col: 1040px;
+    /* The measure the old 760px column gave its prose (728px of text at the
+       default 17px) — em so the text-size setting and a phone's different face
+       keep the same line length rather than a fixed width. */
+    --prose: 43em;
     /* The fenced code block in the composer is *inverted* from the page so it
        stands out in both themes (dark on light, light on dark — the Claude
        composer look). It reuses --text/--bg so it follows every theme/skin
@@ -753,7 +764,7 @@
 
   /* ---- conversation ---- */
   main { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
-  .thread { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; padding: 18px 16px 8px; }
+  .thread { width: min(var(--col), 100%); max-width: var(--col); min-width: 0; margin: 0 auto; padding: 18px 16px 8px; }
   /* 16px a side plus a card's own 13px leaves 330 of 390 for content — six
      characters of every monospace line spent on margin. A phone gets 10. */
   @media (max-width: 640px) { .thread { padding: 18px 10px 8px; } }
@@ -785,14 +796,15 @@
 
   .empty { display: flex; flex-direction: column; align-items: center; justify-content: center;
     text-align: center; min-height: 52vh; gap: 8px; padding: 24px; }
-  .empty .robot, .empty .codex-mark, .empty .opencode-mark { width: 84px; height: 84px; margin-bottom: 6px; }
+  .empty .robot, .empty .codex-mark, .empty .opencode-mark,
+  .empty .cursor-mark, .empty .antigravity-mark { width: 84px; height: 84px; margin-bottom: 6px; }
   .empty .spinner { width: 34px; height: 34px; border: 3px solid var(--border); border-top-color: var(--accent);
     border-radius: 50%; animation: wspin .8s linear infinite; margin-bottom: 12px; }
   .empty h2 { margin: 0; font-size: 22px; font-weight: 600; }
   .empty p { margin: 0; color: var(--muted); font-size: 16px; }
 
   .notice {
-    max-width: 760px; margin: 8px auto 0; background: var(--surface); border: 1px solid var(--border);
+    max-width: var(--col); margin: 8px auto 0; background: var(--surface); border: 1px solid var(--border);
     border-radius: 14px; box-shadow: var(--shadow); overflow: hidden;
   }
   .notice .nhead { display: flex; align-items: center; gap: 10px; padding: 13px 14px; font-weight: 600; }
@@ -838,6 +850,8 @@
   .lbl .chip.claude { color: var(--agent-claude); background: color-mix(in srgb, var(--agent-claude) 16%, var(--surface)); }
   .lbl .chip.codex { background: color-mix(in srgb, var(--agent-codex) 16%, var(--surface)); }
   .lbl .chip.opencode { background: color-mix(in srgb, var(--agent-opencode) 16%, var(--surface)); }
+  .lbl .chip.cursor { background: color-mix(in srgb, var(--agent-cursor) 16%, var(--surface)); }
+  .lbl .chip.antigravity { background: color-mix(in srgb, var(--agent-antigravity) 16%, var(--surface)); }
   /* Your prompt takes a tint so a long thread can be skimmed for "where did I
      ask something" — the one place a message carries a surface. The tint is a
      light color-mix over the page (works in both themes), with a hairline
@@ -918,6 +932,10 @@
   @media (hover: none) { .msg-copy { opacity: .8; } }
 
   .md { min-width: 0; max-width: 100%; word-wrap: break-word; overflow-wrap: break-word; }
+  /* What the column gained in width goes to what wants it — <pre>, .diff,
+     tables, images — and stops at prose. This is the only place the old fixed
+     760px was load-bearing, so it is the only thing that keeps its cap. */
+  .md :is(p, ul, ol, blockquote) { max-width: var(--prose); }
   .md p { margin: 0 0 10px; } .md p:last-child { margin-bottom: 0; }
   /* A picture in a document, at whatever room the column has. Clicking it opens
      it full size (see Lightbox) — which is the only way to read a 2000px wide
@@ -927,6 +945,18 @@
   .md a img { cursor: pointer; }
   .md pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     max-width: 100%; padding: 12px 14px; overflow: auto; margin: 10px 0; }
+  /* Copy button per code block (markdown.ts wraps every <pre> in .md-pre). It
+     sits on the wrapper, not inside the <pre>, so it stays put while the code
+     scrolls under it — and it carries the <pre>'s own background, because on
+     touch it is always visible and would otherwise sit on the first line. */
+  .md-pre { position: relative; margin: 10px 0; }
+  .md-pre > pre { margin: 0; padding-right: 46px; }
+  /* opacity would fade the fill along with the icon and let the code show
+     through, so it stays 1 and the ink carries the quietness instead. */
+  .md-copy { position: absolute; top: 6px; right: 6px; margin-top: 0;
+    opacity: 1; color: var(--faint); background: var(--surface); border-radius: 8px; }
+  .md-copy .i-check, .md-copy.copied .i-copy { display: none; }
+  .md-copy.copied .i-check { display: block; }
   .md code { font-family: var(--mono); font-size: var(--chat-code-size); }
   /* A 390px column fits about 30 monospace characters, so a code block that
      scrolls sideways shows a third of every line and no hint that the rest
@@ -1063,10 +1093,10 @@
      between the thread and the composer, so it never competes with the session
      title in the crumb and never moves as the textarea grows. Costs 28px. */
   /* Same column as the composer, so the chip's right edge lines up with the
-     input's rather than running out to the pane's edge: 760px of content plus
+     input's rather than running out to the pane's edge: --col of content plus
      the 12px gutters footer pads with, box-sizing being border-box here. */
   .dock { position: relative; flex: 0 0 auto; display: flex; align-items: center;
-    width: min(784px, 100%); margin: 0 auto; padding: 7px 12px; }
+    width: min(calc(var(--col) + 24px), 100%); margin: 0 auto; padding: 7px 12px; }
   /* 8px, not 0: at 390px the two chips shrink together and a spacer that gives
      up its last pixel leaves them border to border, reading as one broken box. */
   .dock .sp { flex: 1; min-width: 8px; }
@@ -1117,7 +1147,7 @@
   /* ---- composer ---- */
   footer { flex: 0 0 auto; padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
     background: linear-gradient(to top, var(--bg) 70%, transparent); }
-  .tipbar { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto 8px; display: flex; align-items: center; gap: 8px;
+  .tipbar { width: min(var(--col), 100%); max-width: var(--col); min-width: 0; margin: 0 auto 8px; display: flex; align-items: center; gap: 8px;
     color: var(--muted); font-size: 13px; }
   .tipbar svg { width: 16px; height: 16px; }
   .tipbar .x { margin-left: 4px; }
@@ -1126,7 +1156,7 @@
   /* The composer is one of the few things that keeps a frame (§1.3), but the
      frame is a hairline, not an identity-coloured ring — it brightens on focus
      instead of announcing which agent is answering. */
-  .composer { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto; background: var(--surface-2);
+  .composer { width: min(var(--col), 100%); max-width: var(--col); min-width: 0; margin: 0 auto; background: var(--surface-2);
     border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 6px 6px 10px; }
   .composer:focus-within { border-color: var(--muted); }
   /* "!" shell escape: the box stops being a message and says so — accent
@@ -1157,12 +1187,18 @@
   .composer .cm-selectionBackground,
   .composer .cm-content::selection,
   .composer .cm-content ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+  .composer .cm-md-codeblock::selection,
+  .composer .cm-md-codeblock ::selection { background: color-mix(in srgb, var(--codeblock-fg) 28%, transparent); }
   /* markdown rendering: inline code, fenced blocks, links, markers */
   .composer .cm-md-code { font-family: var(--mono);
     font-size: var(--chat-code-size); background: var(--surface-2); border-radius: 4px; padding: 0 3px; }
   .composer .cm-md-codeblock { background: var(--codeblock-bg); color: var(--codeblock-fg);
     font-family: var(--mono); font-size: var(--chat-code-size);
-    padding: 2px 10px; }
+    padding: 2px 10px;
+    /* The block is inverted, so .cm-content's caret-color (--text) is the block's
+       own background — an invisible caret inside code, in both themes. The native
+       caret takes its color from the element it sits in, so re-point it here. */
+    caret-color: var(--codeblock-fg); }
   /* The ``` fence markers and `lang` identifier also get the `t.monospace` tag,
      so they pick up .cm-md-code's chip background — which looks like a stray
      pill on top of the code block. Suppress the chip here; the inherited fg
@@ -1242,8 +1278,8 @@
      for it to end. A dashed line runs down into the composer with one hollow node
      per waiting message — the shape says both "not sent yet" and "these go out of
      that box, in this order", which a chip strip cannot. Aligned to the composer's
-     own 760px column, like .tipbar above. */
-  .queue-rail { width: min(760px, 100%); max-width: 760px; min-width: 0; margin: 0 auto 8px; padding-left: 22px; position: relative; }
+     own --col column, like .tipbar above. */
+  .queue-rail { width: min(var(--col), 100%); max-width: var(--col); min-width: 0; margin: 0 auto 8px; padding-left: 22px; position: relative; }
   .queue-rail::before { content: ""; position: absolute; left: 6px; top: 6px; bottom: -8px;
     border-left: 1px dashed var(--pending); }
   .queue-item { position: relative; margin: 0 0 10px; }
@@ -1277,7 +1313,7 @@
   .msg-image img { display: block; max-width: 100%; height: auto; }
 
   /* slash command menu */
-  .cmds { max-width: 760px; margin: 0 auto 6px; background: var(--surface); border: 1px solid var(--border);
+  .cmds { max-width: var(--col); margin: 0 auto 6px; background: var(--surface); border: 1px solid var(--border);
     border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; display: none; max-height: 240px; overflow-y: auto; }
   .cmds.open { display: block; }
   .cmds button { display: flex; gap: 10px; width: 100%; text-align: left; padding: 10px 13px;
@@ -1451,7 +1487,7 @@
   .usage-strip { display: flex; align-items: center; align-self: stretch;
     min-width: 0; overflow-x: auto; scrollbar-width: none; color: var(--muted); }
   .usage-strip::-webkit-scrollbar { display: none; }
-  /* Every configured provider's quota, revealed on hover — or pinned open by a
+  /* Every configured account's quota, revealed on hover — or pinned open by a
      tap, for touch devices with no hover to reveal it. The default row above
      only shows the active agent's own windows. */
   .usage-popover { display: none; position: absolute; bottom: 100%; right: 0; margin-bottom: 6px;
@@ -1461,6 +1497,7 @@
   .usage-popover-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .usage-popover-mark { display: grid; place-items: center; width: 16px; height: 16px; flex: 0 0 auto; color: var(--muted); }
   .usage-popover-mark svg { width: 13px; height: 13px; }
+  .usage-popover-agent { color: var(--text); font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
   .usage-popover-segs { display: flex; align-items: center; }
   .usage-popover-segs .u-seg:first-child { border-left: none; }
   .u-seg { display: inline-flex; align-items: center; gap: 6px; align-self: stretch;
@@ -1665,9 +1702,11 @@
   .wf-panes.split.folded > .wf-list { display: none; }
   /* The open file's name, over the viewer, once the header's title has gone
      back to naming the folder. */
+  /* The list's fold toggle leads this row, so the left inset is the button's
+     own padding rather than the text inset the crumb used to need. */
   .wf-view-head {
     flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
-    padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--border);
+    padding: 6px; border-bottom: 1px solid var(--border);
   }
   /* repo / folders / file. Only .mid shrinks: the checkout's name says WHICH
      copy of the project this is (the panel can point at another one) and the
@@ -2491,7 +2530,7 @@
   }
 
   /* The branch's own composer (footer, in BranchWindow.tsx) — anchored inside
-     a ~380px card rather than centred at 760px like the main one, so it only
+     a ~380px card rather than centred at --col like the main one, so it only
      needs less padding and a shorter growth cap, not a different look. */
   .composer.compact { padding: 5px 5px 5px 8px; }
   .composer.compact .cm-scroller { max-height: 110px; }

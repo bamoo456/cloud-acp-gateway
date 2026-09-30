@@ -5,6 +5,7 @@ import { formatBytes } from "../lib/format.ts";
 import { IconFolder, IconChevronDown, IconChevronRight, fileIcon } from "../lib/icons.tsx";
 import { useRowMenu } from "./FileMenu.tsx";
 import { useIsOpenFile } from "../store/store.ts";
+import { rowIndent } from "./PathTree.tsx";
 
 // Browsing the project, rather than only the files this conversation happened
 // to name. Outputs and Context are built from the thread, so they are blind to
@@ -17,8 +18,6 @@ import { useIsOpenFile } from "../store/store.ts";
 // is dimmed rather than hidden, because "why isn't dist here" is a worse
 // question than "why is dist grey".
 
-// Depth is indentation only; the fetch cares about the path.
-const INDENT_PX = 12;
 // Which of the two searches the box is running. Names answers from a cached
 // index; Contents runs `git grep` on the gateway, so it waits for the typing to
 // settle and refuses a term short enough to match every file in the project.
@@ -38,7 +37,7 @@ function Row({ entry, depth, open, onClick, onMenu }: {
   return (
     <button
       className={"wf-row wf-tree-row" + (entry.ignored ? " ignored" : "") + (showing ? " on" : "")}
-      style={{ paddingLeft: 10 + depth * INDENT_PX }}
+      style={{ paddingLeft: rowIndent(depth) }}
       onClick={onClick}
       {...menu}
       title={

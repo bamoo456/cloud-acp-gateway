@@ -167,3 +167,29 @@ test("repairInterruptedCodexSession finds the rollout by id under CODEX_HOME", a
   assert.ok(!ps.some((p) => p.type === "custom_tool_call"), "dangling call trimmed");
   assert.equal(ps.at(-1)!.type, "message");
 });
+
+test("repairInterruptedCodexSession only repairs the selected Codex home", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "acpb-codex-repair-homes-"));
+  const homeA = path.join(root, "a");
+  const homeB = path.join(root, "b");
+  const files = [homeA, homeB].map((home) => {
+    const dir = path.join(home, "sessions", "2026", "06", "16");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "rollout-shared.jsonl");
+    fs.writeFileSync(file, [
+      { type: "session_meta", payload: { id: "SHARED-ID", cwd: "/work" } },
+      userMsg("apply the patch"),
+      toolCall("custom_tool_call", "call_1", "apply_patch"),
+    ].map((line) => JSON.stringify(line)).join("\n") + "\n");
+    return file;
+  });
+  try {
+    assert.equal(await repairInterruptedCodexSession("SHARED-ID", homeA), true);
+    assert.equal(payloads(files[0]).some((p) => p.type === "custom_tool_call"), false);
+    assert.equal(payloads(files[1]).some((p) => p.type === "custom_tool_call"), true);
+    assert.equal(await repairInterruptedCodexSession("SHARED-ID", homeB), true);
+    assert.equal(payloads(files[1]).some((p) => p.type === "custom_tool_call"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
