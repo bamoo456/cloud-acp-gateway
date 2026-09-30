@@ -683,6 +683,8 @@ export function FilePanel() {
               abs: menu.abs, path: relativeTo(menu.abs, menu.base ?? cwd), mode: "file",
               cwd: menu.base === cwd ? undefined : menu.base,
             })}
+          onDownload={menu.isDir ? undefined : () =>
+            downloadFile(rawFileUrl(menu.base ?? cwd, menu.abs), menu.name)}
           onCopyPath={() => void copyText(menu.abs)}
           onClose={() => setMenu(null)} />
       )}

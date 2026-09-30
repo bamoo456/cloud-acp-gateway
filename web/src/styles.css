@@ -2121,6 +2121,7 @@
   .wf-menu-row svg { width: 17px; height: 17px; flex: 0 0 auto; color: var(--muted); }
   .wf-menu-row.accent, .wf-menu-row.accent svg { color: var(--accent); }
   .wf-menu-row.danger, .wf-menu-row.danger svg { color: var(--err); }
+  .wf-menu-row.failed, .wf-menu-row.failed svg { color: var(--err); }
   @media (max-width: 640px) {
     .wf-menu-scrim { background: #00000070; backdrop-filter: blur(2px); }
     .wf-menu.sheet {

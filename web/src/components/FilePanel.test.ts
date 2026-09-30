@@ -1106,7 +1106,36 @@ describe("FilePanel", () => {
       row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
     });
     expect([...document.querySelectorAll(".wf-menu-row")].map((b) => b.textContent))
-      .toEqual(["Open", "Copy path"]);
+      .toEqual(["Open", "Download", "Copy path"]);
+  });
+
+  test("a row's menu saves the file, so nothing has to be opened to download it", async () => {
+    // The menu is the only surface that reaches every list here — outputs, git's
+    // changes, the tree, another project's tree — so this is what makes a file
+    // an agent produced through a shell (no card in the thread, no preview
+    // worth opening) two taps from the device.
+    const downloadFile = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("../lib/download.ts", () => ({ downloadFile, downloadText: vi.fn() }));
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({ filesOpen: true, cwd: "/repo" });
+    await render();
+
+    const row = container.querySelector<HTMLElement>("button.wf-row")!;
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 10, clientY: 10 }));
+    });
+    const dl = [...document.querySelectorAll<HTMLButtonElement>(".wf-menu-row")]
+      .find((b) => b.textContent === "Download")!;
+    await act(async () => { dl.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+
+    expect(downloadFile).toHaveBeenCalledWith(
+      "/workspace/raw?cwd=/repo&path=/repo/src/gateway.ts",
+      "gateway.ts",
+    );
+    // The save succeeded, so the menu is done.
+    expect(document.querySelector(".wf-menu")).toBeNull();
+    vi.doUnmock("../lib/download.ts");
   });
 
   test("selected lines attach as a range, with the lines themselves", async () => {
