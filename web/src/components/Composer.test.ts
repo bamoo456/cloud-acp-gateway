@@ -850,6 +850,33 @@ describe("Composer session busy state", () => {
     expect(cmView(container).state.doc.toString()).toBe("");
   });
 
+  test("an agent that queues prompts itself gets the message mid-turn, unparked", async () => {
+    const { sendPromptTo, queuePrompt } = await mountBusy({}, { promptQueueing: true });
+
+    await act(async () => { cmSet(cmView(container), "and then run the tests"); });
+    // The button says what it does: nothing is waiting in this tab.
+    expect(primary().textContent).toContain("send");
+    await act(async () => { primary().click(); });
+
+    expect(sendPromptTo).toHaveBeenCalledWith("s1", "and then run the tests", [], []);
+    expect(queuePrompt).not.toHaveBeenCalled();
+  });
+
+  test("a conversation still being created parks the message even then", async () => {
+    // session/new is still in flight: sendPromptTo refuses a "pending-" id, and the
+    // box has already been cleared, so a send here would drop what was typed.
+    const { sendPromptTo, queuePrompt } = await mountBusy({}, {
+      promptQueueing: true, activeId: "pending-1", busySessionIds: { "pending-1": true },
+    });
+
+    await act(async () => { cmSet(cmView(container), "and also this"); });
+    expect(primary().textContent).toContain("queue");
+    await act(async () => { primary().click(); });
+
+    expect(queuePrompt).toHaveBeenCalledWith("pending-1", { text: "and also this", images: [], files: [] });
+    expect(sendPromptTo).not.toHaveBeenCalled();
+  });
+
   test("a bound instance queues against its own conversation", async () => {
     const { queuePrompt } = await mountBusy({ sessionId: "branch-1" });
 
