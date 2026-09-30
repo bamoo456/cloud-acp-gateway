@@ -10,7 +10,9 @@ const flush = async () => {
 };
 
 // One live Claude session ("s1") on an open socket, nothing in flight.
-async function bootstrap() {
+// `caps` is what the agent reports at initialize — `_meta.claudeCode.promptQueueing`
+// is the one that decides whether a mid-turn prompt is sent or parked.
+async function bootstrap(caps: Record<string, unknown> = {}) {
   const { useStore } = await import("./store.ts");
   useStore.getState().bootstrap();
   await vi.waitFor(() => expect(FakeSse.instances.length).toBeGreaterThan(0));
@@ -19,7 +21,7 @@ async function bootstrap() {
   await flush();
 
   const init = JSON.parse(ws.sent[0]);
-  ws.recv({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } });
+  ws.recv({ jsonrpc: "2.0", id: init.id, result: { protocolVersion: 1, agentCapabilities: caps, authMethods: [] } });
   await flush();
 
   const sess = JSON.parse(ws.sent[1]);
@@ -391,5 +393,116 @@ describe("queued prompts", () => {
     const sent = promptsOf(ws);
     expect(sent).toHaveLength(2);
     expect(sent[1].params.sessionId).toBe("s1");
+  });
+});
+
+// The other half of the same feature: an agent that takes a prompt while its own
+// turn is running (claude-agent-acp) doesn't need the rail above at all — the
+// message goes out immediately and the agent decides when to read it.
+describe("agent-side prompt queueing", () => {
+  const QUEUEING = { _meta: { claudeCode: { promptQueueing: true } } };
+
+  beforeEach(() => {
+    vi.resetModules();
+    installFakeSse();
+    document.body.innerHTML = `<script id="acpg-cfg" type="application/json">{
+      "token": "test-token",
+      "defaultAgent": "claude",
+      "agents": [{ "name": "claude", "cwd": "/repo" }],
+      "fsRoot": "/"
+    }</script>`;
+    history.replaceState(null, "", "/");
+    localStorage.clear();
+  });
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  test("a message sent mid-turn goes straight out, not onto the rail", async () => {
+    const { useStore, ws } = await bootstrap(QUEUEING);
+    expect(useStore.getState().promptQueueing).toBe(true);
+
+    const first = useStore.getState().sendPrompt("first");
+    await flush();
+    const second = useStore.getState().sendPromptTo("s1", "second");
+    await flush();
+
+    const sent = promptsOf(ws);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].params.prompt).toEqual([{ type: "text", text: "second" }]);
+    expect(useStore.getState().queuedPrompts["s1"]).toBeUndefined();
+
+    ws.recv({ jsonrpc: "2.0", id: sent[0].id, result: { stopReason: "end_turn" } });
+    ws.recv({ jsonrpc: "2.0", id: sent[1].id, result: { stopReason: "end_turn" } });
+    await Promise.all([first, second]);
+  });
+
+  test("the session stays busy until the LAST turn in flight settles", async () => {
+    const { useStore, ws } = await bootstrap(QUEUEING);
+
+    const first = useStore.getState().sendPrompt("first");
+    await flush();
+    const second = useStore.getState().sendPromptTo("s1", "second");
+    await flush();
+
+    ws.recv({ jsonrpc: "2.0", id: promptsOf(ws)[0].id, result: { stopReason: "end_turn" } });
+    await first;
+    await flush();
+
+    // One response back, one still running: a flag would call this idle and hand
+    // the composer a ready state while the agent is still working.
+    expect(useStore.getState().busySessionIds["s1"]).toBe(true);
+    expect(useStore.getState().sessions["s1"].working).toBe(true);
+
+    ws.recv({ jsonrpc: "2.0", id: promptsOf(ws)[1].id, result: { stopReason: "end_turn" } });
+    await second;
+    await flush();
+
+    expect(useStore.getState().busySessionIds["s1"]).toBeUndefined();
+    expect(useStore.getState().busy).toBe(false);
+    expect(useStore.getState().sessions["s1"].working).toBe(false);
+  });
+
+  test("an agent that did not report it still refuses a second prompt mid-turn", async () => {
+    const { useStore, ws } = await bootstrap();
+    expect(useStore.getState().promptQueueing).toBe(false);
+
+    useStore.getState().sendPrompt("first");
+    await flush();
+
+    // codex-acp overwrites its single active prompt, so a send here would orphan
+    // the running turn. Refused, and the composer parks it on the rail instead.
+    await expect(useStore.getState().sendPromptTo("s1", "second")).resolves.toBe(false);
+    expect(promptsOf(ws)).toHaveLength(1);
+  });
+
+  test("a turn in flight follows a provisional session to its real id", async () => {
+    const { useStore, ws } = await bootstrap(QUEUEING);
+
+    useStore.getState().newSession();
+    await flush();
+    expect(useStore.getState().activeId!.startsWith("pending-")).toBe(true);
+
+    const first = useStore.getState().sendPrompt("first");
+    await flush();
+    const newSess = ws.sent.map((f) => JSON.parse(f)).filter((f) => f.method === "session/new").at(-1)!;
+    ws.recv({ jsonrpc: "2.0", id: newSess.id, result: { sessionId: "s2" } });
+    await flush();
+
+    // The count that keeps s2 busy was made against the "pending-" id — losing it
+    // in the remap would clear busy on the first response with a turn still out.
+    const second = useStore.getState().sendPromptTo("s2", "second");
+    await flush();
+    const s2 = promptsOf(ws).filter((p) => p.params.sessionId === "s2");
+    expect(s2).toHaveLength(2);
+
+    ws.recv({ jsonrpc: "2.0", id: s2[0].id, result: { stopReason: "end_turn" } });
+    await first;
+    await flush();
+    expect(useStore.getState().busySessionIds["s2"]).toBe(true);
+
+    ws.recv({ jsonrpc: "2.0", id: s2[1].id, result: { stopReason: "end_turn" } });
+    await second;
+    await flush();
+    expect(useStore.getState().busySessionIds["s2"]).toBeUndefined();
   });
 });
