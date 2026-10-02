@@ -144,6 +144,18 @@ describe("ToolCall file links", () => {
     expect(container.querySelector("details.tool")?.hasAttribute("open")).toBe(true);
   });
 
+  test("a running shell command stays closed; a failed one opens", async () => {
+    const out = [{ type: "content" as const, content: { type: "text" as const, text: "lots of output" } }];
+
+    await render(tool({ toolKind: "execute", status: "in_progress", content: out }));
+    expect(container.querySelector("details.tool")?.hasAttribute("open")).toBe(false);
+
+    await act(async () => root?.unmount());
+    root = null;
+    await render(tool({ toolKind: "execute", status: "failed", content: out }));
+    expect(container.querySelector("details.tool")?.hasAttribute("open")).toBe(true);
+  });
+
   test("a card you opened by hand stays open once the call completes", async () => {
     const out = [{ type: "content" as const, content: { type: "text" as const, text: "output" } }];
     const { ToolCall } = await import("./ToolCall.tsx");
