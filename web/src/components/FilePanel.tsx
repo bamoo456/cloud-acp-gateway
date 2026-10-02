@@ -913,7 +913,10 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
     setJumping(true);
     try {
       const hits = await getWorkspaceDefinition(fileCwd, target.abs, pos.line, pos.column);
-      if (hits && hits.length > 0) {
+      // null: disabled / unavailable — leave the click alone.
+      // []: a real miss — fall through to Trace.
+      if (!hits) return;
+      if (hits.length > 0) {
         const h = hits[0];
         useStore.getState().openFilePreview({
           abs: h.abs, path: h.path, mode: "file", cwd: target.cwd,

@@ -60,7 +60,15 @@ function gnuOrMusl(): "gnu" | "musl" {
 // The @brokkai/bifrost wrapper (bin/bifrost.js) spawns the native binary with
 // inherited stdio, which is unusable as an LSP child — resolve the platform
 // binary the same way it does and spawn that directly with pipes.
+// `binaryForTest` is a fake LSP (or null = unavailable) for tests only.
+let binaryForTest: string | null | undefined;
+
+export function setBifrostBinaryForTest(pathOrNull: string | null): void {
+  binaryForTest = pathOrNull;
+}
+
 function nativeBinaryPath(): string | null {
+  if (binaryForTest !== undefined) return binaryForTest;
   const plat = process.platform;
   const arch = process.arch;
   const key = plat === "linux" ? `${plat}-${arch}-${gnuOrMusl()}` : `${plat}-${arch}`;
@@ -151,9 +159,12 @@ class LspConn {
     this.onDeath();
   }
 
+  // Tear the map entry down immediately, then SIGTERM the group. Waiting for
+  // "exit" would leave a dying conn in `servers` for the next click to reuse.
   kill(): void {
     const proc = this.proc;
     this.proc = null;
+    this.die();
     if (!proc || proc.pid === undefined) return;
     try { process.kill(-proc.pid, "SIGTERM"); } catch { try { proc.kill("SIGTERM"); } catch { /* gone */ } }
   }
@@ -193,7 +204,13 @@ class LspConn {
     const frame = Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "ascii"), body]);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
+        if (!this.pending.delete(id)) return;
+        // A definition miss is slow-and-empty on this stdio (~15 s measured).
+        // Dropping the Promise without cancelling leaves the analyzer busy, so
+        // the next click waits behind it. Cancel, then kill: Bifrost may ignore
+        // $/cancelRequest, and a fresh process is cheaper than a jammed one.
+        this.notify("$/cancelRequest", { id });
+        this.kill();
         reject(Object.assign(new Error("bifrost timeout"), { code: "timeout" }));
       }, timeoutMs);
       if (timer.unref) timer.unref();
@@ -223,6 +240,9 @@ interface ServerEntry {
 }
 
 const servers = new Map<string, ServerEntry>();
+// In-flight spawn per repository key: two overlapping warm/definition calls
+// used to each pass `servers.get` as a miss and start a second 0.5–1 GB process.
+const starting = new Map<string, Promise<ServerEntry>>();
 
 function evictIdle(now = Date.now()): void {
   for (const [key, s] of servers) {
@@ -260,20 +280,30 @@ async function ensureServer(cwd: string, ledgerDir: string): Promise<ServerEntry
   const { key, root } = await bifrostKeyFor(cwd);
   const hit = servers.get(key);
   if (hit) { hit.lastUsed = Date.now(); return hit; }
+  const inflight = starting.get(key);
+  if (inflight) return inflight;
+  const started = startServer(key, root, ledgerDir).finally(() => {
+    if (starting.get(key) === started) starting.delete(key);
+  });
+  starting.set(key, started);
+  return started;
+}
+
+async function startServer(key: string, root: string, ledgerDir: string): Promise<ServerEntry> {
   const bin = nativeBinaryPath();
   if (!bin) throw Object.assign(new Error(`bifrost ${BIFROST_VERSION} native binary not installed`), { code: "unavailable" });
   const cacheDir = bifrostCacheDir(ledgerDir, key);
   fs.mkdirSync(cacheDir, { recursive: true });
-  const entry: ServerEntry = {
+  let entry: ServerEntry;
+  const conn = new LspConn(bin, root, cacheDir, () => { if (servers.get(key) === entry) servers.delete(key); });
+  entry = {
     key,
     root,
-    conn: null as unknown as LspConn,
+    conn,
     lastUsed: Date.now(),
     init: Promise.resolve(),
   };
-  entry.conn = new LspConn(bin, root, cacheDir, () => { if (servers.get(key) === entry) servers.delete(key); });
-  entry.conn.start();
-  const conn = entry.conn;
+  conn.start();
   entry.init = (async () => {
     await conn.request("initialize", {
       processId: process.pid,
@@ -339,11 +369,11 @@ export async function bifrostDefinition(
   stats.requests++;
   let realAbs = abs;
   try { realAbs = fs.realpathSync(abs); } catch { /* missing — let the analyzer answer */ }
-  const entry = await ensureServer(cwd, ledgerDir);
-  await entry.init;
-  entry.lastUsed = Date.now();
   let result: unknown;
   try {
+    const entry = await ensureServer(cwd, ledgerDir);
+    await entry.init;
+    entry.lastUsed = Date.now();
     result = await entry.conn.request("textDocument/definition", {
       textDocument: { uri: pathToFileURL(realAbs).href },
       position: { line, character },
@@ -368,6 +398,8 @@ export function bifrostLocationPath(uri: string): string | null {
 export function resetBifrostForTest(): void {
   for (const [, s] of servers) s.conn.kill();
   servers.clear();
+  starting.clear();
+  binaryForTest = undefined;
   stats.requests = 0;
   stats.hits = 0;
   stats.misses = 0;
