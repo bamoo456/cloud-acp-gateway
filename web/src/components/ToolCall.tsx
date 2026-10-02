@@ -21,8 +21,9 @@ export function ToolCall({ item }: { item: Tool }) {
   // if it failed — that is the one output you always want), closed once it is
   // a completed record. Opening or closing one by hand overrides that for good,
   // so a card you opened does not shut itself when the call finishes.
+  // A running shell command stays closed: its streamed output floods the thread.
   const [open, setOpen] = useState<boolean | null>(null);
-  const busy = item.status === "in_progress" || item.status === "pending";
+  const busy = (item.status === "in_progress" || item.status === "pending") && item.toolKind !== "execute";
   const isOpen = open ?? (busy || item.status === "failed");
   const openFilePreview = useStore((s) => s.openFilePreview);
   // A file the agent WROTE gets a card — the produced thing, with its type and
