@@ -625,10 +625,11 @@ export async function grepWorkspace(cwd: string, query: string): Promise<GrepRes
   };
 }
 
-// Go to definition (Bifrost Java analyzer). Null is the miss — disabled,
-// unavailable, timed out, or genuinely unresolvable — and the caller falls
-// through to the agent Trace. Never throws: a jump that fails is an ordinary
-// outcome, not an error to surface.
+// Go to definition (Bifrost Java analyzer). Never throws.
+//
+// `[]` is a miss (unresolvable or timed out) and the caller falls through to
+// the agent Trace. `null` is "the analyzer is off or unreachable" — do not
+// Trace: Cmd/Ctrl-click must not dispatch an agent turn when the flag is off.
 export interface DefinitionHit {
   abs: string; path: string; line?: number; endLine?: number; column?: number;
 }

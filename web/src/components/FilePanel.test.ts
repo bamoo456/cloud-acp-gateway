@@ -41,6 +41,8 @@ describe("FilePanel", () => {
   let getHtmlRender: ReturnType<typeof vi.fn>;
   let saveFilePreview: ReturnType<typeof vi.fn>;
   let getReviewDraft: ReturnType<typeof vi.fn>;
+  let getWorkspaceDefinition: ReturnType<typeof vi.fn>;
+  let warmWorkspaceDefinition: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -74,6 +76,9 @@ describe("FilePanel", () => {
       ok: true, size: 21, modifiedAt: new Date().toISOString(), hash: "after",
     });
     getReviewDraft = vi.fn().mockResolvedValue({ scope: "working", comments: [], counts: {}, persisted: true });
+    // Off by default: a 404 from the gateway must not look like a miss.
+    getWorkspaceDefinition = vi.fn().mockResolvedValue(null);
+    warmWorkspaceDefinition = vi.fn();
     vi.doMock("../lib/api.ts", () => ({
       getWorkspaceChanges,
       getFileDiff,
@@ -91,6 +96,8 @@ describe("FilePanel", () => {
       // is what badges the Review tab — needed even by the tests that never
       // press it.
       getReviewDraft,
+      getWorkspaceDefinition,
+      warmWorkspaceDefinition,
       revParam: () => "",
     }));
   });
@@ -1497,6 +1504,72 @@ describe("FilePanel", () => {
     expect(editor.closest(".wf-body")).toBeNull();
     // And the reading pane is out of the way while it is up.
     expect(container.querySelector<HTMLElement>(".wf-body")?.hidden).toBe(true);
+  });
+
+  async function openJavaPreview(dispatchAskFix?: ReturnType<typeof vi.fn>) {
+    const { useStore } = await import("../store/store.ts");
+    const { makeSession } = await import("../store/reducers.ts");
+    getFilePreview.mockResolvedValue({
+      path: "src/Main.java", abs: "/repo/src/Main.java", kind: "text",
+      size: 24, modifiedAt: new Date().toISOString(),
+      text: "class Main {}\n", truncated: false,
+    } satisfies FilePreviewResult);
+    useStore.setState({
+      filesOpen: true, cwd: "/repo", agentName: "claude", promptCapabilities: {},
+      activeId: "s1", sessions: { s1: { ...makeSession("s1"), cwd: "/repo" } },
+      filePreview: { abs: "/repo/src/Main.java", path: "src/Main.java", mode: "file" },
+      ...(dispatchAskFix ? { dispatchAskFix } : {}),
+    });
+    await render();
+    const code = container.querySelector("pre.wf-text code");
+    expect(code).toBeTruthy();
+    (document as Document & { caretRangeFromPoint: (x: number, y: number) => Range }).caretRangeFromPoint = () => {
+      const r = document.createRange();
+      r.selectNodeContents(code!);
+      r.collapse(true);
+      return r;
+    };
+  }
+
+  async function cmdClickCode() {
+    const pre = container.querySelector("pre.wf-text")!;
+    await act(async () => {
+      pre.dispatchEvent(new MouseEvent("click", { bubbles: true, metaKey: true, clientX: 1, clientY: 1 }));
+      await flush();
+    });
+  }
+
+  test("Cmd-click on Java does not Trace when definition is disabled", async () => {
+    const dispatchAskFix = vi.fn().mockResolvedValue("sent");
+    await openJavaPreview(dispatchAskFix);
+    await cmdClickCode();
+    expect(getWorkspaceDefinition).toHaveBeenCalled();
+    expect(dispatchAskFix).not.toHaveBeenCalled();
+  });
+
+  test("Cmd-click on Java Traces when definition returns a miss", async () => {
+    const dispatchAskFix = vi.fn().mockResolvedValue("sent");
+    getWorkspaceDefinition.mockResolvedValue([]);
+    await openJavaPreview(dispatchAskFix);
+    await cmdClickCode();
+    expect(dispatchAskFix).toHaveBeenCalledWith({
+      intent: "trace", agentName: "claude", sessionId: "s1", cwd: "/repo", spec: null,
+      path: "src/Main.java", line: 1, endLine: 1, code: "class Main {}",
+    }, "");
+  });
+
+  test("Cmd-click on Java opens a definition hit", async () => {
+    const { useStore } = await import("../store/store.ts");
+    const dispatchAskFix = vi.fn().mockResolvedValue("sent");
+    getWorkspaceDefinition.mockResolvedValue([
+      { abs: "/repo/src/Greeter.java", path: "src/Greeter.java", line: 3 },
+    ]);
+    await openJavaPreview(dispatchAskFix);
+    await cmdClickCode();
+    expect(dispatchAskFix).not.toHaveBeenCalled();
+    expect(useStore.getState().filePreview).toMatchObject({
+      abs: "/repo/src/Greeter.java", path: "src/Greeter.java", mode: "file", line: 3,
+    });
   });
 
 });
