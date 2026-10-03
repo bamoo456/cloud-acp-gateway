@@ -630,18 +630,24 @@ export async function grepWorkspace(cwd: string, query: string): Promise<GrepRes
 // `[]` is a miss (unresolvable or timed out) and the caller falls through to
 // the agent Trace. `null` is "the analyzer is off or unreachable" — do not
 // Trace: Cmd/Ctrl-click must not dispatch an agent turn when the flag is off.
+// `"indexing"` is a 503 while the analyzer's cold index is still building —
+// neither a miss nor off, so the caller says so instead of Tracing.
 export interface DefinitionHit {
   abs: string; path: string; line?: number; endLine?: number; column?: number;
 }
 
 export async function getWorkspaceDefinition(
   cwd: string, filePath: string, line: number, column: number,
-): Promise<DefinitionHit[] | null> {
+): Promise<DefinitionHit[] | "indexing" | null> {
   const url = base() + "/workspace/definition?cwd=" + encodeURIComponent(cwd) +
     "&path=" + encodeURIComponent(filePath) + "&line=" + line + "&column=" + column;
   try {
     const r = await fetch(url);
-    if (!r.ok) return null;
+    if (!r.ok) {
+      if (r.status !== 503) return null;
+      const err = await r.json() as { code?: unknown } | null;
+      return err?.code === "indexing" ? "indexing" : null;
+    }
     const body = await r.json() as Array<Partial<DefinitionHit>>;
     if (!Array.isArray(body)) return null;
     return body

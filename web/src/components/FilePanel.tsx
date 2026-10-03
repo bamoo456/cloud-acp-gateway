@@ -887,15 +887,22 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
 
   // A definition lookup is in flight (Cmd/Ctrl-click below).
   const [jumping, setJumping] = useState(false);
+  // What the last lookup has to say that isn't a jump — the index not built yet.
+  const [defNote, setDefNote] = useState<string | null>(null);
+  useEffect(() => {
+    if (!defNote) return;
+    const t = setTimeout(() => setDefNote(null), 4000);
+    return () => clearTimeout(t);
+  }, [defNote]);
 
   // Warm the Java definition analyzer while the file is read, so the cold
   // index is built by the time anything is clicked rather than inside the
-  // first click's 2 s budget.
+  // first click. In any mode: Review opens changed files as diffs, where
+  // `file` is never loaded, and the switch to File is exactly the click that
+  // would otherwise pay for the cold index.
   useEffect(() => {
-    if (mode !== "file" || file?.kind !== "text" || edit !== null) return;
-    if (!isDefinitionPath(target.path)) return;
-    warmWorkspaceDefinition(fileCwd);
-  }, [mode, target.abs, target.path, edit, file?.kind, fileCwd]);
+    if (isDefinitionPath(target.path)) warmWorkspaceDefinition(fileCwd);
+  }, [target.abs, target.path, fileCwd]);
 
   // Cmd/Ctrl-click a symbol to jump to its definition. A hit navigates through
   // the same path a Trace card's reference does; a miss falls through to the
@@ -910,12 +917,18 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
     const pos = positionFromClick(code, e.clientX, e.clientY);
     if (!pos) return;
     e.preventDefault();
+    setDefNote(null);
     setJumping(true);
     try {
       const hits = await getWorkspaceDefinition(fileCwd, target.abs, pos.line, pos.column);
       // null: disabled / unavailable — leave the click alone.
+      // "indexing": not a miss yet — say so rather than Trace.
       // []: a real miss — fall through to Trace.
       if (!hits) return;
+      if (hits === "indexing") {
+        setDefNote("Indexing Java sources, try again in a moment");
+        return;
+      }
       if (hits.length > 0) {
         const h = hits[0];
         useStore.getState().openFilePreview({
@@ -1159,7 +1172,8 @@ export function FileView({ cwd, target, spec, review, scrollTop, onMode, onDiff,
             {formatBytes(file.size)}{file.modifiedAt ? " · " + timeAgo(file.modifiedAt) : ""}
           </span>
         )}
-        {jumping && <span className="wf-meta">Looking up definition…</span>}
+        {jumping ? <span className="wf-meta">Looking up definition…</span>
+          : defNote && <span className="wf-meta">{defNote}</span>}
         <span className="sp" />
         {/* One bordered cluster rather than three loose glyphs: they are the
             file's actions, and grouped they also cost less width than spaced. */}

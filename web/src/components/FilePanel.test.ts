@@ -1572,4 +1572,28 @@ describe("FilePanel", () => {
     });
   });
 
+  test("Cmd-click on Java while the index builds says so and does not Trace", async () => {
+    const { useStore } = await import("../store/store.ts");
+    const dispatchAskFix = vi.fn().mockResolvedValue("sent");
+    getWorkspaceDefinition.mockResolvedValue("indexing");
+    await openJavaPreview(dispatchAskFix);
+    await cmdClickCode();
+    expect(dispatchAskFix).not.toHaveBeenCalled();
+    expect(useStore.getState().filePreview).toMatchObject({ abs: "/repo/src/Main.java" });
+    expect(container.textContent).toContain("Indexing Java sources");
+  });
+
+  test("a Java file opened as a diff warms the definition analyzer", async () => {
+    const { useStore } = await import("../store/store.ts");
+    useStore.setState({
+      filesOpen: true, cwd: "/repo",
+      filePreview: { abs: "/repo/src/Main.java", path: "src/Main.java", mode: "diff" },
+    });
+    await render();
+    expect(getFileDiff).toHaveBeenCalled();
+    expect(getFilePreview).not.toHaveBeenCalled();
+    expect(warmWorkspaceDefinition).toHaveBeenCalledTimes(1);
+    expect(warmWorkspaceDefinition).toHaveBeenCalledWith("/repo");
+  });
+
 });

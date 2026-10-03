@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { execFileSync } from "node:child_process";
-import { bifrostBinaryPath, resetBifrostForTest } from "./bifrost.ts";
+import { bifrostBinaryPath, resetBifrostForTest, setBifrostBinaryForTest } from "./bifrost.ts";
 
 // FS_ROOT is snapshotted at gateway.ts import time, so the fixture tree is
 // built and pointed at before the module is loaded (same as
@@ -14,7 +14,9 @@ const ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-defroot
 process.env.ACPG_FS_ROOT = ROOT;
 process.env.ACPG_PREVIEW_ROOTS = "";
 // Definition stays off unless a test opts in — fail closed, like production.
-delete process.env.ACPG_LSP_JAVA;
+// Set rather than deleted: gateway.ts loads the checkout's env file on import,
+// which only fills variables that are unset.
+process.env.ACPG_LSP_JAVA = "off";
 
 const REPO = path.join(ROOT, "javaproj");
 fs.mkdirSync(path.join(REPO, "src"), { recursive: true });
@@ -99,6 +101,47 @@ test("/workspace/definition?warm=1 answers at once without a line", async () => 
   }
 });
 
+test("/workspace/definition answers 503 indexing while the warm-up runs", async () => {
+  // Answers initialize and nothing else, so the warm-up query never settles.
+  const bin = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "acpg-deffake-")), "fake-lsp");
+  fs.writeFileSync(bin, `#!/usr/bin/env node
+let buf = Buffer.alloc(0);
+process.stdin.on("data", (c) => {
+  buf = Buffer.concat([buf, c]);
+  for (;;) {
+    const headEnd = buf.indexOf("\\r\\n\\r\\n");
+    if (headEnd < 0) return;
+    const len = Number(/content-length:\\s*(\\d+)/i.exec(buf.subarray(0, headEnd).toString())[1]);
+    if (buf.length < headEnd + 4 + len) return;
+    const msg = JSON.parse(buf.subarray(headEnd + 4, headEnd + 4 + len).toString());
+    buf = buf.subarray(headEnd + 4 + len);
+    if (msg.method !== "initialize") continue;
+    const body = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { capabilities: {} } }));
+    process.stdout.write("Content-Length: " + body.length + "\\r\\n\\r\\n");
+    process.stdout.write(body);
+  }
+});
+`);
+  fs.chmodSync(bin, 0o755);
+  resetBifrostForTest();
+  setBifrostBinaryForTest(bin);
+  process.env.ACPG_LSP_JAVA = "bifrost";
+  try {
+    const { get, close } = await startHttpServer();
+    try {
+      const r = await get(q({ cwd: REPO, path: "src/Main.java", line: "5", column: "26" }));
+      assert.equal(r.status, 503);
+      assert.deepEqual(await r.json(), { error: "indexing", code: "indexing" });
+    } finally {
+      await close();
+    }
+  } finally {
+    process.env.ACPG_LSP_JAVA = "off";
+    // Also drops the fake binary, so the live test below resolves the real one.
+    resetBifrostForTest();
+  }
+});
+
 // Needs the real analyzer binary (an exact-pinned optional dependency). Skips
 // where it isn't installed rather than failing the suite.
 test("/workspace/definition resolves a cross-file Java symbol", async (t) => {
@@ -107,8 +150,8 @@ test("/workspace/definition resolves a cross-file Java symbol", async (t) => {
   try {
     const { get, close } = await startHttpServer();
     try {
-      // Warm first: the cold index is built inside the first query, and the
-      // 2 s definition budget must not pay for it.
+      // Warm first: the cold index is built inside the warm-up query, and a
+      // click before it settles answers 503 indexing rather than a miss.
       const w = await get(q({ cwd: REPO, warm: "1" }));
       assert.equal(w.status, 200);
       assert.equal((await w.json() as { warming?: unknown }).warming, true);
@@ -116,6 +159,10 @@ test("/workspace/definition resolves a cross-file Java symbol", async (t) => {
       let hit: Array<{ abs?: unknown; path?: unknown; line?: unknown }> = [];
       for (let attempt = 0; attempt < 30; attempt++) {
         const r = await get(q({ cwd: REPO, path: "src/Main.java", line: "5", column: "26" }));
+        if (r.status === 503) {
+          assert.equal((await r.json() as { code?: string }).code, "indexing");
+          continue;
+        }
         assert.equal(r.status, 200);
         hit = await r.json() as typeof hit;
         if (hit.length) break;
@@ -128,7 +175,7 @@ test("/workspace/definition resolves a cross-file Java symbol", async (t) => {
       await close();
     }
   } finally {
-    delete process.env.ACPG_LSP_JAVA;
+    process.env.ACPG_LSP_JAVA = "off";
     resetBifrostForTest();
   }
 });

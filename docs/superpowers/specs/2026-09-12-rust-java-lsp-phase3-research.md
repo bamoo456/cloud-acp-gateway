@@ -22,7 +22,7 @@ So the recommendation is narrower, and more concrete, than "run a shadow pilot b
 2. **One provider, no broker.** A `CodeIntelProvider` abstraction with a single implementation is an interface with one implementor. Add the seam when a second engine earns it.
 3. **No JDTLS fallback in the first cut.** Fall back to what already exists — the Trace request at `web/src/lib/reviewPrompt.ts:113-116`. Reconsider JDTLS only if the correctness check in [§7](#7-integration-plan) finds a real gap.
 4. **Treat a miss as a timeout, not an answer.** A definition Bifrost cannot resolve took 15.4 s to return zero results. A hard budget of ~2 s, then fall through, is the whole confidence gate.
-5. **Start the provider when the review opens, not on the first click.** `initialize` returns in under two seconds against an unindexed repository, but the index is then built inside the first query — 16.8 s on a 6,429-file module. Warming it while the reviewer reads the diff hides that entirely.
+5. **Warm the provider when a Java file is first shown, not on the first click.** `initialize` returns in under two seconds against an unindexed repository, but the index is then built inside the first query — 16.8 s on a 6,429-file module. Sending a no-match `workspace/symbol` as soon as a Java diff or file opens builds it while the reviewer reads.
 6. **Pin the analyzer offline.** Bifrost's default path reaches GitHub for semantic packs and stalled for minutes when it could not complete. `BIFROST_SEMANTIC_PACK_DOWNLOAD=off` is a trust-boundary requirement for a gateway serving company code, not a tuning option.
 
 The division of responsibility stays as #283 drew it, with one line moved:
@@ -117,8 +117,8 @@ Host for both: Apple Silicon, macOS 25.6, Bifrost 0.11.3 via `npx @brokkai/bifro
 | Content | Spring and Jackson throughout | Domain model classes across many packages |
 
 Corpus B is the interesting one for sizing, because its parent monorepo holds roughly 95,000 Java
-files. Measuring one module gives a per-file rate without indexing all of it — see
-[Not yet measured](#not-yet-measured) for why the whole thing was not attempted.
+files. Measuring one module gave a per-file rate; [The whole monorepo](#the-whole-monorepo) later
+indexed all of it.
 
 ### Startup and indexing
 
@@ -133,10 +133,41 @@ The one-shot and long-lived modes are not interchangeable. Every interactive num
 `--lsp`.
 
 **`initialize` is not readiness.** It returns in under two seconds against an unindexed repository,
-and the index is then built inside the first query — 16.8 s on Corpus B. A provider started when the
-reviewer first clicks will make that reviewer wait; started when the review workspace opens, the
-index builds while they read the diff. This is the one measurement that changed the lifecycle design
-in [§6](#6-architecture).
+and the index is then built inside the first query — 16.8 s on Corpus B. A provider that only spawns
+and initializes when the review workspace opens has built nothing by the first click; it has to be
+sent a query to start indexing. This is the one measurement that changed the lifecycle design in
+[§6](#6-architecture).
+
+### Readiness, re-measured on 0.11.4
+
+Corpus A again, `--lsp` on Bifrost 0.11.4, driven the way the gateway drives it.
+
+| Step | Latency | Notes |
+|---|---|---|
+| `initialize` | < 50 ms | Builds no index |
+| First `definition`, cold | 6.96 s | The index build, paid in-request |
+| First `workspace/symbol`, cold | 7.5–8.5 s | Same with a no-match query (`zzz_nomatch`, returns `[]`) or an empty one |
+| `definition` after that | 5–9 ms | |
+| First query after a restart on a complete on-disk cache | 1.5–2.2 s | Straddles a 2 s budget |
+| `definition` on Jackson `readValue` | 12.6–14.2 s | Returns `null` |
+| The same site asked again | 13 ms | The miss is cached |
+| Good `definition` sent 100 ms after it | 13.4 s | Queued behind it |
+
+**A no-match `workspace/symbol` is the warm-up.** It builds the same index the first definition would,
+and has no result to read.
+
+**Requests are served one at a time, `$/cancelRequest` is ignored, and a miss is cached.** A slow miss
+holds up every click behind it, but killing it throws away the work the next click needs. So a lookup
+past its click's 2 s budget is left to finish while the click falls through to Trace, and a click that
+arrives meanwhile answers "indexing" instead of queueing behind it. Only past a 60 s ceiling is the
+process treated as jammed and replaced. Through the gateway's own code path on Corpus A: a Lombok getter
+missed at the 2 s budget, the next click answered "indexing" for 8 s and then resolved, and the getter
+asked again answered in 39 ms — all on one process.
+
+**Killing before the index is ready throws it away.** With warm meaning `initialize` only and a 2 s
+budget per click, definition never succeeded on Corpus A: 6 of 6 consecutive attempts timed out, and
+each kill discarded the half-built index, so the next attempt started over. Until the warm-up settles,
+a click has to answer "indexing" and leave the process alone.
 
 ### Query latency, long-lived server
 
@@ -175,22 +206,43 @@ per Java file**, with the caveat that both are single measurements on one module
 
 Run without `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`, a second invocation sat for 3 minutes 42 seconds at 0.3% CPU holding an open HTTPS socket to a GitHub CDN before it was killed. The [semantic pack documentation](https://bifrost.brokk.ai/semantic-model-packs/) confirms the facade downloads a bundle for the running release. Dependency discovery itself is offline and opt-in — Bifrost never invokes Maven or Gradle and never downloads artifacts.
 
-### Precision caveat
+### Correctness: 20 call sites
 
-Three probes — two correct cross-module definitions and one external-JAR miss — are a smoke test, not a precision figure. [§7](#7-integration-plan) carries a 20-site correctness check against IntelliJ as an explicit step.
+Corpus A, 20 sites across four Maven modules, Bifrost 0.11.4 on a warm index. IntelliJ was not
+reachable, so the expected answer is the declaring source, found by reading the code.
 
-### Not yet measured
+| Category | Sites | Correct | What went wrong |
+|---|---:|---:|---|
+| Spring injection — method through an injected field, injected field's type | 4 | 4 | |
+| Cross-module type or constructor | 3 | 3 | |
+| Inherited member, call through an interface | 3 | 2 | `super.getInstant()` resolved to the caller's own override |
+| Static or overloaded method | 3 | 1 | Overloaded statics return **every** overload; the click opens the first |
+| Ordinary same-module call | 2 | 2 | |
+| Lombok `builder()`, builder setter, `@Data` getter | 3 | 0 | No answer — the getter after 12.5 s |
+| JDK / third-party library | 2 | — | No answer, as expected (5–7 ms on a warm process) |
 
-Corpus B's parent monorepo — roughly 95,000 Java files, 150,255 tracked files, 18 GB — has not been
-indexed whole, and the blocker is disk rather than time. The measuring host had 3.5 GB free on a
-single volume. Extrapolating Corpus B's 36 KB per Java file puts a full index near **3.4 GB of cache**,
-which would have taken the machine to zero free space, so the run was not attempted.
+**12 of 18 in-repo sites correct (67%); 12 of 15 outside Lombok.** Median latency 6 ms. Lombok is the
+class of miss that matters: 2,508 files in Corpus A import it. A miss falls through to the agent Trace,
+so it costs a round trip, not a wrong answer.
 
-What this leaves open: whether indexing stays linear at 15x the size, what the resident set reaches
-(the per-file rate extrapolates to several gigabytes, which would need a per-host process cap), and
-whether one process per monorepo is viable at all or the scope has to be the changed modules only.
-Repeating this needs about 10 GB of headroom. A first scoped attempt across four modules of that
-monorepo, about 26,600 Java files, was stopped before it produced numbers.
+### The whole monorepo
+
+Corpus B's parent monorepo, 92,512 tracked Java files, indexed whole on the same host with 74 GB free:
+
+| | Cold | Restart on its cache |
+|---|---|---|
+| Warm-up (no-match `workspace/symbol`) | 254 s | 63–71 s |
+| `definition` after it | 12–51 ms | 10–25 ms |
+| Peak resident set | 4.3 GB | 4.9 GB |
+| On-disk cache | 3.5 GB | 3.4 GB |
+| Library-symbol miss (Jackson `readValue`) | — | 40 ms, then 2 ms |
+
+Indexing stays linear at Corpus B's rate (2.7 ms per Java file against 2.6 ms; Corpus A ran at 1.3 ms).
+The cache matches the 36 KB-per-file extrapolation; the resident set is about 47 KB per file. One
+process per monorepo is viable on a 36 GB host, but the restart cost shapes the lifecycle: a kill costs
+over a minute of "indexing" here, so the gateway never kills a ready process for being slow, gives the
+warm-up 30 minutes, and keeps an idle process for 30 minutes rather than 5. Four live processes cap the
+worst case near 20 GB.
 
 ---
 
@@ -217,9 +269,11 @@ GET /workspace/definition?cwd&path&line&column      2 s budget
         +-- hit  --> CodeRef[] --> existing open-at-line navigation
         |
         +-- miss or timeout --> existing agent Trace request
+        |
+        +-- still indexing, or an earlier lookup still running --> 503, no Trace
 ```
 
-Bifrost is one process per repository, keyed by git common dir — the same identity Phase 2 already stores for reviews. It is spawned when a review workspace opens rather than on the first click, because the cold index is paid inside the first query — up to 16.8 s — and that is time the reviewer can spend reading the diff instead of waiting. It is evicted when idle. The supervisor pattern at `src/gateway.ts:2813` (spawn, backoff respawn, process-group kill) is reused as-is.
+Bifrost is one process per repository, keyed by git common dir — the same identity Phase 2 already stores for reviews. It is spawned and warmed when a Java file is first shown in the file view or the review canvas, as a diff or as a file, rather than on the first click: warming means `initialize` followed by a no-match `workspace/symbol`, because `initialize` builds nothing and the cold index is paid inside the first query — up to 16.8 s — which is time the reviewer can spend reading the diff instead of waiting. A click before the warm-up settles answers "indexing" and leaves the process alone. Once it is ready, a lookup past the 2 s budget falls through to Trace but is left to finish, and a click behind it answers "indexing"; only a lookup past a 60 s ceiling kills the process, which is replaced and warmed at once. It is evicted after 30 idle minutes, never while warming. The supervisor pattern at `src/gateway.ts:2813` (spawn, backoff respawn, process-group kill) is reused as-is.
 
 Results normalise into the `CodeRef` shape that already exists at `web/src/lib/codeRef.ts:6-13`. No new primitive, no new renderer: a definition result opens through the same path a Trace card's reference does.
 
@@ -233,13 +287,13 @@ Deliberately skipped:
 
 ## 7. Integration plan
 
-1. **Measure the large corpus cold**, once about 10 GB of disk is free. `--lsp` index time, cache size and resident set on ~95k Java files. Decides whether one process per monorepo is viable, or the indexed scope has to be narrowed to the modules a review touches, and whether a per-host process cap is needed.
-2. **Provider lifecycle.** One Bifrost process per git common dir, spawned when a review opens, idle-evicted. Reuse `src/gateway.ts:2813`. Environment fixed by the gateway: `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`, and `BIFROST_CACHE_ROOT` pointed at the gateway's own data directory so nothing is written into the user's checkout.
-3. **`GET /workspace/definition?cwd&path&line&column`.** A sibling of `/workspace/resolve` at `src/gateway.ts:5312`. The request path and every returned URI clamp through `allowedPreviewPath`, so a result outside the root is refused rather than opened. Hard 2 s timeout. Responds with `CodeRef[]`.
+1. **Measure the large corpus cold.** Done — [The whole monorepo](#the-whole-monorepo): 254 s, 4.3 GB resident, 3.5 GB of cache for 92,512 Java files. One process per monorepo is viable; its restart cost set the lifecycle in step 2.
+2. **Provider lifecycle.** One Bifrost process per git common dir, spawned and warmed (`initialize`, then a no-match `workspace/symbol` that builds the index) when a Java file is first shown, idle-evicted. Reuse `src/gateway.ts:2813`. Environment fixed by the gateway: `BIFROST_SEMANTIC_PACK_DOWNLOAD=off`, and `BIFROST_CACHE_ROOT` pointed at the gateway's own data directory so nothing is written into the user's checkout.
+3. **`GET /workspace/definition?cwd&path&line&column`.** A sibling of `/workspace/resolve` at `src/gateway.ts:5312`. The request path and every returned URI clamp through `allowedPreviewPath`, so a result outside the root is refused rather than opened. Hard 2 s timeout. Responds with `CodeRef[]`, or 503 `indexing` while the warm-up runs.
 4. **Cmd/Ctrl-click in the file view.** The column comes from the same selection offsets `rangeFromOffsets` already uses at `web/src/lib/lineRange.ts:25`; `AskFixRequest` gains an optional `column`. A miss or a timeout falls through to the Trace action that the same selection already offers at `web/src/components/FilePanel.tsx:672`.
 5. **Feature flag `ACPG_LSP_JAVA=off|bifrost`.** `@brokkai/bifrost` pinned in `package.json`; its platform binaries are optional dependencies and it declares `engines.node >= 18`, so the Node 20 twin is unaffected.
-6. **Correctness check.** 20 call sites across at least three modules, definition compared against IntelliJ, recorded here. Includes the cases clean-room analyzers are known to miss: Lombok-generated accessors, Spring injection points, and inherited members.
-7. **Revisit.** If the check finds a class of miss that matters, the options in order are a Bifrost semantic pack for the dependency, then kmp-lsp, then JDTLS as a second tier.
+6. **Correctness check.** Done — [Correctness: 20 call sites](#correctness-20-call-sites): 12 of 18 in-repo sites, every Lombok-generated member missed.
+7. **Revisit.** Lombok is the class of miss that matters. A semantic pack covers dependency JARs, not members generated from the repository's own source, so the order for Lombok is kmp-lsp if it models them, then JDTLS with the Lombok agent as a second tier. Until then a Lombok click costs an agent Trace.
 
 ---
 
@@ -252,6 +306,8 @@ Two requirements follow:
 - **No egress from the analyzer.** `BIFROST_SEMANTIC_PACK_DOWNLOAD=off` is set by the gateway, not left to the environment. Company source is being analysed; the process should not talk to the network.
 - **The path clamp is not optional.** Definition results arrive as `file://` URIs chosen by the analyzer. They pass through `allowedPreviewPath` exactly like `/workspace/file` requests do, so an unexpected URI is refused rather than opened.
 
+The analyzer does not outlive the gateway: it exits on stdin EOF, so neither a SIGTERM'd nor a SIGKILL'd gateway leaves one holding gigabytes behind (both checked).
+
 If JDTLS is ever added as a second tier, it does not inherit these properties — its project import executes repository code and must be sandboxed like an agent-run build.
 
 ---
@@ -259,7 +315,8 @@ If JDTLS is ever added as a second tier, it does not inherit these properties �
 ## 9. Open questions
 
 - **Scope.** Definition only, or definition plus references as an explicit asynchronous action with a spinner, alongside Trace?
-- **Default.** Enabled when the Bifrost binary resolves, or opt-in behind the flag until the correctness check is recorded?
+- **Default.** Enabled when the Bifrost binary resolves, or opt-in behind the flag? The correctness check is recorded: 67% on in-repo sites, misses falling through to Trace.
+- **Overloads.** Bifrost answers an overloaded static call with every overload, and the click opens the first. A chooser is the IDE answer; the overloads usually sit a few lines apart, which is why it is not in the first cut.
 - **Single-vendor risk.** The GitHub repository is an open-core mirror — every commit reads `chore: update Bifrost open-core projection`, and development happens elsewhere. Apache-2.0 and a pinned version limit the exposure; kmp-lsp is the named alternative if that changes.
 
 ---

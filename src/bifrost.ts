@@ -5,6 +5,11 @@
  * Deliberately narrow: definition only, with a hard 2 s budget per request. A
  * miss (or a timeout, which is how an unresolvable symbol reads — slow and
  * empty) is an empty array, and the caller falls through to the agent Trace.
+ * `initialize` is not readiness — Bifrost builds its index inside the first
+ * real query — so each process is warmed with a no-match `workspace/symbol`,
+ * and a request that arrives before that settles answers "indexing" instead.
+ * A lookup past its click's budget is left to finish rather than killed, and a
+ * click behind it answers "indexing" too: Bifrost serves one request at a time.
  * References/callers/callees stay with the agent; see the Phase 3 research note
  * at docs/superpowers/specs/2026-09-12-rust-java-lsp-phase3-research.md.
  */
@@ -19,15 +24,27 @@ import { gitCommonDir, repoRoot } from "./workspace.ts";
 // Pinned in package.json (exact, no caret). engines.node >= 18, so the
 // Node 20 twin runs it unchanged.
 const BIFROST_VERSION = "0.11.4";
-// initialize answers fast against an unindexed repo, but the index is then
-// built inside the first query — up to ~17 s measured. A definition past this
-// budget is a miss, not an answer.
+// A click's budget. Spent waiting on the warm-up, or on an earlier lookup the
+// analyzer is still serving, it answers "indexing"; spent on the click's own
+// definition, it is a miss.
 export const BIFROST_DEFINITION_TIMEOUT_MS = 2000;
-// One --lsp process holds ~0.5–1 GB resident on repos this size, so cap the
-// live set and evict the idlest. A request that arrives after an eviction just
-// pays a fresh spawn + warm.
+// A lookup past its click's budget is left to finish, not killed: an
+// unresolvable symbol (a Lombok accessor, a library call) takes ~13 s the first
+// time and ~13 ms after, because Bifrost caches the miss, while a respawn costs
+// 1.5–2.2 s of cache reload on a 9k-file repo and 62–71 s on a 92k-file
+// monorepo. Past this ceiling the analyzer is jammed, not slow.
+const ANALYZER_CEILING_MS = 60_000;
+// The warm-up query pays the cold index build — 7.5–8.5 s on a 9k-file Maven
+// repo, 254 s on a 92k-file monorepo — so it gets a budget of its own.
+const WARM_TIMEOUT_MS = 30 * 60 * 1000;
+const WARM_QUERY = "zzz_acpg_warm_nomatch";
+// One --lsp process holds 0.5–1 GB resident on a 9k-file repo and 4.3–4.9 GB
+// on a 92k-file monorepo, so cap the live set and evict the idlest. Eviction
+// waits half an hour because the next request then gets "indexing" while a
+// respawn re-reads its cache — over a minute on the monorepo — and a reviewer
+// reading one long diff makes no requests.
 const MAX_SERVERS = 4;
-const IDLE_EVICT_MS = 5 * 60 * 1000;
+const IDLE_EVICT_MS = 30 * 60 * 1000;
 
 export interface BifrostLocation {
   uri: string;
@@ -38,8 +55,8 @@ export interface BifrostLocation {
 }
 
 // The only question the first cut asks: does this resolve often enough to keep.
-const stats = { requests: 0, hits: 0, misses: 0, timeouts: 0 };
-export function bifrostStats(): { requests: number; hits: number; misses: number; timeouts: number } {
+const stats = { requests: 0, hits: 0, misses: 0, timeouts: 0, indexing: 0 };
+export function bifrostStats(): { requests: number; hits: number; misses: number; timeouts: number; indexing: number } {
   return { ...stats };
 }
 
@@ -205,10 +222,9 @@ class LspConn {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
-        // A definition miss is slow-and-empty on this stdio (~15 s measured).
-        // Dropping the Promise without cancelling leaves the analyzer busy, so
-        // the next click waits behind it. Cancel, then kill: Bifrost may ignore
-        // $/cancelRequest, and a fresh process is cheaper than a jammed one.
+        // Past its ceiling the analyzer is jammed, not slow. Cancel, then kill:
+        // Bifrost 0.11.4 ignores $/cancelRequest and serves one request at a
+        // time, so nothing queued behind a jammed request would ever answer.
         this.notify("$/cancelRequest", { id });
         this.kill();
         reject(Object.assign(new Error("bifrost timeout"), { code: "timeout" }));
@@ -236,7 +252,12 @@ interface ServerEntry {
   root: string;
   conn: LspConn;
   lastUsed: number;
+  // Settles once the warm-up query has built (or re-read) the index; `ready`
+  // mirrors it synchronously so a request can tell without awaiting.
   init: Promise<void>;
+  ready: boolean;
+  // A definition the analyzer is still serving after its click gave up on it.
+  busy: Promise<void> | null;
 }
 
 const servers = new Map<string, ServerEntry>();
@@ -246,7 +267,9 @@ const starting = new Map<string, Promise<ServerEntry>>();
 
 function evictIdle(now = Date.now()): void {
   for (const [key, s] of servers) {
-    if (now - s.lastUsed > IDLE_EVICT_MS) {
+    // Never one still warming: nothing bumps lastUsed while it builds, and a
+    // kill throws the half-built index away. WARM_TIMEOUT_MS bounds that.
+    if (s.ready && now - s.lastUsed > IDLE_EVICT_MS) {
       servers.delete(key);
       s.conn.kill();
     }
@@ -302,6 +325,8 @@ async function startServer(key: string, root: string, ledgerDir: string): Promis
     conn,
     lastUsed: Date.now(),
     init: Promise.resolve(),
+    ready: false,
+    busy: null,
   };
   conn.start();
   entry.init = (async () => {
@@ -311,17 +336,21 @@ async function startServer(key: string, root: string, ledgerDir: string): Promis
       capabilities: {},
     }, 10_000);
     conn.notify("initialized", {});
+    // initialize returns before indexing; the index is built inside the first
+    // real query. A no-match symbol search builds it without a result to read.
+    await conn.request("workspace/symbol", { query: WARM_QUERY }, WARM_TIMEOUT_MS);
+    entry.ready = true;
   })();
-  // A failed initialize must not poison the map — the next request retries.
+  // A failed warm-up must not poison the map — the next request retries.
   entry.init.catch(() => { if (servers.get(key) === entry) { servers.delete(key); conn.kill(); } });
   servers.set(key, entry);
   evictIdle();
   return entry;
 }
 
-// Spawn (or reuse) the analyzer for cwd's repository without querying: call
-// when a review opens so the cold index builds while the diff is read, not on
-// the first click. Never throws — warming is best effort.
+// Spawn (or reuse) and warm the analyzer for cwd's repository: call when a
+// review opens so the cold index builds while the diff is read, not on the
+// first click. Never throws — warming is best effort.
 export function warmBifrost(cwd: string, ledgerDir: string): void {
   if (!isBifrostEnabled()) return;
   ensureServer(cwd, ledgerDir).then(
@@ -356,8 +385,21 @@ function toLocations(result: unknown): BifrostLocation[] {
   return out;
 }
 
+const PAST_BUDGET = Symbol("past budget");
+
+// p, or PAST_BUDGET once ms have passed. Unlike conn.request's own timeout,
+// giving up here leaves the analyzer alone.
+function within<T>(p: Promise<T>, ms: number): Promise<T | typeof PAST_BUDGET> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([p, new Promise<typeof PAST_BUDGET>((r) => { timer = setTimeout(() => r(PAST_BUDGET), ms); })])
+    .finally(() => clearTimeout(timer));
+}
+
 // Definition for a 0-based LSP position in an absolute file path. Empty array
-// is the miss — slow-and-empty included — and the caller falls through.
+// is the miss — a lookup past the budget included — and the caller falls
+// through. "indexing" means the answer is still being built — the warm-up, or
+// an earlier lookup the analyzer serves first — so the caller should neither
+// Trace nor treat it as a miss.
 export async function bifrostDefinition(
   cwd: string,
   abs: string,
@@ -365,22 +407,35 @@ export async function bifrostDefinition(
   character: number,
   ledgerDir: string,
   timeoutMs = BIFROST_DEFINITION_TIMEOUT_MS,
-): Promise<BifrostLocation[]> {
+  ceilingMs = ANALYZER_CEILING_MS,
+): Promise<BifrostLocation[] | "indexing"> {
   stats.requests++;
   let realAbs = abs;
   try { realAbs = fs.realpathSync(abs); } catch { /* missing — let the analyzer answer */ }
   let result: unknown;
   try {
     const entry = await ensureServer(cwd, ledgerDir);
-    await entry.init;
+    if (!entry.ready) await within(entry.init, timeoutMs);
+    // Sent behind a lookup the analyzer is still serving, this one would
+    // queue past its budget and fall through to Trace for a symbol that
+    // resolves.
+    if (entry.ready && entry.busy) await within(entry.busy, timeoutMs);
+    if (!entry.ready || entry.busy) { stats.indexing++; return "indexing"; }
     entry.lastUsed = Date.now();
-    result = await entry.conn.request("textDocument/definition", {
+    const req = entry.conn.request("textDocument/definition", {
       textDocument: { uri: pathToFileURL(realAbs).href },
       position: { line, character },
-    }, timeoutMs);
-  } catch (e) {
-    if ((e as { code?: string }).code === "timeout") stats.timeouts++;
-    else stats.misses++;
+    }, ceilingMs);
+    const busy: Promise<void> = req.then(() => undefined, (e: { code?: string }) => {
+      // Past the ceiling conn.request killed it: warm a replacement now, so
+      // the next click finds a process re-reading its cache.
+      if (e?.code === "timeout") ensureServer(cwd, ledgerDir).catch(() => undefined);
+    }).finally(() => { if (entry.busy === busy) entry.busy = null; });
+    entry.busy = busy;
+    result = await within(req, timeoutMs);
+    if (result === PAST_BUDGET) { stats.timeouts++; return []; }
+  } catch {
+    stats.misses++;
     return [];
   }
   const locs = toLocations(result);
@@ -404,6 +459,7 @@ export function resetBifrostForTest(): void {
   stats.hits = 0;
   stats.misses = 0;
   stats.timeouts = 0;
+  stats.indexing = 0;
 }
 
 export function bifrostLedgerDir(): string {

@@ -262,9 +262,22 @@ describe("getWorkspaceDefinition", () => {
 
   test("a 404 is disabled/unavailable — null, so the click does not Trace", async () => {
     mockResponse({
-      ok: false,
+      ok: false, status: 404,
       json: () => Promise.resolve({ error: "definition is disabled", code: "disabled" }),
     });
+    await expect(getWorkspaceDefinition("/repo", "Main.java", 5, 10)).resolves.toBeNull();
+  });
+
+  test("a 503 with code indexing is the index still building, not a miss", async () => {
+    mockResponse({
+      ok: false, status: 503,
+      json: () => Promise.resolve({ error: "indexing", code: "indexing" }),
+    });
+    await expect(getWorkspaceDefinition("/repo", "Main.java", 5, 10)).resolves.toBe("indexing");
+  });
+
+  test("any other 503 is unavailable — null", async () => {
+    mockResponse({ ok: false, status: 503, json: () => Promise.resolve({ error: "busy" }) });
     await expect(getWorkspaceDefinition("/repo", "Main.java", 5, 10)).resolves.toBeNull();
   });
 });
