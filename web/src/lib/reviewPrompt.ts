@@ -97,6 +97,10 @@ export interface AskFixRequest {
   side?: "new" | "old";
   line: number;
   endLine?: number;
+  // 1-based column within `line`, when the request came from a point (a
+  // Cmd/Ctrl-click) rather than a range. Informational for the agent; the
+  // anchor still addresses whole lines.
+  column?: number;
   code: string;
 }
 
