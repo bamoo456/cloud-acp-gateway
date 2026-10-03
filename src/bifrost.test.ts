@@ -169,5 +169,8 @@ test("overlapping definition requests spawn one analyzer", async () => {
     bifrostDefinition(repo, abs, 0, 0, dir, 2000),
     bifrostDefinition(repo, abs, 0, 0, dir, 2000),
   ]);
+  // Both can answer "indexing" before a loaded runner has started the fake.
+  await until(() => pids(stamp).length > 0);
+  await new Promise((r) => setTimeout(r, 200));
   assert.equal(pids(stamp).length, 1);
 });
