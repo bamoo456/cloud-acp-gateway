@@ -1,7 +1,7 @@
 import { describe, test, expect, vi, afterEach } from "vitest";
 import {
   getHistory, getMessages, getDiscoveredHistory, listDir, getRunning, getInboxPending, putLockConfig, searchSessions,
-  uploadFile, getFilePreview, getUsageLimits,
+  uploadFile, getFilePreview, getUsageLimits, getWorkspaceDefinition,
 } from "./api.ts";
 
 function mockFetch(json: unknown) {
@@ -241,5 +241,43 @@ describe("workspace error bodies", () => {
   test("a plain-text error body is still shown as written", async () => {
     mockResponse({ ok: false, text: () => Promise.resolve("authentication required") });
     await expect(getFilePreview("/repo", "/x")).rejects.toThrow("authentication required");
+  });
+});
+
+describe("getWorkspaceDefinition", () => {
+  test("a 200 with hits is the jump", async () => {
+    mockResponse({
+      ok: true,
+      json: () => Promise.resolve([{ abs: "/repo/A.java", path: "A.java", line: 3 }]),
+    });
+    await expect(getWorkspaceDefinition("/repo", "Main.java", 5, 10)).resolves.toEqual([
+      { abs: "/repo/A.java", path: "A.java", line: 3 },
+    ]);
+  });
+
+  test("a 200 with [] is a miss, not disabled", async () => {
+    mockResponse({ ok: true, json: () => Promise.resolve([]) });
+    await expect(getWorkspaceDefinition("/repo", "Main.java", 5, 10)).resolves.toEqual([]);
+  });
+
+  test("a 404 is disabled/unavailable — null, so the click does not Trace", async () => {
+    mockResponse({
+      ok: false, status: 404,
+      json: () => Promise.resolve({ error: "definition is disabled", code: "disabled" }),
+    });
+    await expect(getWorkspaceDefinition("/repo", "Main.java", 5, 10)).resolves.toBeNull();
+  });
+
+  test("a 503 with code indexing is the index still building, not a miss", async () => {
+    mockResponse({
+      ok: false, status: 503,
+      json: () => Promise.resolve({ error: "indexing", code: "indexing" }),
+    });
+    await expect(getWorkspaceDefinition("/repo", "Main.java", 5, 10)).resolves.toBe("indexing");
+  });
+
+  test("any other 503 is unavailable — null", async () => {
+    mockResponse({ ok: false, status: 503, json: () => Promise.resolve({ error: "busy" }) });
+    await expect(getWorkspaceDefinition("/repo", "Main.java", 5, 10)).resolves.toBeNull();
   });
 });
