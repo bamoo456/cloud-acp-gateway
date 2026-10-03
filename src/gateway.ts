@@ -5313,9 +5313,11 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
   // Go to definition (Bifrost Java analyzer). Query: ?cwd&path&line&column,
   // all 1-based. Answers with CodeRef-shaped hits (abs included, like resolve).
   // A miss — including the timeout an unresolvable symbol pays — is [] with a
-  // 200, and the client falls through to the agent Trace. ?warm=1 (cwd only)
-  // spawns the analyzer for the review being opened so the cold index builds
-  // while the diff is read instead of on the first click; it answers at once.
+  // 200, and the client falls through to the agent Trace. A 503 `indexing`
+  // means the analyzer is still building or re-reading its index: not a miss,
+  // so no Trace. ?warm=1 (cwd only) spawns and warms the analyzer for the
+  // review being opened so the cold index builds while the diff is read
+  // instead of on the first click; it answers at once.
   if (consoleEnabled && pathname === "/workspace/definition") {
     const q = new URL(req.url ?? "/", "http://x").searchParams;
     if (q.get("warm") === "1") {
@@ -5346,6 +5348,7 @@ export function handleRequest(req: http.IncomingMessage, res: http.ServerRespons
         return bifrostDefinition(cwd, target, line - 1, column - 1, cfg.ledgerDir, BIFROST_DEFINITION_TIMEOUT_MS)
           .catch((): Awaited<ReturnType<typeof bifrostDefinition>> => [])
           .then(async (locs) => {
+            if (locs === "indexing") { res.writeHead(503); res.end(JSON.stringify({ error: "indexing", code: "indexing" })); return; }
             const out: Array<{ abs: string; path: string; line: number; endLine?: number; column?: number }> = [];
             for (const loc of locs) {
               const p = bifrostLocationPath(loc.uri);
