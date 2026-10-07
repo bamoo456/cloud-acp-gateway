@@ -161,6 +161,12 @@ interface State {
   // broken gauge, and the credential reasons need the user to go and re-auth.
   quotaUnavailable: Record<string, string>;
   promptCapabilities: PromptCapabilities; // what the active agent accepts in a prompt (image, …)
+  // True when the agent accepts a `session/prompt` while one of its turns is still
+  // running, queueing it onto its own input stream (claude-agent-acp advertises
+  // this as `_meta.claudeCode.promptQueueing`). It moves the send queue out of
+  // this tab and into the agent: a message typed mid-turn goes out immediately and
+  // the agent picks when to read it. Agents without it keep the local rail below.
+  promptQueueing: boolean;
   pendingPermissions: PendingPermission[];
   promptStateRevision: number;
   autoApprove: boolean;
@@ -700,10 +706,31 @@ export const useStore = create<State>((set, get) => {
 
   function msg(e: any) { return e && e.message ? e.message : JSON.stringify(e); }
 
+  // sessionId -> how many session/prompt requests are in flight against it. Under
+  // promptQueueing there can be several at once, and the session has to stay busy
+  // until the last one settles — a flag would go idle on the first one back and
+  // show a ready composer while the agent is still working. Nothing clears this on
+  // teardown because nothing has to: every pending request is rejected when the
+  // socket goes (see lib/acp.ts), so each increment gets its matching decrement.
+  const promptsInFlight = new Map<string, number>();
+
+  // A provisional session that has just been given its real id takes its in-flight
+  // count with it, the way the queue does (remapQueue). Without this the running
+  // turn stays counted against an id nothing will ever settle, and the real one
+  // starts from zero — so the next prompt sent mid-turn would clear busy early.
+  function remapSessionBusy(from: string, to: string) {
+    const depth = promptsInFlight.get(from);
+    if (depth === undefined) return;
+    promptsInFlight.delete(from);
+    promptsInFlight.set(to, (promptsInFlight.get(to) ?? 0) + depth);
+  }
+
   function setSessionBusy(id: string, busy: boolean) {
+    const depth = Math.max(0, (promptsInFlight.get(id) ?? 0) + (busy ? 1 : -1));
+    if (depth) promptsInFlight.set(id, depth); else promptsInFlight.delete(id);
     set((st) => {
       const busySessionIds = { ...st.busySessionIds };
-      if (busy) busySessionIds[id] = true;
+      if (depth) busySessionIds[id] = true;
       else delete busySessionIds[id];
       return { busySessionIds, busy: Object.keys(busySessionIds).length > 0 };
     });
@@ -845,7 +872,7 @@ export const useStore = create<State>((set, get) => {
       sessions: {}, activeId: null, sideWindows: [],
       // rateLimits is deliberately untouched: it's polled per account,
       // independent of this connection, and a restart shouldn't blank it.
-      promptCapabilities: {}, pendingPermissions: [],
+      promptCapabilities: {}, promptQueueing: false, pendingPermissions: [],
       busy: false, busySessionIds: {},
       // Every session on this connection is gone, so anything queued against one
       // has nowhere left to drain. It is dropped with them (see queuedPrompts'
@@ -1172,7 +1199,9 @@ export const useStore = create<State>((set, get) => {
       if (!e?.__disconnected) patch(sid, (s) => ({ ...s, seq: s.seq + 1, items: [...s.items, { id: s.id + ":" + (s.seq + 1), kind: "note", variant: "error", text: "Error: " + msg(e) }] }));
     } finally {
       setSessionBusy(sid, false);
-      patch(sid, (s) => ({ ...s, working: false }));
+      // Only the last turn in flight stops the thinking indicator: under
+      // promptQueueing a prompt sent mid-turn is still running behind this one.
+      if (!get().busySessionIds[sid]) patch(sid, (s) => ({ ...s, working: false }));
       // A refusal or a token ceiling is still the turn finishing on its own, so
       // those drain. A cancel is the user saying "not this" — the queue stays
       // parked on the rail, where they can send, edit or drop it themselves.
@@ -1370,7 +1399,7 @@ export const useStore = create<State>((set, get) => {
       // rateLimits carries over: it's keyed by account and polled independent
       // of which agent is active, so a different provider's quota is still valid.
       sessions: {}, activeId: null,
-      promptCapabilities: {}, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: true,
+      promptCapabilities: {}, promptQueueing: false, pendingPermissions: [], busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: true,
       promptStateRevision: get().promptStateRevision + 1,
     });
     openConnection();
@@ -1436,6 +1465,11 @@ export const useStore = create<State>((set, get) => {
               // `session/fork`; absent when it doesn't. claude-agent-acp does,
               // codex-acp bundles the schema but has no handler.
               sessionCapabilities?: { fork?: unknown };
+              // claude-agent-acp's marker for "a prompt sent mid-turn is accepted
+              // and queued onto my own input", the one capability that lets the
+              // composer send while a turn runs. Namespaced under `_meta` because
+              // it is the CLI's extension, not part of ACP proper.
+              _meta?: { claudeCode?: { promptQueueing?: boolean } };
             };
           } | undefined;
           // The agent's capabilities flow through the gateway unchanged. Gate image
@@ -1451,6 +1485,7 @@ export const useStore = create<State>((set, get) => {
           set((st) => ({
             agentReady: true, tip: "",
             promptCapabilities: init?.agentCapabilities?.promptCapabilities ?? {},
+            promptQueueing: init?.agentCapabilities?._meta?.claudeCode?.promptQueueing === true,
             cfg: {
               ...st.cfg,
               agents: st.cfg.agents.map((a) => (a.name === st.agentName
@@ -1532,6 +1567,7 @@ export const useStore = create<State>((set, get) => {
     sessions: {}, activeId: null, sideWindows: [],
     rateLimits: {}, quotaUnlimited: {}, quotaUnavailable: {},
     promptCapabilities: {},
+    promptQueueing: false,
     pendingPermissions: [],
     promptStateRevision: 0,
     autoApprove: false, textSize: initialTextSize, busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {},
@@ -1638,7 +1674,7 @@ export const useStore = create<State>((set, get) => {
         // the new connection — reopen from the sidebar under the agent that owns
         // them, which is the same rule the "Open as side chat" row is gated on.
         sideWindows: [],
-        promptCapabilities: {}, busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: false,
+        promptCapabilities: {}, promptQueueing: false, busy: false, busySessionIds: {}, queuedPrompts: {}, shellStash: {}, joining: false,
         promptStateRevision: get().promptStateRevision + 1,
       });
       openConnection();
@@ -2075,6 +2111,7 @@ export const useStore = create<State>((set, get) => {
           set({ tip: "Starting session…" });
           const ns = (await initSession()) as NewSessionResult;
           if (!ns?.sessionId) throw new Error("no session id");
+          remapSessionBusy(activeId!, ns.sessionId);
           set((st) => {
             const old = st.sessions[activeId!];
             const remapped = remapSession(old, ns.sessionId);
@@ -2115,6 +2152,7 @@ export const useStore = create<State>((set, get) => {
             set({ tip: "Starting session…" });
             const ns = (await initSession()) as NewSessionResult;
             if (!ns?.sessionId) throw new Error("no session id");
+            remapSessionBusy(activeId!, ns.sessionId);
             set((st) => {
               const old = st.sessions[activeId!];
               const remapped = remapSession(old, ns.sessionId);
@@ -2165,7 +2203,12 @@ export const useStore = create<State>((set, get) => {
       // shows a waiting strip instead of a composer; this is the belt to that
       // braces, for any other caller.
       if (!target || target.viewOnly || sessionId.startsWith("pending-") || !get().agentReady) return false;
-      if (get().busySessionIds[sessionId]) return false;
+      // A second prompt mid-turn is the agent's business when it queues prompts
+      // itself: it takes the message now and reads it when it reaches a seam.
+      // Agents without that capability must not be handed one — codex-acp would
+      // overwrite its single active prompt and orphan the running turn — so for
+      // those the composer parks it on the rail instead.
+      if (get().busySessionIds[sessionId] && !get().promptQueueing) return false;
       const imgs = get().promptCapabilities.image ? (images || []) : [];
       const refs = get().promptCapabilities.embeddedContext ? (files || []) : [];
       if (!text.trim() && !imgs.length && !refs.length) return false;
