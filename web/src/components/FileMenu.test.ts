@@ -139,7 +139,8 @@ describe("FileMenu", () => {
       root = createRoot(container);
       root.render(React.createElement(FileMenu, {
         target: TARGET, canAttach: true,
-        onAttach: vi.fn(), onOpen: vi.fn(), onCopyPath: vi.fn(), onClose: vi.fn(),
+        onAttach: vi.fn(), onOpen: vi.fn(), onDownload: vi.fn(async () => {}),
+        onCopyPath: vi.fn(), onClose: vi.fn(),
         ...props,
       }));
     });
@@ -152,7 +153,7 @@ describe("FileMenu", () => {
     await render();
     expect(container.querySelector(".wf-menu-head .nm")?.textContent).toBe("FileTree.tsx");
     expect(container.querySelector(".wf-menu-head .dir")?.textContent).toBe("web/src");
-    expect(labels()).toEqual(["Add to chat", "Open", "Copy path"]);
+    expect(labels()).toEqual(["Add to chat", "Open", "Download", "Copy path"]);
   });
 
   test("picking an action runs it and closes the menu", async () => {
@@ -170,11 +171,14 @@ describe("FileMenu", () => {
   test("no 'Add to chat' when the agent takes no file references", async () => {
     // Offering it would produce a chip the send path silently drops.
     await render({ canAttach: false });
-    expect(labels()).toEqual(["Open", "Copy path"]);
+    expect(labels()).toEqual(["Open", "Download", "Copy path"]);
   });
 
   test("a folder is a path to copy, not a file to attach or open", async () => {
-    await render({ target: { ...TARGET, name: "components", isDir: true }, onOpen: undefined });
+    await render({
+      target: { ...TARGET, name: "components", isDir: true },
+      onOpen: undefined, onDownload: undefined,
+    });
     expect(labels()).toEqual(["Copy path"]);
   });
 
@@ -183,5 +187,34 @@ describe("FileMenu", () => {
     await render({ onClose });
     await act(async () => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  const download = () => [...container.querySelectorAll<HTMLButtonElement>(".wf-menu-row")]
+    .find((b) => /Download/.test(b.textContent ?? ""))!;
+
+  test("downloading saves the file, then closes the menu", async () => {
+    // Unlike the other rows this one runs BEFORE closing: the save is a fetch,
+    // and a menu that vanished has nowhere to report that it failed.
+    const onDownload = vi.fn(async () => {});
+    const onClose = vi.fn();
+    await render({ onDownload, onClose });
+    await act(async () => { download().dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(onDownload).toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  test("a failed save stays on screen and says so, so it can be retried", async () => {
+    const onDownload = vi.fn(async () => { throw new Error("outside root"); });
+    const onClose = vi.fn();
+    await render({ onDownload, onClose });
+    await act(async () => { download().dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await act(async () => { await flush(); });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(download().textContent).toContain("Download failed");
+    expect(download().className).toContain("failed");
+
+    await act(async () => { download().dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(onDownload).toHaveBeenCalledTimes(2);
   });
 });
