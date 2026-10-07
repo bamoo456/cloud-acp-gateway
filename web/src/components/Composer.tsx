@@ -97,8 +97,8 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   const canReferenceFiles = !!s.promptCapabilities.embeddedContext;
   const canAttach = canAttachImages || canReferenceFiles;
   const hasContent = !!text.trim() || images.length > 0 || files.length > 0;
-  // Mid-turn the button queues instead of sending, but it wants exactly the same
-  // things: something to say, an agent to say it to, no upload still landing.
+  // Mid-turn the button may queue instead of sending, but it wants exactly the
+  // same things: something to say, an agent to say it to, no upload still landing.
   const canSend = hasContent && s.agentReady && !uploading;
   // A branch is a send into a conversation that does not exist yet, so it wants
   // the same thing send does: something to say. A branch of a conversation
@@ -144,6 +144,13 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
   const shellMode = !!s.cfg.terminalEnabled && !!targetId && text.startsWith("!");
   // Mid-turn with something ready to send, the stop button becomes interrupt.
   const cutting = activeBusy && canSend && !shellMode;
+  // Mid-turn, does the message go out now or wait HERE? It goes out when the agent
+  // takes a second prompt while its turn runs — except into a conversation whose
+  // session/new is still in flight: sendPromptTo refuses a provisional id, and a
+  // refusal here would eat the message (the box is already cleared). That one
+  // parks like a non-queueing agent and rides remapQueue over to the real id.
+  const sendsNow = activeBusy && !!targetId && s.promptQueueing && !targetId.startsWith("pending-");
+  const parks = activeBusy && !sendsNow;
   const placeholder = `Reply to ${GLYPH_LABEL[activeAgentGlyph(s)] ?? s.agentName}…`;
   const fileMenuOpen = fileQuery !== null && fileItems.length > 0;
   // Commands filtered by what's been typed after "/". The menu is shown whenever
@@ -388,13 +395,18 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
     }
     const t = text; const imgs = images; const refs = files;
     // Enter on an empty box mid-turn keeps its old meaning: stop. With something
-    // typed, Enter QUEUES — interrupting is the button beside it, because cutting a
-    // running turn should cost a deliberate tap rather than a reflex keystroke.
+    // typed, Enter SENDS — to the agent's own queue or onto the rail below, never
+    // cutting the running turn: interrupting is the button beside it, because that
+    // should cost a deliberate tap rather than a reflex keystroke.
     if (!t.trim() && !imgs.length && !refs.length) { if (activeBusy) stop(); return; }
     setText(""); setImages([]); clearFiles(); setFileQuery(null); setCmdQuery(null);
     // The box is cleared above, so from here the store holds the only copy either
     // way — queuePrompt keeps it until the running turn ends.
-    if (activeBusy && targetId) s.queuePrompt(targetId, { text: t, images: imgs, files: refs });
+    // An agent that queues prompts itself gets the message straight away, running
+    // turn and all: it lands on the agent's input rather than in this tab, and the
+    // agent reads it when it reaches a seam. The rail is for the agents that can't.
+    if (sendsNow && targetId) s.sendPromptTo(targetId, t, imgs, refs);
+    else if (activeBusy && targetId) s.queuePrompt(targetId, { text: t, images: imgs, files: refs });
     else if (sessionId) s.sendPromptTo(sessionId, t, imgs, refs);
     else s.sendPrompt(t, imgs, refs);
   }
@@ -579,9 +591,9 @@ export function Composer({ sessionId, compact }: { sessionId?: string; compact?:
             ? <button className="send stop" title="Interrupt and send now" onClick={interrupt}><IconStop />interrupt</button>
             : <button className="send stop" title="Stop" onClick={stop}><IconStop />stop</button>
           )}
-          <button className="send" title={activeBusy ? "Queue for after this turn" : "Send"}
+          <button className="send" title={parks ? "Queue for after this turn" : "Send"}
             disabled={!canSend} onClick={submit}>
-            {shellMode ? <>run<IconTerminal /></> : activeBusy ? <>queue<IconClock /></> : <>send<IconSend /></>}
+            {shellMode ? <>run<IconTerminal /></> : parks ? <>queue<IconClock /></> : <>send<IconSend /></>}
           </button>
         </div>
       </div>
