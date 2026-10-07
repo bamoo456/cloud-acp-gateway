@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IconAddToChat, IconFile, IconFolder, IconCopy } from "../lib/icons.tsx";
+import { IconAddToChat, IconFile, IconFolder, IconCopy, IconDownload, IconSpinner } from "../lib/icons.tsx";
 
 // The file panel's context menu: what you can do with a row other than open it.
 //
@@ -84,13 +84,13 @@ export function useRowMenu(open: (x: number, y: number) => void) {
 }
 
 // Roughly what the menu measures, for keeping it on screen. Exact enough: the
-// menu has a fixed width and three rows at most, and being a few pixels out
+// menu has a fixed width and four rows at most, and being a few pixels out
 // only matters within a few pixels of an edge.
 const MENU_W = 214;
-const MENU_H = 220;
+const MENU_H = 264;
 const SHEET_QUERY = "(max-width: 640px)"; // matches .amenu's own sheet breakpoint
 
-export function FileMenu({ target, canAttach, onAttach, onOpen, onCopyPath, onClose }: {
+export function FileMenu({ target, canAttach, onAttach, onOpen, onDownload, onCopyPath, onClose }: {
   target: FileMenuTarget;
   // False when the agent takes no file references at all — the same capability
   // the composer's "@" button is gated on. Attaching a chip the send path would
@@ -100,6 +100,8 @@ export function FileMenu({ target, canAttach, onAttach, onOpen, onCopyPath, onCl
   // Absent for a folder: expanding one is the row's own click, and this menu
   // has no way to reach into the level that owns that state.
   onOpen?: () => void;
+  // Saves the file to the device. Absent for a folder — there are no bytes.
+  onDownload?: () => Promise<void>;
   onCopyPath: () => void;
   onClose: () => void;
 }) {
@@ -142,10 +144,34 @@ export function FileMenu({ target, canAttach, onAttach, onOpen, onCopyPath, onCl
             {target.isDir ? <IconFolder /> : <IconFile />}<span>Open</span>
           </button>
         )}
+        {onDownload && <DownloadRow run={onDownload} onDone={onClose} />}
         <button className="wf-menu-row" role="menuitem" onClick={pick(onCopyPath)}>
           <IconCopy /><span>Copy path</span>
         </button>
       </div>
     </>
+  );
+}
+
+// The one row that can't just run and close: the bytes are fetched (see
+// lib/download.ts — a direct link at an attachment tears the native client's
+// WKWebView down), so the menu has to stay up long enough to report a failure.
+// The commonest one is a file outside ACPG_FS_ROOT, which without this looks
+// exactly like a row that does nothing. The label carries the failure, not just
+// a title attribute: this menu is opened by long press as often as by
+// right-click, and a tooltip says nothing to a finger.
+function DownloadRow({ run, onDone }: { run: () => Promise<void>; onDone: () => void }) {
+  const [state, setState] = useState<"idle" | "busy" | "failed">("idle");
+  return (
+    <button type="button" role="menuitem" disabled={state === "busy"}
+      className={"wf-menu-row" + (state === "failed" ? " failed" : "")}
+      onClick={() => {
+        if (state === "busy") return;
+        setState("busy");
+        run().then(onDone, () => setState("failed"));
+      }}>
+      {state === "busy" ? <IconSpinner /> : <IconDownload />}
+      <span>{state === "failed" ? "Download failed — retry" : "Download"}</span>
+    </button>
   );
 }
